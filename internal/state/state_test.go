@@ -51,3 +51,26 @@ func TestInvalidEnv(t *testing.T) {
 		t.Fatal("expected invalid env error")
 	}
 }
+
+func TestEffectiveFirewallDisabled(t *testing.T) {
+	tests := []struct {
+		name    string
+		global  string
+		project string
+		want    bool
+	}{
+		{name: "default enabled", want: false},
+		{name: "global disabled", global: FirewallDisabled, want: true},
+		{name: "project disabled", project: FirewallDisabled, want: true},
+		{name: "project enabled overrides global disabled", global: FirewallDisabled, project: FirewallEnabled, want: false},
+		{name: "project inherit uses global", global: FirewallDisabled, project: FirewallInherit, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EffectiveFirewallDisabled(GlobalConfig{FirewallMode: tt.global}, ProjectConfig{FirewallMode: tt.project})
+			if got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
