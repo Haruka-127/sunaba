@@ -19,6 +19,10 @@ import (
 const (
 	DefaultCPUs   = 4
 	DefaultMemory = "8g"
+
+	FirewallEnabled  = "enabled"
+	FirewallDisabled = "disabled"
+	FirewallInherit  = "inherit"
 )
 
 type Store struct {
@@ -27,6 +31,7 @@ type Store struct {
 
 type GlobalConfig struct {
 	ImageVersion string `json:"image_version"`
+	FirewallMode string `json:"firewall_mode,omitempty"`
 }
 
 type ProjectConfig struct {
@@ -36,6 +41,7 @@ type ProjectConfig struct {
 	CPUs         int       `json:"cpus"`
 	Memory       string    `json:"memory"`
 	Proxy        string    `json:"proxy"`
+	FirewallMode string    `json:"firewall_mode,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 
@@ -82,6 +88,41 @@ func ResolveProjectPath(path string) (string, error) {
 func ProjectID(path string) string {
 	sum := sha256.Sum256([]byte(path))
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+func NormalizeGlobalFirewallMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", FirewallEnabled:
+		return FirewallEnabled, nil
+	case FirewallDisabled:
+		return FirewallDisabled, nil
+	default:
+		return "", fmt.Errorf("invalid global firewall mode %q; use enabled or disabled", mode)
+	}
+}
+
+func NormalizeProjectFirewallMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", FirewallInherit:
+		return FirewallInherit, nil
+	case FirewallEnabled:
+		return FirewallEnabled, nil
+	case FirewallDisabled:
+		return FirewallDisabled, nil
+	default:
+		return "", fmt.Errorf("invalid project firewall mode %q; use inherit, enabled, or disabled", mode)
+	}
+}
+
+func EffectiveFirewallDisabled(global GlobalConfig, project ProjectConfig) bool {
+	switch projectMode, _ := NormalizeProjectFirewallMode(project.FirewallMode); projectMode {
+	case FirewallDisabled:
+		return true
+	case FirewallEnabled:
+		return false
+	}
+	globalMode, _ := NormalizeGlobalFirewallMode(global.FirewallMode)
+	return globalMode == FirewallDisabled
 }
 
 func (s *Store) Init() error {

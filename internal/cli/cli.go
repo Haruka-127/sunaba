@@ -56,6 +56,8 @@ func Run(ctx context.Context, args []string) error {
 		return a.list(ctx)
 	case "env":
 		return a.env(ctx, args[1:])
+	case "config":
+		return a.config(ctx, args[1:])
 	case "firewall":
 		return a.firewall(ctx, args[1:])
 	case "logs":
@@ -102,10 +104,11 @@ func (a *app) up(ctx context.Context, args []string) error {
 func (a *app) shell(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("shell", flag.ContinueOnError)
 	dir := fs.String("dir", ".", "project directory")
+	noFirewall := fs.Bool("no-firewall", false, "start without host firewall")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	p, _, _, _, err := a.ensureRunning(ctx, *dir, 0, "", false)
+	p, _, _, _, err := a.ensureRunning(ctx, *dir, 0, "", *noFirewall)
 	if err != nil {
 		return err
 	}
@@ -195,7 +198,12 @@ func (a *app) update(ctx context.Context, args []string) error {
 	if err := image.Build(ctx, a.rt, v); err != nil {
 		return err
 	}
-	if err := a.store.SaveGlobal(state.GlobalConfig{ImageVersion: v}); err != nil {
+	cfg, err := a.store.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	cfg.ImageVersion = v
+	if err := a.store.SaveGlobal(cfg); err != nil {
 		return err
 	}
 	fmt.Printf("Built %s. Existing environments will use it after reset.\n", image.Tag(v))
@@ -213,14 +221,20 @@ func (a *app) status(ctx context.Context, args []string) error {
 		return err
 	}
 	g, _ := a.store.LoadGlobal()
+	projectFirewall, _ := state.NormalizeProjectFirewallMode(p.Cfg.FirewallMode)
+	globalFirewall, _ := state.NormalizeGlobalFirewallMode(g.FirewallMode)
+	effectiveFirewall := state.FirewallEnabled
+	if state.EffectiveFirewallDisabled(g, p.Cfg) {
+		effectiveFirewall = state.FirewallDisabled
+	}
 	info, err := a.rt.Inspect(ctx, p.Cfg.Container)
 	if err != nil {
 		info = runtime.Info{Name: p.Cfg.Container, State: runtime.StateNotFound}
 	}
 	hostVer, _ := opencode.HostVersion(ctx)
 	fw, _ := firewall.Status(ctx)
-	fmt.Printf("Project: %s\nProject ID: %s\nState dir: %s\nContainer: %s (%s)\nIP: %s\nImage version: %s\nLatest image: %s\nHost opencode: %s\nFirewall: %s\nAudit: %v\nLogs: %s\n",
-		p.Cfg.Path, p.ID, p.Dir, p.Cfg.Container, info.State, info.IP, p.Cfg.ImageVersion, g.ImageVersion, hostVer, firstLine(fw), audit.Running(p.AuditPIDPath()), p.AuditLogDir())
+	fmt.Printf("Project: %s\nProject ID: %s\nState dir: %s\nContainer: %s (%s)\nIP: %s\nImage version: %s\nLatest image: %s\nHost opencode: %s\nFirewall config: effective=%s project=%s global=%s\nFirewall: %s\nAudit: %v\nLogs: %s\n",
+		p.Cfg.Path, p.ID, p.Dir, p.Cfg.Container, info.State, info.IP, p.Cfg.ImageVersion, g.ImageVersion, hostVer, effectiveFirewall, projectFirewall, globalFirewall, firstLine(fw), audit.Running(p.AuditPIDPath()), p.AuditLogDir())
 	if info.IP != "" {
 		if pass, err := p.Password(); err == nil {
 			if h, err := opencode.GetHealth(ctx, "http://"+info.IP+":4096", pass); err == nil {
@@ -291,6 +305,119 @@ func (a *app) env(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown env action %q", rest[0])
 	}
+	return nil
+}
+
+func (a *app) config(_ context.Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: sunaba config firewall [enabled|disabled|inherit] [--global] [--dir PATH]")
+	}
+	switch args[0] {
+	case "firewall":
+		return a.configFirewall(args[1:])
+	default:
+		return fmt.Errorf("unknown config key %q", args[0])
+	}
+}
+
+func (a *app) configFirewall(args []string) error {
+	mode := ""
+	dir := "."
+	globalScope := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--global":
+			globalScope = true
+		case "--dir":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--dir requires a value")
+			}
+			dir = args[i+1]
+			i++
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return fmt.Errorf("unknown config firewall option %q", args[i])
+			}
+			if mode != "" {
+				return fmt.Errorf("usage: sunaba config firewall [enabled|disabled|inherit] [--global] [--dir PATH]")
+			}
+			mode = args[i]
+		}
+	}
+	if globalScope {
+		return a.configGlobalFirewall(mode)
+	}
+	return a.configProjectFirewall(dir, mode)
+}
+
+func (a *app) configGlobalFirewall(mode string) error {
+	cfg, err := a.store.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	if mode == "" {
+		current, err := state.NormalizeGlobalFirewallMode(cfg.FirewallMode)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Global firewall: %s\n", current)
+		return nil
+	}
+	normalized, err := state.NormalizeGlobalFirewallMode(mode)
+	if err != nil {
+		return err
+	}
+	cfg.FirewallMode = normalized
+	if err := a.store.SaveGlobal(cfg); err != nil {
+		return err
+	}
+	if normalized == state.FirewallDisabled {
+		fmt.Println("Global firewall: disabled. Projects inherit this unless they set firewall enabled.")
+	} else {
+		fmt.Println("Global firewall: enabled.")
+	}
+	return nil
+}
+
+func (a *app) configProjectFirewall(dir, mode string) error {
+	p, _, err := a.project(dir)
+	if err != nil {
+		return err
+	}
+	global, err := a.store.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	if mode == "" {
+		projectMode, err := state.NormalizeProjectFirewallMode(p.Cfg.FirewallMode)
+		if err != nil {
+			return err
+		}
+		globalMode, _ := state.NormalizeGlobalFirewallMode(global.FirewallMode)
+		effective := state.FirewallEnabled
+		if state.EffectiveFirewallDisabled(global, p.Cfg) {
+			effective = state.FirewallDisabled
+		}
+		fmt.Printf("Project: %s\nProject firewall: %s\nGlobal firewall: %s\nEffective firewall: %s\n", p.Cfg.Path, projectMode, globalMode, effective)
+		return nil
+	}
+	normalized, err := state.NormalizeProjectFirewallMode(mode)
+	if err != nil {
+		return err
+	}
+	if normalized == state.FirewallInherit {
+		p.Cfg.FirewallMode = ""
+	} else {
+		p.Cfg.FirewallMode = normalized
+	}
+	if err := p.Save(); err != nil {
+		return err
+	}
+	effective := state.FirewallEnabled
+	if state.EffectiveFirewallDisabled(global, p.Cfg) {
+		effective = state.FirewallDisabled
+	}
+	fmt.Printf("Project firewall: %s. Effective firewall: %s\n", normalized, effective)
 	return nil
 }
 
@@ -404,8 +531,12 @@ func (a *app) ensureRunning(ctx context.Context, dir string, cpus int, memory st
 	if err != nil {
 		return nil, "", "", first, err
 	}
+	global, _ := a.store.LoadGlobal()
+	configDisablesFirewall := state.EffectiveFirewallDisabled(global, p.Cfg)
 	if noFirewall {
 		fmt.Fprintln(os.Stderr, "warning: firewall disabled by --no-firewall; container may reach host services")
+	} else if configDisablesFirewall {
+		fmt.Fprintln(os.Stderr, "warning: firewall disabled by configuration; container may reach host services")
 	} else if !firewall.IsLoaded(ctx) {
 		n, err := firewall.Detect(ctx, a.store.Root, ip)
 		if err != nil {
@@ -423,7 +554,6 @@ func (a *app) ensureRunning(ctx context.Context, dir string, cpus int, memory st
 	if host, err := opencode.HostVersion(ctx); err == nil && h.Version != "" && host != h.Version {
 		fmt.Fprintf(os.Stderr, "warning: host opencode version %s differs from server version %s\n", host, h.Version)
 	}
-	global, _ := a.store.LoadGlobal()
 	if global.ImageVersion != "" && p.Cfg.ImageVersion != "" && p.Cfg.ImageVersion != global.ImageVersion {
 		fmt.Fprintln(os.Stderr, "warning: a newer/different image is available. Run 'sunaba reset' to apply it.")
 	}
@@ -517,13 +647,14 @@ func extractDir(args []string) (string, []string, error) {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, `sunaba commands:
   up [--dir PATH] [--cpus N] [--memory SIZE] [--no-attach] [--no-firewall]
-  shell [--dir PATH]
+  shell [--dir PATH] [--no-firewall]
   stop [--dir PATH]
   reset [--dir PATH] [--full] [--yes]
   update [--opencode-version X.Y.Z]
   status [--dir PATH]
   list
   env set KEY=VALUE... | unset KEY... | list [--dir PATH]
+  config firewall [enabled|disabled|inherit] [--global] [--dir PATH]
   firewall enable | disable | status
   logs [--dir PATH] [-f]`)
 }
