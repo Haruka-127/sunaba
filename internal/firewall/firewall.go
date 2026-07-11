@@ -32,7 +32,12 @@ type Network struct {
 type livePFState struct {
 	Enabled    bool
 	MainAnchor bool
-	ChildBlock bool
+	IPv4Block  bool
+	IPv6Block  bool
+}
+
+func (s livePFState) loaded() bool {
+	return s.Enabled && s.MainAnchor && s.IPv4Block && s.IPv6Block
 }
 
 type fileSnapshot struct {
@@ -47,7 +52,8 @@ pass in quick on %s inet proto udp from any port 68 to any port 67
 pass in quick on %s inet proto { tcp udp } from %s to %s port 53
 pass in quick on %s inet proto tcp from %s to self flags A/A
 block drop in quick on %s inet from %s to self
-`, n.Interface, n.Interface, n.Subnet, n.Gateway, n.Interface, n.Subnet, n.Interface, n.Subnet)
+block drop in quick on %s inet6 from any to self
+`, n.Interface, n.Interface, n.Subnet, n.Gateway, n.Interface, n.Subnet, n.Interface, n.Subnet, n.Interface)
 }
 
 func ValidateNetwork(n Network) error {
@@ -146,7 +152,7 @@ func Enable(ctx context.Context, n Network) error {
 	}
 	mainChanged := false
 	if HasAnchorBlock(string(conf)) {
-		live, err := inspectLivePF(ctx)
+		live, err := inspectLivePF(ctx, n)
 		if err != nil {
 			rollbackAnchor()
 			return err
@@ -181,7 +187,7 @@ func Enable(ctx context.Context, n Network) error {
 			return err
 		}
 	}
-	live, err := inspectLivePF(ctx)
+	live, err := inspectLivePF(ctx, n)
 	if err != nil {
 		return err
 	}
@@ -194,12 +200,12 @@ func Enable(ctx context.Context, n Network) error {
 			return err
 		}
 	}
-	live, err = inspectLivePF(ctx)
-	if err != nil || !live.Enabled || !live.MainAnchor || !live.ChildBlock {
+	live, err = inspectLivePF(ctx, n)
+	if err != nil || !live.loaded() {
 		if err != nil {
 			return fmt.Errorf("cannot verify enabled firewall: %w", err)
 		}
-		return fmt.Errorf("cannot verify enabled firewall: enabled=%t main-anchor=%t child-block=%t", live.Enabled, live.MainAnchor, live.ChildBlock)
+		return fmt.Errorf("cannot verify enabled firewall: enabled=%t main-anchor=%t ipv4-block=%t ipv6-block=%t", live.Enabled, live.MainAnchor, live.IPv4Block, live.IPv6Block)
 	}
 	return nil
 }
@@ -229,22 +235,30 @@ func Disable(ctx context.Context) error {
 }
 
 func Status(ctx context.Context) (string, error) {
-	live, err := inspectLivePF(ctx)
+	n, ok := networkInspect(ctx)
+	if !ok {
+		return "sunaba firewall: status unavailable", fmt.Errorf("cannot inspect default container network")
+	}
+	live, err := inspectLivePF(ctx, n)
 	if err != nil {
 		return "sunaba firewall: status unavailable", err
 	}
-	if live.Enabled && live.MainAnchor && live.ChildBlock {
+	if live.loaded() {
 		return "sunaba firewall: loaded", nil
 	}
-	return fmt.Sprintf("sunaba firewall: not loaded (pf-enabled=%t main-anchor=%t child-block=%t)", live.Enabled, live.MainAnchor, live.ChildBlock), nil
+	return fmt.Sprintf("sunaba firewall: not loaded (pf-enabled=%t main-anchor=%t ipv4-block=%t ipv6-block=%t)", live.Enabled, live.MainAnchor, live.IPv4Block, live.IPv6Block), nil
 }
 
 func IsLoaded(ctx context.Context) bool {
-	live, err := inspectLivePF(ctx)
-	return err == nil && live.Enabled && live.MainAnchor && live.ChildBlock
+	n, ok := networkInspect(ctx)
+	if !ok {
+		return false
+	}
+	live, err := inspectLivePF(ctx, n)
+	return err == nil && live.loaded()
 }
 
-func inspectLivePF(ctx context.Context) (livePFState, error) {
+func inspectLivePF(ctx context.Context, n Network) (livePFState, error) {
 	info, err := pfctlOutput(ctx, "-s", "info")
 	if err != nil {
 		return livePFState{}, err
@@ -257,15 +271,67 @@ func inspectLivePF(ctx context.Context) (livePFState, error) {
 	if err != nil {
 		return livePFState{}, err
 	}
-	return parseLivePFState(info, mainRules, childRules), nil
+	configuredRules, err := os.ReadFile(anchorPath)
+	if err != nil {
+		return livePFState{}, fmt.Errorf("cannot read %s: %w", anchorPath, err)
+	}
+	return parseLivePFState(info, mainRules, childRules, string(configuredRules), n), nil
 }
 
-func parseLivePFState(info, mainRules, childRules string) livePFState {
+func parseLivePFState(info, mainRules, childRules, configuredRules string, n Network) livePFState {
 	return livePFState{
 		Enabled:    strings.Contains(strings.ToLower(info), "status: enabled"),
 		MainAnchor: strings.Contains(mainRules, `anchor "sunaba"`),
-		ChildBlock: strings.Contains(childRules, "block drop"),
+		IPv4Block: hasConfiguredBlockRule(configuredRules, n.Interface, "inet", n.Subnet) &&
+			hasLiveBlockRule(childRules, n.Interface, "inet", n.Subnet),
+		IPv6Block: hasConfiguredBlockRule(configuredRules, n.Interface, "inet6", "any") &&
+			hasLiveBlockRule(childRules, n.Interface, "inet6", "any"),
 	}
+}
+
+func hasConfiguredBlockRule(rules, iface, family, source string) bool {
+	return findBlockRule(rules, iface, family, source, true)
+}
+
+func hasLiveBlockRule(rules, iface, family, source string) bool {
+	return findBlockRule(rules, iface, family, source, false)
+}
+
+func findBlockRule(rules, iface, family, source string, requireSelf bool) bool {
+	for _, line := range strings.Split(rules, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 10 || fields[0] != "block" || fields[1] != "drop" {
+			continue
+		}
+		matches := containsFieldSequence(fields, "on", iface) &&
+			containsFieldSequence(fields, family, "from", source)
+		if requireSelf {
+			matches = matches && (containsFieldSequence(fields, "to", "self") || containsFieldSequence(fields, "to", "(self)"))
+		}
+		if matches {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFieldSequence(fields []string, sequence ...string) bool {
+	if len(sequence) == 0 || len(sequence) > len(fields) {
+		return false
+	}
+	for i := 0; i <= len(fields)-len(sequence); i++ {
+		matched := true
+		for j := range sequence {
+			if fields[i+j] != sequence[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 func rerunWithSudo(action string) error {
