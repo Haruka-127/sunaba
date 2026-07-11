@@ -49,6 +49,7 @@ CID="$("$BIN" status --dir "$PROJECT" | awk '/^Container:/ {print $2}')"
 IP="$("$BIN" status --dir "$PROJECT" | awk '/^IP:/ {print $2}')"
 STATE_DIR="$("$BIN" status --dir "$PROJECT" | awk '/^State dir:/ {$1=$2=""; sub(/^  */, ""); print}')"
 PASSWD="$(tr -d '\n' <"$STATE_DIR/server-password")"
+URL="http://$IP:4096"
 
 container exec "$CID" test -d "$PROJECT"
 pass "A4 identical absolute path mount"
@@ -69,9 +70,13 @@ fi
 curl -fsS -u "opencode:$PASSWD" "http://$IP:4096/global/health" | grep -q version
 pass "A6 password-protected health"
 
-pending "A7" "requires configured LLM credentials/model for opencode run"
+OPENCODE_SERVER_PASSWORD="$PASSWD" OPENCODE_SERVER_USERNAME=opencode \
+  opencode run --attach "$URL" --dir "$PROJECT" --auto \
+  "Create a file named sunaba-a7.txt in the project root containing exactly: approved" >/dev/null
+test "$(tr -d '\r\n' <"$PROJECT/sunaba-a7.txt")" = "approved"
+pass "A7 automatic approval"
 
-python3 -m http.server 18080 --directory "$TMP" >/tmp/sunaba-http.log 2>&1 &
+python3 -m http.server 18080 --directory "$TMP" >"$TMP/http.log" 2>&1 &
 HTTP_PID=$!
 GW="$(container network inspect default | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["status"]["ipv4Gateway"])')"
 if container exec "$CID" curl -m 5 -fsS "http://$GW:18080" >/dev/null 2>&1; then
@@ -88,15 +93,45 @@ pass "A9 internet and DNS"
 curl -fsS -u "opencode:$PASSWD" "http://$IP:4096/global/health" >/dev/null
 pass "A10 host-to-container allowed"
 
-if compgen -G "$STATE_DIR/logs/audit-*.jsonl" >/dev/null; then
-  python3 -m json.tool "$(ls "$STATE_DIR"/logs/audit-*.jsonl | head -n1)" >/dev/null || true
-  pass "A11 audit log exists"
-else
-  pending "A11" "no event emitted during verification"
-fi
+for _ in {1..20}; do
+  compgen -G "$STATE_DIR/logs/audit-*.jsonl" >/dev/null && break
+  sleep 0.5
+done
+LOG_FILE="$(ls "$STATE_DIR"/logs/audit-*.jsonl 2>/dev/null | head -n1)"
+test -n "$LOG_FILE"
+python3 - "$LOG_FILE" <<'PY'
+import json, sys
+lines = [line for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+if not lines:
+    raise SystemExit("audit log is empty")
+for line in lines:
+    json.loads(line)
+PY
+pass "A11 valid JSONL audit log"
 
-pending "A12" "skipped to avoid apt network/package mutation in default verification"
-pending "A13" "requires creating opencode session through configured model"
+container exec "$CID" sudo apt-get update >/dev/null
+container exec "$CID" sudo apt-get install -y sl >/dev/null
+"$BIN" stop --dir "$PROJECT"
+"$BIN" up --dir "$PROJECT" --no-attach
+IP="$("$BIN" status --dir "$PROJECT" | awk '/^IP:/ {print $2}')"
+URL="http://$IP:4096"
+container exec "$CID" test -x /usr/games/sl
+pass "A12 writable container filesystem persists across stop/start"
+
+SESSION_COUNT_BEFORE="$(curl -fsS -u "opencode:$PASSWD" "$URL/session" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+test "$SESSION_COUNT_BEFORE" -ge 1
+container exec "$CID" touch /home/agent/marker
+"$BIN" reset --dir "$PROJECT" --yes
+"$BIN" up --dir "$PROJECT" --no-attach
+CID="$("$BIN" status --dir "$PROJECT" | awk '/^Container:/ {print $2}')"
+IP="$("$BIN" status --dir "$PROJECT" | awk '/^IP:/ {print $2}')"
+URL="http://$IP:4096"
+if container exec "$CID" test -e /home/agent/marker; then
+  fail "A13" "container filesystem marker survived reset"
+fi
+SESSION_COUNT_AFTER="$(curl -fsS -u "opencode:$PASSWD" "$URL/session" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+test "$SESSION_COUNT_AFTER" -ge "$SESSION_COUNT_BEFORE"
+pass "A13 normal reset preserves sessions only"
 
 OLD_PASS="$PASSWD"
 "$BIN" reset --dir "$PROJECT" --full --yes
@@ -121,10 +156,23 @@ pass "A17 non-root server"
 container exec "$CID" grep -q '"autoupdate": false' /home/agent/.config/opencode/opencode.json
 test "$(container exec "$CID" printenv OPENCODE_DISABLE_AUTOUPDATE)" = "1"
 pass "A18 autoupdate disabled"
-STATUS_OUT="$("$BIN" status --dir "$PROJECT")"
-grep -q "Image version:" <<<"$STATUS_OUT"
-pass "A19 resource limits status available"
+container inspect "$CID" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+if isinstance(data, list): data = data[0]
+resources = data["configuration"]["resources"]
+assert resources["cpus"] == 4, resources
+assert resources["memoryInBytes"] == 8 * 1024**3, resources
+'
+pass "A19 cpu and memory limits"
 
-pending "A20" "requires selecting a previous OpenCode version and rebuilding image"
+PREVIOUS_VERSION="${SUNABA_PREVIOUS_OPENCODE_VERSION:?set SUNABA_PREVIOUS_OPENCODE_VERSION to a valid older release for A20}"
+"$BIN" update --opencode-version "$PREVIOUS_VERSION"
+"$BIN" status --dir "$PROJECT" | grep -q "newer/different base image"
+"$BIN" reset --dir "$PROJECT" --yes
+"$BIN" up --dir "$PROJECT" --no-attach
+SERVER_VERSION="$("$BIN" status --dir "$PROJECT" | awk -F= '/^Server health:/ {print $2}')"
+test "$SERVER_VERSION" = "$PREVIOUS_VERSION"
+pass "A20 image update applied after reset"
 "$BIN" up --dir "$PROJECT" --no-attach
 pass "A21 idempotent up"

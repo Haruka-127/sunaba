@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"sunaba/internal/opencode"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 )
@@ -21,6 +23,8 @@ type Record struct {
 	TS    string          `json:"ts"`
 	Event json.RawMessage `json:"event"`
 }
+
+var directHTTPClient = opencode.DirectHTTPClient(0)
 
 func ParseSSE(sc *bufio.Scanner, emit func([]byte) error) error {
 	var data []string
@@ -51,6 +55,14 @@ func StartDaemon(p *state.Project) error {
 	if Running(p.AuditPIDPath()) {
 		return nil
 	}
+	unlock, err := acquireStartLock(p.AuditPIDPath() + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if Running(p.AuditPIDPath()) {
+		return nil
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -67,7 +79,12 @@ func StartDaemon(p *state.Project) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p.AuditPIDPath(), []byte(strconv.Itoa(proc.Pid)+"\n"), 0600)
+	if err := os.WriteFile(p.AuditPIDPath(), []byte(strconv.Itoa(proc.Pid)+"\n"), 0600); err != nil {
+		_ = proc.Kill()
+		_ = proc.Release()
+		return err
+	}
+	return proc.Release()
 }
 
 func StopDaemon(pidPath string) {
@@ -80,8 +97,20 @@ func StopDaemon(pidPath string) {
 		_ = os.Remove(pidPath)
 		return
 	}
+	projectID := filepath.Base(filepath.Dir(pidPath))
+	if !auditProcessMatches(pid, projectID) {
+		_ = os.Remove(pidPath)
+		return
+	}
 	if proc, err := os.FindProcess(pid); err == nil {
 		_ = proc.Signal(syscall.SIGTERM)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) && auditProcessMatches(pid, projectID) {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if auditProcessMatches(pid, projectID) {
+		return
 	}
 	_ = os.Remove(pidPath)
 }
@@ -95,11 +124,7 @@ func Running(pidPath string) bool {
 	if err != nil {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return auditProcessMatches(pid, filepath.Base(filepath.Dir(pidPath)))
 }
 
 func Run(ctx context.Context, st *state.Store, rt runtime.Runtime, projectID string) error {
@@ -117,6 +142,7 @@ func Run(ctx context.Context, st *state.Store, rt runtime.Runtime, projectID str
 	if p == nil {
 		return fmt.Errorf("project %s not found", projectID)
 	}
+	defer removePIDIfOwner(p.AuditPIDPath(), os.Getpid())
 	password, err := p.Password()
 	if err != nil {
 		return err
@@ -143,7 +169,13 @@ func Run(ctx context.Context, st *state.Store, rt runtime.Runtime, projectID str
 		if err == nil {
 			backoff = time.Second
 		} else {
-			time.Sleep(backoff)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
 			backoff *= 2
 			if backoff > 30*time.Second {
 				backoff = 30 * time.Second
@@ -159,7 +191,7 @@ func streamOnce(ctx context.Context, url, password, logDir string) error {
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.SetBasicAuth("opencode", password)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := directHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -190,4 +222,57 @@ func streamOnce(ctx context.Context, url, password, logDir string) error {
 		_, err = f.Write(append(b, '\n'))
 		return err
 	})
+}
+
+func acquireStartLock(path string) (func(), error) {
+	for i := 0; i < 20; i++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			_ = f.Close()
+			return func() { _ = os.Remove(path) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
+			_ = os.Remove(path)
+			continue
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timed out waiting for audit daemon start lock")
+}
+
+func auditProcessMatches(pid int, projectID string) bool {
+	if pid <= 0 || projectID == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil {
+		return false
+	}
+	return auditCommandMatches(string(out), projectID)
+}
+
+func auditCommandMatches(command, projectID string) bool {
+	fields := strings.Fields(command)
+	for i := 0; i+2 < len(fields); i++ {
+		if fields[i] == "_audit" && fields[i+1] == "--project" && fields[i+2] == projectID {
+			return true
+		}
+	}
+	return false
+}
+
+func removePIDIfOwner(path string, pid int) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	owner, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err == nil && owner == pid {
+		_ = os.Remove(path)
+	}
 }

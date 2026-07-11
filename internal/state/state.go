@@ -331,9 +331,12 @@ func ReadEnvFile(path string) (map[string]string, error) {
 
 func WriteEnvFile(path string, env map[string]string) error {
 	keys := make([]string, 0, len(env))
-	for k := range env {
+	for k, v := range env {
 		if !validEnvKey(k) {
 			return fmt.Errorf("invalid env key %q", k)
+		}
+		if !validEnvValue(v) {
+			return fmt.Errorf("invalid env value for %s: newlines and NUL bytes are not allowed", k)
 		}
 		keys = append(keys, k)
 	}
@@ -381,6 +384,11 @@ func EnvFileForContainer(p *Project, password string, extra map[string]string) (
 			cleanup()
 			return "", nil, fmt.Errorf("invalid env key %q", k)
 		}
+		if !validEnvValue(env[k]) {
+			tmp.Close()
+			cleanup()
+			return "", nil, fmt.Errorf("invalid env value for %s: newlines and NUL bytes are not allowed", k)
+		}
 		if _, err := fmt.Fprintf(tmp, "%s=%s\n", k, env[k]); err != nil {
 			tmp.Close()
 			cleanup()
@@ -410,6 +418,10 @@ func validEnvKey(k string) bool {
 		}
 	}
 	return true
+}
+
+func validEnvValue(v string) bool {
+	return !strings.ContainsAny(v, "\r\n\x00")
 }
 
 func readJSON(path string, dst any) error {
