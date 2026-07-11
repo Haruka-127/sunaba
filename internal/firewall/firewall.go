@@ -29,6 +29,18 @@ type Network struct {
 	Gateway   string `json:"gateway"`
 }
 
+type livePFState struct {
+	Enabled    bool
+	MainAnchor bool
+	ChildBlock bool
+}
+
+type fileSnapshot struct {
+	data   []byte
+	mode   os.FileMode
+	exists bool
+}
+
 func GenerateRules(n Network) string {
 	return fmt.Sprintf(`# Managed by sunaba. Do not edit.
 pass in quick on %s inet proto udp from any port 68 to any port 67
@@ -36,6 +48,23 @@ pass in quick on %s inet proto { tcp udp } from %s to %s port 53
 pass in quick on %s inet proto tcp from %s to self flags A/A
 block drop in quick on %s inet from %s to self
 `, n.Interface, n.Interface, n.Subnet, n.Gateway, n.Interface, n.Subnet, n.Interface, n.Subnet)
+}
+
+func ValidateNetwork(n Network) error {
+	if !regexp.MustCompile(`^[a-zA-Z0-9]+$`).MatchString(n.Interface) {
+		return fmt.Errorf("invalid network interface %q", n.Interface)
+	}
+	subnetIP, _, err := net.ParseCIDR(n.Subnet)
+	if err != nil {
+		return fmt.Errorf("invalid network subnet %q: %w", n.Subnet, err)
+	}
+	if subnetIP.To4() == nil {
+		return fmt.Errorf("invalid network subnet %q: only IPv4 is supported", n.Subnet)
+	}
+	if ip := net.ParseIP(n.Gateway); ip == nil || ip.To4() == nil {
+		return fmt.Errorf("invalid network gateway %q", n.Gateway)
+	}
+	return nil
 }
 
 func EnsureAnchorBlock(conf string) string {
@@ -90,8 +119,11 @@ func Detect(ctx context.Context, stateRoot string, containerIP string) (Network,
 }
 
 func Enable(ctx context.Context, n Network) error {
+	if err := ValidateNetwork(n); err != nil {
+		return err
+	}
 	if os.Geteuid() != 0 {
-		return rerunWithSudo("enable")
+		return rerunEnableWithSudo(n)
 	}
 	conf, err := os.ReadFile(pfConfPath)
 	if err != nil {
@@ -102,32 +134,73 @@ func Enable(ctx context.Context, n Network) error {
 			return err
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(anchorPath), 0755); err != nil {
+	oldAnchor, err := snapshotFile(anchorPath)
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(anchorPath, []byte(GenerateRules(n)), 0644); err != nil {
+	rollbackAnchor := func() { _ = restoreFile(anchorPath, oldAnchor) }
+	if err := writeValidatedFile(anchorPath, []byte(GenerateRules(n)), 0644, func(path string) error {
+		return pfctl(ctx, "-a", "sunaba", "-nf", path)
+	}); err != nil {
 		return err
 	}
+	mainChanged := false
 	if HasAnchorBlock(string(conf)) {
-		if err := pfctl(ctx, "-a", "sunaba", "-nf", anchorPath); err != nil {
+		live, err := inspectLivePF(ctx)
+		if err != nil {
+			rollbackAnchor()
 			return err
 		}
-		if err := pfctl(ctx, "-a", "sunaba", "-f", anchorPath); err != nil {
-			return err
+		if live.MainAnchor {
+			if err := pfctl(ctx, "-a", "sunaba", "-f", anchorPath); err != nil {
+				rollbackAnchor()
+				return err
+			}
+		} else {
+			if err := pfctl(ctx, "-nf", pfConfPath); err != nil {
+				rollbackAnchor()
+				return err
+			}
+			if err := pfctl(ctx, "-f", pfConfPath); err != nil {
+				rollbackAnchor()
+				return err
+			}
 		}
 	} else {
 		next := EnsureAnchorBlock(string(conf))
-		if err := os.WriteFile(pfConfPath, []byte(next), 0644); err != nil {
+		if err := writeValidatedFile(pfConfPath, []byte(next), 0644, func(path string) error {
+			return pfctl(ctx, "-nf", path)
+		}); err != nil {
+			rollbackAnchor()
 			return err
 		}
-		if err := pfctl(ctx, "-nf", pfConfPath); err != nil {
-			return err
-		}
+		mainChanged = true
 		if err := pfctl(ctx, "-f", pfConfPath); err != nil {
+			_ = os.WriteFile(pfConfPath, conf, 0644)
+			rollbackAnchor()
 			return err
 		}
 	}
-	_ = pfctl(ctx, "-E")
+	live, err := inspectLivePF(ctx)
+	if err != nil {
+		return err
+	}
+	if !live.Enabled {
+		if err := pfctl(ctx, "-E"); err != nil {
+			if mainChanged {
+				_ = os.WriteFile(pfConfPath, conf, 0644)
+			}
+			rollbackAnchor()
+			return err
+		}
+	}
+	live, err = inspectLivePF(ctx)
+	if err != nil || !live.Enabled || !live.MainAnchor || !live.ChildBlock {
+		if err != nil {
+			return fmt.Errorf("cannot verify enabled firewall: %w", err)
+		}
+		return fmt.Errorf("cannot verify enabled firewall: enabled=%t main-anchor=%t child-block=%t", live.Enabled, live.MainAnchor, live.ChildBlock)
+	}
 	return nil
 }
 
@@ -139,32 +212,60 @@ func Disable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(pfConfPath, []byte(RemoveAnchorBlock(string(conf))), 0644); err != nil {
+	next := []byte(RemoveAnchorBlock(string(conf)))
+	if err := writeValidatedFile(pfConfPath, next, 0644, func(path string) error {
+		return pfctl(ctx, "-nf", path)
+	}); err != nil {
 		return err
 	}
-	_ = os.Remove(anchorPath)
-	if err := pfctl(ctx, "-nf", pfConfPath); err != nil {
+	if err := pfctl(ctx, "-f", pfConfPath); err != nil {
+		_ = os.WriteFile(pfConfPath, conf, 0644)
 		return err
 	}
-	return pfctl(ctx, "-f", pfConfPath)
+	if err := os.Remove(anchorPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func Status(ctx context.Context) (string, error) {
-	c, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(c, "/sbin/pfctl", "-a", "sunaba", "-sr").CombinedOutput()
+	live, err := inspectLivePF(ctx)
 	if err != nil {
-		return string(out), err
+		return "sunaba firewall: status unavailable", err
 	}
-	if strings.TrimSpace(string(out)) == "" {
-		return "sunaba firewall: not loaded", nil
+	if live.Enabled && live.MainAnchor && live.ChildBlock {
+		return "sunaba firewall: loaded", nil
 	}
-	return "sunaba firewall: loaded\n" + string(out), nil
+	return fmt.Sprintf("sunaba firewall: not loaded (pf-enabled=%t main-anchor=%t child-block=%t)", live.Enabled, live.MainAnchor, live.ChildBlock), nil
 }
 
 func IsLoaded(ctx context.Context) bool {
-	out, err := Status(ctx)
-	return err == nil && strings.Contains(out, "block drop")
+	live, err := inspectLivePF(ctx)
+	return err == nil && live.Enabled && live.MainAnchor && live.ChildBlock
+}
+
+func inspectLivePF(ctx context.Context) (livePFState, error) {
+	info, err := pfctlOutput(ctx, "-s", "info")
+	if err != nil {
+		return livePFState{}, err
+	}
+	mainRules, err := pfctlOutput(ctx, "-sr")
+	if err != nil {
+		return livePFState{}, err
+	}
+	childRules, err := pfctlOutput(ctx, "-a", "sunaba", "-sr")
+	if err != nil {
+		return livePFState{}, err
+	}
+	return parseLivePFState(info, mainRules, childRules), nil
+}
+
+func parseLivePFState(info, mainRules, childRules string) livePFState {
+	return livePFState{
+		Enabled:    strings.Contains(strings.ToLower(info), "status: enabled"),
+		MainAnchor: strings.Contains(mainRules, `anchor "sunaba"`),
+		ChildBlock: strings.Contains(childRules, "block drop"),
+	}
 }
 
 func rerunWithSudo(action string) error {
@@ -173,6 +274,19 @@ func rerunWithSudo(action string) error {
 		return err
 	}
 	args := sudoRerunArgs(exe, action, os.Args)
+	cmd := exec.Command("sudo", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func rerunEnableWithSudo(n Network) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	args := []string{exe, "firewall", "enable", "--interface", n.Interface, "--subnet", n.Subnet, "--gateway", n.Gateway}
 	cmd := exec.Command("sudo", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -201,6 +315,72 @@ func pfctl(ctx context.Context, args ...string) error {
 		return fmt.Errorf("pfctl %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return nil
+}
+
+func pfctlOutput(ctx context.Context, args ...string) (string, error) {
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(c, "/sbin/pfctl", args...).CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("pfctl %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
+func snapshotFile(path string) (fileSnapshot, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fileSnapshot{}, nil
+	}
+	if err != nil {
+		return fileSnapshot{}, err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fileSnapshot{}, err
+	}
+	return fileSnapshot{data: b, mode: info.Mode().Perm(), exists: true}, nil
+}
+
+func restoreFile(path string, snapshot fileSnapshot) error {
+	if !snapshot.exists {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return os.WriteFile(path, snapshot.data, snapshot.mode)
+}
+
+func writeValidatedFile(path string, data []byte, mode os.FileMode, validate func(string) error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".sunaba-"+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := validate(tmpPath); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func networkInspect(ctx context.Context) (Network, bool) {

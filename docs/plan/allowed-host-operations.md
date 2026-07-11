@@ -38,10 +38,13 @@ sudo ./bin/sunaba firewall status
 - `/etc/pf.conf` を `/etc/pf.conf.sunaba.bak` にバックアップする
 - `/etc/pf.conf` の sunaba 管理ブロックだけを追加・更新・削除する
 - `/etc/pf.anchors/sunaba` を作成・更新・削除する
-- `/sbin/pfctl -nf /etc/pf.conf` で構文検査する
+- `/etc` と `/etc/pf.anchors` に `.sunaba-` プレフィックスの一時ファイルを作成し、構文検査成功後に上記2ファイルへ原子的に置換する。処理終了時に一時ファイルを削除する
+- `/sbin/pfctl -nf /etc/pf.conf` または上記sunaba一時ファイルで構文検査する
+- `/sbin/pfctl -a sunaba -nf /etc/pf.anchors/sunaba` または上記sunaba一時ファイルでanchorを構文検査する
 - `/sbin/pfctl -f /etc/pf.conf` で pf 設定を再読み込みする
 - `/sbin/pfctl -E` で pf を有効化する
 - `/sbin/pfctl -sr` でルール状態を確認する
+- `/sbin/pfctl -s info` でpfの有効状態を確認する
 - `/sbin/pfctl -a sunaba -sr` で sunaba anchor のルール状態を確認する
 
 ## 許可する container 操作
