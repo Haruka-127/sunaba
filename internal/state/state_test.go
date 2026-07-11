@@ -52,6 +52,15 @@ func TestInvalidEnv(t *testing.T) {
 	}
 }
 
+func TestWriteEnvRejectsLineInjection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "env")
+	for _, value := range []string{"ok\nSUNABA_WORKDIR=/tmp", "ok\rBAD=x", "ok\x00BAD"} {
+		if err := WriteEnvFile(path, map[string]string{"ZZZ": value}); err == nil {
+			t.Fatalf("accepted invalid value %q", value)
+		}
+	}
+}
+
 func TestEffectiveFirewallDisabled(t *testing.T) {
 	tests := []struct {
 		name    string

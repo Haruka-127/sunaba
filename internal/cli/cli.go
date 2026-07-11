@@ -269,6 +269,9 @@ func (a *app) env(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: sunaba env set KEY=VALUE... | unset KEY... | list [--dir PATH]")
+	}
 	p, _, err := a.project(dir)
 	if err != nil {
 		return err
@@ -427,9 +430,25 @@ func (a *app) firewall(ctx context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "enable":
-		n, err := firewall.Detect(ctx, a.store.Root, "")
-		if err != nil {
+		fs := flag.NewFlagSet("firewall enable", flag.ContinueOnError)
+		iface := fs.String("interface", "", "detected container network interface")
+		subnet := fs.String("subnet", "", "detected container subnet")
+		gateway := fs.String("gateway", "", "detected container gateway")
+		if err := fs.Parse(args[1:]); err != nil {
 			return err
+		}
+		var n firewall.Network
+		var err error
+		if *iface != "" || *subnet != "" || *gateway != "" {
+			if *iface == "" || *subnet == "" || *gateway == "" {
+				return fmt.Errorf("--interface, --subnet, and --gateway must be specified together")
+			}
+			n = firewall.Network{Interface: *iface, Subnet: *subnet, Gateway: *gateway}
+		} else {
+			n, err = firewall.Detect(ctx, a.store.Root, "")
+			if err != nil {
+				return err
+			}
 		}
 		return firewall.Enable(ctx, n)
 	case "disable":
