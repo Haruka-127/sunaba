@@ -342,6 +342,8 @@ pass in quick on bridge100 inet proto udp from any port 68 to any port 67
 pass in quick on bridge100 inet proto { tcp udp } from 192.168.64.0/24 to 192.168.64.1 port 53
 # コンテナ→ホスト(ホストの全アドレス)を遮断
 block drop in quick on bridge100 inet from 192.168.64.0/24 to self
+# コンテナ→ホストのIPv6通信を送信元アドレスにかかわらず遮断
+block drop in quick on bridge100 inet6 from any to self
 ```
 
 **実装上の要点(誤りやすい)**:
@@ -423,7 +425,7 @@ block drop in quick on bridge100 inet from 192.168.64.0/24 to self
 | A5 | 双方向のファイル反映 | ホストで作成したファイルがコンテナから見え、コンテナで作成したファイルがホストから見える |
 | A6 | server起動とパスワード保護 | 認証なし `curl http://<ip>:4096/global/health` → 401。正しい basic auth → 200 で `version` を含む |
 | A7 | 自動承認 | `opencode run --attach http://<ip>:4096 ...`(認証付き)でファイル書込みを伴うプロンプトを実行し、許可待ちにならず完了する |
-| A8 | ホスト遮断 | ホストで `python3 -m http.server 18080` を起動し、コンテナから `curl -m 5 http://<gw>:18080` が**失敗**する |
+| A8 | ホスト遮断 | ホストでIPv4/IPv6両対応のHTTP serverを起動し、コンテナからIPv4 gatewayおよびIPv6 link-local gatewayへの `curl` がともに**失敗**する |
 | A9 | インターネット許可とDNS | コンテナから `curl -m 15 -sSf https://example.com` が成功する(遮断後も名前解決が生きていること) |
 | A10 | ホスト→コンテナ許可 | 遮断適用後もホストから health エンドポイントに到達できる |
 | A11 | 監査ログ | A7 実行後、`logs/audit-*.jsonl` に1行以上のイベントが追記されている。各行が有効なJSONである |

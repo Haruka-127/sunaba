@@ -104,7 +104,7 @@ sunaba firewall disable
 sunaba firewall status
 ```
 
-pf anchor `sunaba` を管理し、コンテナからホスト自身への通信を遮断します。root 権限が必要な場合は `sudo` で自分自身を再実行します。許可された host 操作の範囲は `docs/plan/allowed-host-operations.md` に限定されます。
+pf anchor `sunaba` を管理し、コンテナからホスト自身への IPv4 / IPv6 通信を遮断します。root 権限が必要な場合は `sudo` で自分自身を再実行します。許可された host 操作の範囲は `docs/plan/allowed-host-operations.md` に限定されます。
 
 ```sh
 sunaba logs [--dir PATH] [-f]

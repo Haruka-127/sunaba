@@ -2,8 +2,10 @@ package firewall
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -32,13 +34,34 @@ func TestAnchorBlockIdempotent(t *testing.T) {
 
 func TestGenerateRules(t *testing.T) {
 	got := GenerateRules(Network{Interface: "bridge100", Subnet: "192.168.64.0/24", Gateway: "192.168.64.1"})
-	for _, want := range []string{"pass in quick", "port 53", "flags A/A", "block drop", "to self"} {
+	for _, want := range []string{
+		"pass in quick",
+		"port 53",
+		"flags A/A",
+		"block drop in quick on bridge100 inet from 192.168.64.0/24 to self",
+		"block drop in quick on bridge100 inet6 from any to self",
+	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
 	}
 	if strings.Index(got, "flags A/A") > strings.Index(got, "block drop") {
 		t.Fatalf("ACK pass rule must precede block rule:\n%s", got)
+	}
+}
+
+func TestGeneratedRulesAcceptedByPF(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("pfctl is only available on macOS")
+	}
+	path := filepath.Join(t.TempDir(), "sunaba.rules")
+	rules := GenerateRules(Network{Interface: "bridge100", Subnet: "192.168.64.0/24", Gateway: "192.168.64.1"})
+	if err := os.WriteFile(path, []byte(rules), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("/sbin/pfctl", "-a", "sunaba", "-nf", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("pfctl rejected generated rules: %v: %s", err, out)
 	}
 }
 
@@ -59,16 +82,39 @@ func TestValidateNetwork(t *testing.T) {
 }
 
 func TestParseLivePFStateRequiresAllLayers(t *testing.T) {
-	loaded := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, "block drop in quick")
-	if !loaded.Enabled || !loaded.MainAnchor || !loaded.ChildBlock {
+	n := Network{Interface: "bridge100", Subnet: "192.168.64.0/24", Gateway: "192.168.64.1"}
+	rules := GenerateRules(n)
+	liveRules := strings.ReplaceAll(rules, "to self", "to 192.168.98.150")
+	loaded := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, liveRules, rules, n)
+	if !loaded.loaded() {
 		t.Fatalf("unexpected state: %#v", loaded)
 	}
-	missingMain := parseLivePFState("Status: Enabled", "pass all", "block drop in quick")
+	missingMain := parseLivePFState("Status: Enabled", "pass all", liveRules, rules, n)
 	if missingMain.MainAnchor {
 		t.Fatalf("detached anchor reported as attached: %#v", missingMain)
 	}
-	if parseLivePFState("Status: Disabled", `anchor "sunaba" all`, "block drop").Enabled {
+	if parseLivePFState("Status: Disabled", `anchor "sunaba" all`, liveRules, rules, n).Enabled {
 		t.Fatal("disabled pf reported as enabled")
+	}
+	missingIPv6Rules := "block drop in quick on bridge100 inet from 192.168.64.0/24 to self\n"
+	missingIPv6 := parseLivePFState("Status: Enabled", `anchor "sunaba" all`,
+		strings.ReplaceAll(missingIPv6Rules, "to self", "to 192.168.98.150"), missingIPv6Rules, n)
+	if missingIPv6.loaded() || !missingIPv6.IPv4Block || missingIPv6.IPv6Block {
+		t.Fatalf("missing IPv6 block reported as loaded: %#v", missingIPv6)
+	}
+	staleLive := parseLivePFState("Status: Enabled", `anchor "sunaba" all`,
+		strings.ReplaceAll(missingIPv6Rules, "to self", "to 192.168.98.150"), rules, n)
+	if staleLive.loaded() || !staleLive.IPv4Block || staleLive.IPv6Block {
+		t.Fatalf("stale live rules reported as loaded: %#v", staleLive)
+	}
+	staleFile := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, liveRules, missingIPv6Rules, n)
+	if staleFile.loaded() || !staleFile.IPv4Block || staleFile.IPv6Block {
+		t.Fatalf("stale configured rules reported as loaded: %#v", staleFile)
+	}
+	wrongNetwork := Network{Interface: "bridge101", Subnet: "192.168.65.0/24", Gateway: "192.168.65.1"}
+	stale := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, liveRules, rules, wrongNetwork)
+	if stale.loaded() || stale.IPv4Block || stale.IPv6Block {
+		t.Fatalf("stale rules reported as loaded: %#v", stale)
 	}
 }
 

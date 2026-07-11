@@ -36,6 +36,10 @@ TMP="$(mktemp -d /tmp/sunaba-verify.XXXXXX)"
 PROJECT="$(cd "$TMP" && pwd -P)"
 cleanup() {
   set +e
+  if [[ -n "${HTTP_PID:-}" ]]; then
+    kill "$HTTP_PID" >/dev/null 2>&1
+    wait "$HTTP_PID" 2>/dev/null
+  fi
   "$BIN" reset --dir "$PROJECT" --full --yes >/dev/null 2>&1
   rm -rf "$TMP"
 }
@@ -76,17 +80,37 @@ OPENCODE_SERVER_PASSWORD="$PASSWD" OPENCODE_SERVER_USERNAME=opencode \
 test "$(tr -d '\r\n' <"$PROJECT/sunaba-a7.txt")" = "approved"
 pass "A7 automatic approval"
 
-python3 -m http.server 18080 --directory "$TMP" >"$TMP/http.log" 2>&1 &
+python3 -m http.server 18080 --bind :: --directory "$TMP" >"$TMP/http.log" 2>&1 &
 HTTP_PID=$!
 GW="$(container network inspect default | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["status"]["ipv4Gateway"])')"
-if container exec "$CID" curl -m 5 -fsS "http://$GW:18080" >/dev/null 2>&1; then
-  kill "$HTTP_PID" || true
-  wait "$HTTP_PID" 2>/dev/null || true
-  fail "A8" "container reached host http server"
+IPV4_REACHED=0
+if container exec "$CID" curl -4 -m 5 -fsS "http://$GW:18080" >/dev/null 2>&1; then
+  IPV4_REACHED=1
+fi
+IPV6_GW=""
+for _ in {1..60}; do
+  IPV6_GW="$(container exec "$CID" cat /proc/net/ipv6_route | python3 -c '
+import ipaddress, sys
+for line in sys.stdin:
+    fields = line.split()
+    if fields[0] == "0" * 32 and fields[1] == "00" and fields[4] != "0" * 32:
+        print(ipaddress.IPv6Address(int(fields[4], 16)))
+        break
+' || true)"
+  [[ -n "$IPV6_GW" ]] && break
+  sleep 0.5
+done
+[[ -n "$IPV6_GW" ]] || fail "A8" "container did not configure an IPv6 default gateway"
+IPV6_REACHED=0
+if container exec "$CID" curl -g -6 -m 5 -fsS "http://[$IPV6_GW%25eth0]:18080" >/dev/null 2>&1; then
+  IPV6_REACHED=1
 fi
 kill "$HTTP_PID" || true
 wait "$HTTP_PID" 2>/dev/null || true
-pass "A8 host access blocked"
+HTTP_PID=""
+[[ "$IPV4_REACHED" -eq 0 ]] || fail "A8" "container reached host HTTP server over IPv4"
+[[ "$IPV6_REACHED" -eq 0 ]] || fail "A8" "container reached host HTTP server over IPv6"
+pass "A8 host access blocked over IPv4 and IPv6"
 
 container exec "$CID" curl -m 15 -fsS https://example.com >/dev/null
 pass "A9 internet and DNS"
