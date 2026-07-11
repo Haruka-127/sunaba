@@ -1,9 +1,12 @@
 package opencode
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+var semanticVersionPattern = regexp.MustCompile(`(?:^|[^0-9])v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[^0-9]|$)`)
 
 func CompareVersion(a, b string) int {
 	ap := splitVersion(a)
@@ -40,4 +43,12 @@ func splitVersion(v string) []int {
 		out = append(out, n)
 	}
 	return out
+}
+
+func firstSemanticVersion(s string) string {
+	m := semanticVersionPattern.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
 }
