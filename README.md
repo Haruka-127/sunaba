@@ -127,3 +127,21 @@ sunaba logs [--dir PATH] [-f]
 - LAN 宛て通信は本版では許可のままです
 - ホスト側編集のファイルウォッチイベントがコンテナ内へ即時伝播しない場合があります
 - `sunaba update` は GitHub API のレート制限を受ける場合があります。その場合は `--opencode-version` を指定してください
+
+## 検証
+
+ビルド、静的解析、単体テストのみを実行する場合:
+
+```sh
+scripts/verify.sh
+```
+
+コンテナ作成、pf変更、自動承認、reset、イメージ更新を含むA2〜A21の統合検証には、opencodeの有効な認証・モデル設定と、一つ前の有効なリリース番号を指定します。
+
+```sh
+SUNABA_FULL_VERIFY=1 \
+SUNABA_PREVIOUS_OPENCODE_VERSION=1.17.12 \
+scripts/verify.sh
+```
+
+統合検証は `sunaba-` プレフィックスの検証コンテナと一時プロジェクトを作成し、終了時に削除します。pf変更に必要な `sudo` を対話的に許可できる端末で実行してください。
