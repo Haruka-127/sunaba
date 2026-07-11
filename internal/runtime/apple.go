@@ -33,7 +33,11 @@ func (r *AppleContainer) ImageExists(ctx context.Context, tag string) (bool, err
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(out, tag), nil
+	var payload any
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return false, fmt.Errorf("cannot parse container image list JSON: %w", err)
+	}
+	return containsExactString(payload, tag), nil
 }
 
 func (r *AppleContainer) BuildImage(ctx context.Context, tag, contextDir string, buildArgs map[string]string) error {
@@ -302,6 +306,26 @@ func walk(v any, fn func([]string, any)) {
 		}
 	}
 	rec(nil, v)
+}
+
+func containsExactString(v any, want string) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		for _, value := range x {
+			if containsExactString(value, want) {
+				return true
+			}
+		}
+	case []any:
+		for _, value := range x {
+			if containsExactString(value, want) {
+				return true
+			}
+		}
+	case string:
+		return x == want
+	}
+	return false
 }
 
 func normalizeState(s string) State {
