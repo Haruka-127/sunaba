@@ -143,6 +143,26 @@ container system start
 
 このsystem cycleは全container serviceを一時停止する。通常のtest cleanupには使わず、上記の固着状態から利用者承認付きで復旧する場合だけに限定する。この例外も、本文書を実装者が更新したこと自体は実行承認とみなさない。
 
+Apple Container 1.2.2の`container system stop`自体が全containerの停止待ちで60秒以上固着し、別clientの`container system status`でAPIServerがなおrunningの場合は、同versionの[公式`SystemStop`実装](https://github.com/apple/container/blob/1.2.2/Sources/ContainerCommands/System/SystemStop.swift)と[公式`ServiceManager`実装](https://github.com/apple/container/blob/1.2.2/Sources/ContainerPlugin/ServiceManager.swift)がstop後段で行うlaunchd deregistrationだけを、同じservice domainとprefixへ限定して実行してよい。
+
+```sh
+/bin/launchctl managername
+/bin/launchctl list
+/bin/launchctl bootout gui/<current-uid>/com.apple.container.apiserver
+/bin/launchctl bootout gui/<current-uid>/<exact-com.apple.container.service-label>
+container system start
+```
+
+- 人間へsystem serviceと`buildkit`の一時停止、exact bootout対象、復元手順を提示し、明示承認を得る
+- `managername`が`Aqua`、current UIDとdomainが`gui/<current-uid>`であることを確認する。別domainなら実行を拒否する
+- `launchctl list`で現在登録済みの完全labelを記録し、`com.apple.container.apiserver`を最初にbootoutする
+- 続いて、事前listに存在した`com.apple.container.` prefixの完全labelだけを1件ずつbootoutする。glob、部分一致、未確認label、別prefixを使わない
+- `bootout`以外の`launchctl` mutation、`sudo`、service/runtime/plugin processへの直接signalを使わない
+- bootout後は直ちに`container system start`し、system version/status、全resource、事前にrunningだった`buildkit`の同一性を再検証する
+- system startまたは復元検証に失敗した場合は、bootoutを反復したり範囲を広げず停止して人間へ報告する
+
+このfallbackも、本文書を実装者が更新したこと自体は実行承認とみなさない。
+
 同じ障害で、当該検証が起動した`container stop`、`container kill`、`container delete --force`、`container system stop`、または当該exact VMへの`container exec` client processだけが60秒以上応答せず残った場合は、`ps -axo user,pid,ppid,lstart,command`でcurrent user、完全なargv、対応VM名を再確認し、人間の個別承認後にそのclient PIDだけへ`kill -TERM`を送ってよい。Apple Containerのruntime/plugin process、Supervisor、`buildkit`、名前や由来を確認できないprocessへsignalを送らない。TERM後も残るclientへ別signalを送る場合は改めて人間へ確認する。
 
 ## 許可するRuntime Adapter操作

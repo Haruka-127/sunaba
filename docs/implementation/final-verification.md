@@ -16,7 +16,7 @@
 | Web Gateway | Phase 4 measurement/integration、`internal/webgateway` attack/compatibility/fuzz test | 個別gateの通過記録あり。最終一括再実行待ち |
 | Phase 5 hardening | dependency/provenance、migration、retention/redaction、ENOSPC/reboot/partial failure、4 bounded fuzz target | 自動gateはPASS。dev pf実機gate待ち |
 | dev active-session egress | `TestDevSessionNetworkBoundary`がactive public egress、host/LAN/peer/inbound拒否、稼働VMのdeny-all quiesce、stopを検査 | 実装・compile済み。人間承認を伴うsudo実行待ち |
-| 最終cleanup / user resource非干渉 | exact nameとowner/project/session labelを再検証するcleanup、最終`container ls` / network / volume inventory | 未完了。通常stop、個別KILL、force deleteが固着したexact-owned VM 2台を、承認済みの1回限りのsystem stop/startで復旧中。`buildkit`は事前inventoryと同一状態へ復元する |
+| 最終cleanup / user resource非干渉 | exact nameとowner/project/session labelを再検証するcleanup、最終`container ls` / network / volume inventory | 未完了。通常stop、個別KILL、force delete、system stopが固着したexact-owned VM 2台を、承認済みの公式実装準拠launchd fallbackで復旧中。`buildkit`は事前inventoryと同一状態へ復元する |
 | Git運用 | `dev`上の意図別Conventional Commit、`git status`、remote非書込み | 本台帳のcommit後はclean、pushなし。最終操作後に再確認する |
 
 ## 最新の非破壊gate
@@ -30,7 +30,7 @@ SUNABA_FUZZ=1 scripts/verify.sh
 
 ## 未完了の最終手順
 
-1. 対応Supervisor/runtime directoryがないことを再確認し、[`allowed-host-operations.md`](../plan/allowed-host-operations.md)の承認済みsystem stop/startを1回だけ実行する。
+1. 対応Supervisor/runtime directoryがないことを再確認し、[`allowed-host-operations.md`](../plan/allowed-host-operations.md)の承認済みlaunchd fallbackとsystem startを1回だけ実行する。
 2. exact-owned stuck VMだけを復旧・削除し、`buildkit`を事前inventoryと同一状態へ復元する。runtime/plugin processや他resourceを直接変更しない。
 3. 隔離実機gateを実行する。
 
