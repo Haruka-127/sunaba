@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -143,15 +141,6 @@ func GetHealth(ctx context.Context, url, password string) (Health, error) {
 	return h, nil
 }
 
-func Attach(ctx context.Context, url, dir, password string) error {
-	cmd := exec.CommandContext(ctx, "opencode", "attach", url, "--dir", dir)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = attachEnvironment(os.Environ(), url, password)
-	return cmd.Run()
-}
-
 // DirectHTTPClient returns a client for host-to-VM communication. These
 // requests carry the server password and must never be sent through a proxy
 // configured in the host environment.
@@ -159,38 +148,6 @@ func DirectHTTPClient(timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	return &http.Client{Timeout: timeout, Transport: transport}
-}
-
-func attachEnvironment(base []string, serverURL, password string) []string {
-	host := ""
-	if u, err := url.Parse(serverURL); err == nil {
-		host = u.Hostname()
-	}
-	noProxy := mergeNoProxy(environmentValue(base, "NO_PROXY"), environmentValue(base, "no_proxy"))
-	noProxy = mergeNoProxy(noProxy, host)
-	env := base
-	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
-		env = removeEnvironment(env, key)
-	}
-	env = setEnvironment(env, "NO_PROXY", noProxy)
-	env = setEnvironment(env, "no_proxy", noProxy)
-	env = setEnvironment(env, "OPENCODE_SERVER_PASSWORD", password)
-	return setEnvironment(env, "OPENCODE_SERVER_USERNAME", "opencode")
-}
-
-func mergeNoProxy(current, host string) string {
-	if host == "" {
-		return current
-	}
-	for _, entry := range strings.Split(current, ",") {
-		if strings.TrimSpace(entry) == host {
-			return current
-		}
-	}
-	if strings.TrimSpace(current) == "" {
-		return host
-	}
-	return current + "," + host
 }
 
 func environmentValue(env []string, key string) string {
@@ -201,26 +158,4 @@ func environmentValue(env []string, key string) string {
 		}
 	}
 	return ""
-}
-
-func setEnvironment(env []string, key, value string) []string {
-	prefix := key + "="
-	out := make([]string, 0, len(env)+1)
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
-			out = append(out, entry)
-		}
-	}
-	return append(out, prefix+value)
-}
-
-func removeEnvironment(env []string, key string) []string {
-	prefix := key + "="
-	out := make([]string, 0, len(env))
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
-			out = append(out, entry)
-		}
-	}
-	return out
 }

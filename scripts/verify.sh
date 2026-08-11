@@ -43,7 +43,7 @@ for OBSOLETE in '--no-firewall' 'env set' 'reset --full' 'automatic approval'; d
     fail cli-help "retained obsolete prototype behavior: $OBSOLETE"
   fi
 done
-if rg -n --glob '*.go' --glob '*.sh' --glob '!*_test.go' --glob '!scripts/verify.sh' -- '--no-firewall|EnvFiles:.*Project|Networks:.*default|HostPath:.*Project|server-password|EnvFileForContainer|_audit|"permission"[[:space:]]*:[[:space:]]*"allow"' internal cmd scripts; then
+if rg -n --glob '*.go' --glob '*.sh' --glob '!*_test.go' --glob '!scripts/verify.sh' -- '--no-firewall|EnvFiles:.*Project|Networks:.*default|HostPath:.*Project|server-password|EnvFileForContainer|_audit|func Attach\(|"permission"[[:space:]]*:[[:space:]]*"allow"' internal cmd scripts; then
   fail static-boundary "found an obsolete unsafe execution path"
 fi
 pass "CLI and static boundary"

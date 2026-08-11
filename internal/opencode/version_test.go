@@ -88,24 +88,3 @@ func TestDirectHTTPClientBypassesProxy(t *testing.T) {
 		t.Fatalf("direct health request used host proxy: %v", err)
 	}
 }
-
-func TestAttachEnvironmentAddsServerToNoProxy(t *testing.T) {
-	env := attachEnvironment([]string{
-		"NO_PROXY=localhost",
-		"no_proxy=old",
-		"HTTP_PROXY=http://proxy.example",
-		"OPENCODE_SERVER_PASSWORD=old",
-	}, "http://192.168.64.2:4096", "new-secret")
-	if got := environmentValue(env, "NO_PROXY"); got != "localhost,old,192.168.64.2" {
-		t.Fatalf("NO_PROXY=%q", got)
-	}
-	if got := environmentValue(env, "no_proxy"); got != "localhost,old,192.168.64.2" {
-		t.Fatalf("no_proxy=%q", got)
-	}
-	if got := environmentValue(env, "OPENCODE_SERVER_PASSWORD"); got != "new-secret" {
-		t.Fatalf("password=%q", got)
-	}
-	if got := environmentValue(env, "HTTP_PROXY"); got != "" {
-		t.Fatalf("HTTP_PROXY was retained: %q", got)
-	}
-}
