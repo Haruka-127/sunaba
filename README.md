@@ -1,5 +1,8 @@
 # sunaba
 
+> [!IMPORTANT]
+> このREADMEは現在リポジトリに実装されている旧プロトタイプの挙動を説明しており、次期アーキテクチャの実装仕様ではありません。新規実装では [`docs/plan/README.md`](./docs/plan/README.md) と [`docs/plan/sunaba-secure-agent-platform.md`](./docs/plan/sunaba-secure-agent-platform.md) を正本としてください。旧プロトタイプのbind mount、credential注入、ネットワーク方針を新設計へ引き継いではなりません。
+
 sunaba は、opencode server をプロジェクト専用の apple/container Linux VM 内で起動し、ホスト側の opencode TUI から接続するための CLI です。
 
 ## 前提

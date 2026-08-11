@@ -1,4 +1,7 @@
-# NOTES
+# [ARCHIVE] 旧プロトタイプ実装・検証記録
+
+> [!WARNING]
+> この文書は旧プロトタイプの実装・検証記録を保存したarchiveであり、現在の実装仕様ではない。pf、bind mount、credential注入等の判断を新設計へ引き継いではならない。現在の正本は [`../sunaba-secure-agent-platform.md`](../sunaba-secure-agent-platform.md) である。
 
 ## 確認結果
 

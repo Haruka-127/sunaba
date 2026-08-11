@@ -1,4 +1,7 @@
-# opencodeセキュア実行基盤
+# [ARCHIVE] opencodeセキュア実行基盤
+
+> [!WARNING]
+> この文書は過去の計画を保存したarchiveであり、現在の実装仕様ではない。実装、設計判断、ホスト操作の根拠として参照してはならない。現在の正本は [`../sunaba-secure-agent-platform.md`](../sunaba-secure-agent-platform.md) である。
 
 ## 目的
 

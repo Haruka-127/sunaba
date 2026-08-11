@@ -1,6 +1,9 @@
-# opencodeセキュア実行基盤 実装リファレンス
+# [ARCHIVE] opencodeセキュア実行基盤 実装リファレンス
 
-本文書は、設計文書 `docs/plan/opencode-secure-agent-platform.md` を自律型コーディングエージェント(codex)が実装を完遂できるレベルまで具体化した実装仕様である。
+> [!WARNING]
+> この文書は過去の実装仕様を保存したarchiveであり、現在の実装仕様ではない。本文中の「優先する」「全機能を実装する」等の指示はすべて失効している。実装、設計判断、ホスト操作の根拠として参照してはならない。現在の正本は [`../sunaba-secure-agent-platform.md`](../sunaba-secure-agent-platform.md) である。
+
+本文書は、archive内の旧設計文書 [`opencode-secure-agent-platform.md`](./opencode-secure-agent-platform.md) に対応していた実装仕様である。
 
 - 設計文書の「初期MVP」「MVP直後」という段階分けは**無視し、本文書に記載された全機能を一度に実装する**
 - 設計文書と本文書に齟齬がある場合は**本文書を優先**する(未決定事項を実装用に確定させているため)
@@ -514,7 +517,7 @@ type Runtime interface {
 
 ## 15. 参考資料
 
-- 設計文書: `docs/plan/opencode-secure-agent-platform.md`
+- 対応していた旧設計文書: [`opencode-secure-agent-platform.md`](./opencode-secure-agent-platform.md)
 - opencode server API・CLI: https://opencode.ai/docs/server/ , https://opencode.ai/docs/cli/
 - opencode permissions: https://opencode.ai/docs/permissions/
 - opencode config: https://opencode.ai/docs/config/
