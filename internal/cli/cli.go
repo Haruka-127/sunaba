@@ -70,6 +70,10 @@ func Run(ctx context.Context, args []string) error {
 		return a.up(ctx, filtered[1:])
 	case "agent":
 		return a.agent(ctx, filtered[1:])
+	case "git":
+		return a.gitPolicy(filtered[1:])
+	case "web":
+		return a.webPolicy(ctx, filtered[1:])
 	case "shell":
 		return a.shell(filtered[1:])
 	case "status":
@@ -77,7 +81,7 @@ func Run(ctx context.Context, args []string) error {
 	case "changes":
 		return a.changes(ctx, filtered[1:])
 	case "approvals":
-		return a.approvals(filtered[1:])
+		return a.approvals(ctx, filtered[1:])
 	case "recreate":
 		return a.recreate(ctx, filtered[1:])
 	case "down":
@@ -102,6 +106,10 @@ Usage:
   sunaba up [--dir <path>] [--mode secure|dev]
   sunaba agent [--dir <path>]
   sunaba shell [--dir <path>]
+  sunaba git set --remote <https-url> [--dir <path>]
+  sunaba git disable [--dir <path>]
+  sunaba web enable --origin <http(s)://host>... [--dir <path>]
+  sunaba web refresh|disable [--dir <path>]
   sunaba status [--dir <path>]
   sunaba changes export [--dir <path>]
   sunaba changes apply [--dir <path>]
@@ -235,12 +243,6 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil {
 		return fmt.Errorf("a pending Change Set exists; apply or discard it before starting another Agent Session")
 	}
-	if len(projectPolicy.Git.Remotes) != 0 {
-		return fmt.Errorf("Git remotes are configured but this CLI cannot safely infer host credential routing; remove them or use the tested Git Gateway integration API")
-	}
-	if projectPolicy.Web.Enabled {
-		return fmt.Errorf("Web policy is enabled but its blocklist snapshot must be provisioned by an explicit host policy workflow")
-	}
 	if err := opencode.CheckPrerequisites(ctx); err != nil {
 		return err
 	}
@@ -300,7 +302,7 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	runtimeBase, err := os.MkdirTemp("", "sunaba-runtime-")
+	runtimeBase, err := makeRuntimeBase()
 	if err != nil {
 		return err
 	}
@@ -316,12 +318,29 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	gateways, err := a.configureGateways(ctx, projectPolicy, projectState, runtimeBase, vmID, sessionID, expiresAt, recorder)
+	if err != nil {
+		return err
+	}
+	gatewaysHandedOff := false
+	defer func() {
+		if !gatewaysHandedOff {
+			if gateways.webClose != nil {
+				_ = gateways.webClose()
+			}
+			if gateways.gitClose != nil {
+				_ = gateways.gitClose()
+			}
+		}
+	}()
 	config := session.Config{
 		Store: a.store, Runtime: a.runtime, ProjectRoot: projectPolicy.ProjectRoot, RuntimeBase: runtimeBase,
 		SessionID: sessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
 		CPUs: projectPolicy.Resources.CPUs, Memory: projectPolicy.Resources.Memory, DiskBytes: projectPolicy.Resources.DiskBytes,
 		ProcessMax: projectPolicy.Resources.ProcessMax, FileSizeMax: projectPolicy.Resources.FileSizeMax, OpenFileMax: projectPolicy.Resources.OpenFileMax,
 		GuestRelayBinary: guestRelay, ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken,
+		GitGateway: gateways.gitHandler, GitToken: gateways.gitToken, GitGatewayClose: gateways.gitClose,
+		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
 		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second, Audit: recorder,
 	}
 	var devBoundary *devnetwork.Boundary
@@ -342,6 +361,15 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 		}
 		return err
 	}
+	gatewaysHandedOff = true
+	var approvalServer *approvalControl
+	if gateways.gitBroker != nil {
+		approvalServer, err = startApprovalControl(projectState, runtimeBase, gateways.gitBroker)
+		if err != nil {
+			return err
+		}
+	}
+	defer func() { returnErr = errors.Join(returnErr, approvalServer.Close()) }()
 	destroyed := false
 	defer func() {
 		if !destroyed {
@@ -489,7 +517,7 @@ func (a *app) changes(ctx context.Context, args []string) error {
 	}
 }
 
-func (a *app) approvals(args []string) error {
+func (a *app) approvals(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("approvals", flag.ContinueOnError)
 	fs.SetOutput(a.errors)
 	dir := fs.String("dir", ".", "Project directory")
@@ -500,12 +528,21 @@ func (a *app) approvals(args []string) error {
 	if err != nil {
 		return err
 	}
-	pending, err := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+	approved, err := a.approveActivePushes(ctx, projectState)
 	if err != nil {
-		fmt.Fprintln(a.output, "No pending host approval requests.")
+		return err
+	}
+	if approved > 0 {
+		fmt.Fprintf(a.output, "Approved %d Git push request(s). Retry the unchanged push in the Agent VM before the approval expires.\n", approved)
+	}
+	pending, pendingErr := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+	if pendingErr == nil {
+		fmt.Fprintf(a.output, "Pending apply: %s (%d changes). Run 'sunaba changes apply'.\n", pending.ChangeSet.Digest, len(pending.ChangeSet.Changes))
 		return nil
 	}
-	fmt.Fprintf(a.output, "Pending apply: %s (%d changes). Run 'sunaba changes apply'.\n", pending.ChangeSet.Digest, len(pending.ChangeSet.Changes))
+	if approved == 0 {
+		fmt.Fprintln(a.output, "No pending host approval requests.")
+	}
 	return nil
 }
 
@@ -762,6 +799,22 @@ func newSessionID() (string, error) {
 		return "", err
 	}
 	return "s" + hex.EncodeToString(raw), nil
+}
+
+func makeRuntimeBase() (string, error) {
+	base := os.TempDir()
+	if info, err := os.Lstat("/private/tmp"); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		base = "/private/tmp"
+	}
+	path, err := os.MkdirTemp(base, "sunaba-runtime-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
 }
 
 func statusOutcome(status int) string {

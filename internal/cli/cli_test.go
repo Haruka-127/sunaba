@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"sunaba/internal/audit"
+	"sunaba/internal/gitgateway"
 	"sunaba/internal/policy"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
@@ -20,7 +22,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 	a := &app{output: &output}
 	usage(a.output)
 	text := output.String()
-	for _, expected := range []string{"project init", "agent", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
+	for _, expected := range []string{"project init", "agent", "git set", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -29,6 +31,174 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		if strings.Contains(text, obsolete) {
 			t.Fatalf("help retained obsolete prototype behavior %q", obsolete)
 		}
+	}
+}
+
+func TestGitPolicyAcceptsOneFixedHTTPSRemoteAndRejectsCredentialURLs(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state")}
+	var output bytes.Buffer
+	a := &app{store: store, output: &output, errors: &output}
+	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.gitPolicy([]string{"set", "--dir", project, "--remote", "https://git.example/team/repository.git"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
+	if err != nil || len(loaded.Git.Remotes) != 1 || loaded.Git.Remotes[0] != "https://git.example/team/repository.git" {
+		t.Fatalf("policy=%+v error=%v", loaded.Git, err)
+	}
+	for _, unsafe := range []string{
+		"http://git.example/repository.git",
+		"https://token@git.example/repository.git",
+		"https://git.example/repository.git?ref=main",
+		"https://git.example/repository",
+		"https://git.example:8443/repository.git",
+	} {
+		if err := a.gitPolicy([]string{"set", "--dir", project, "--remote", unsafe}); err == nil {
+			t.Fatalf("unsafe Git remote accepted: %s", unsafe)
+		}
+	}
+}
+
+func TestCredentialParserKeepsSupportedSecretMaterialOutOfErrors(t *testing.T) {
+	basic, err := parseGitCredential("protocol=https\nhost=git.example\nusername=user\npassword=secret-token\n")
+	if err != nil || basic != "Basic dXNlcjpzZWNyZXQtdG9rZW4=" {
+		t.Fatalf("authorization=%q error=%v", basic, err)
+	}
+	bearer, err := parseGitCredential("authtype=Bearer\ncredential=secret-bearer\n")
+	if err != nil || bearer != "Bearer secret-bearer" {
+		t.Fatalf("authorization=%q error=%v", bearer, err)
+	}
+	for _, malformed := range []string{
+		"username=user\nusername=other\npassword=secret-value\n",
+		"username=user\npassword=secret-value\x00\n",
+		"username=user\n",
+	} {
+		_, err := parseGitCredential(malformed)
+		if err == nil || strings.Contains(err.Error(), "secret-value") {
+			t.Fatalf("malformed credential error=%v", err)
+		}
+	}
+}
+
+func TestWebOriginRulesAreExplicitOriginOnly(t *testing.T) {
+	httpsRule, err := originRule("https://packages.example", true)
+	if err != nil || httpsRule.Port != 443 || !httpsRule.AllowConnect || httpsRule.AllowHTTP || !httpsRule.IncludeSubdomains {
+		t.Fatalf("HTTPS rule=%+v error=%v", httpsRule, err)
+	}
+	httpRule, err := originRule("http://archive.example/", false)
+	if err != nil || httpRule.Port != 80 || !httpRule.AllowHTTP || httpRule.AllowConnect {
+		t.Fatalf("HTTP rule=%+v error=%v", httpRule, err)
+	}
+	for _, unsafe := range []string{
+		"https://127.0.0.1",
+		"https://packages.example/path",
+		"https://user@packages.example",
+		"https://packages.example:444",
+		"file:///etc/passwd",
+	} {
+		if _, err := originRule(unsafe, false); err == nil {
+			t.Fatalf("unsafe Web origin accepted: %s", unsafe)
+		}
+	}
+}
+
+func TestPrivateWebArtifactRefusesSymlinkReplacement(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "blocklist.hosts")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateBytes(path, []byte("replacement")); err == nil {
+		t.Fatal("symlink Web artifact was replaced")
+	}
+	data, _ := os.ReadFile(target)
+	if string(data) != "original" {
+		t.Fatal("symlink target was modified")
+	}
+}
+
+type fakePushBroker struct {
+	pending   []gitgateway.PushRequest
+	confirmed []string
+}
+
+func (b *fakePushBroker) Pending() []gitgateway.PushRequest {
+	return append([]gitgateway.PushRequest(nil), b.pending...)
+}
+
+func (b *fakePushBroker) Confirm(nonce string, _ gitgateway.PushBinding) error {
+	b.confirmed = append(b.confirmed, nonce)
+	return nil
+}
+
+func TestApprovalsUseSeparatePrivateHostControlChannel(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := gitgateway.NewPushApprovalManager(nil, recorder, "sunaba-project-session", "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := gitgateway.PushBinding{
+		ProjectID: "project", Repository: "repository", RemoteName: "origin", RemoteURL: "https://git.example/repository.git",
+		Updates: []gitgateway.RefUpdate{{
+			Ref: "refs/heads/main", Old: strings.Repeat("1", 40), New: strings.Repeat("2", 40),
+		}},
+	}
+	request, err := manager.NewRequest(binding, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := &fakePushBroker{pending: []gitgateway.PushRequest{request}}
+	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-control-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(runtimeBase)
+	if err := os.Chmod(runtimeBase, 0700); err != nil {
+		t.Fatal(err)
+	}
+	control, err := startApprovalControl(root, runtimeBase, broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	var output bytes.Buffer
+	a := &app{input: strings.NewReader(request.Nonce + "\n"), output: &output, errors: &output}
+	approved, err := a.approveActivePushes(context.Background(), root)
+	if err != nil || approved != 1 || len(broker.confirmed) != 1 || broker.confirmed[0] != request.Nonce {
+		t.Fatalf("approved=%d confirmed=%v error=%v output=%s", approved, broker.confirmed, err, output.String())
+	}
+	if info, err := os.Lstat(filepath.Join(runtimeBase, approvalControlSocket)); err != nil || info.Mode().Perm() != 0600 || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("control socket info=%v error=%v", info, err)
 	}
 }
 
