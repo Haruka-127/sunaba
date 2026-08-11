@@ -1,6 +1,6 @@
 # Phase 5: hardeningと運用
 
-状態: 実装完了。fuzz/property、dependency更新契約、policy migration、audit retention/redaction、disk pressure、host reboot、Git partial failure、supply-chain provenanceを自動testへ固定した。最終統合のdev pf実機gateは別項として継続する。
+状態: 完了。fuzz/property、dependency更新契約、policy migration、audit retention/redaction、disk pressure、host reboot、Git partial failure、supply-chain provenanceを自動testへ固定し、dev pf実機gateまで通過した。
 
 ## Fuzz / property
 
@@ -20,7 +20,7 @@ go test ./internal/webgateway -run '^$' -fuzz FuzzNormalizeHostname -fuzztime 10
 go test ./internal/webgateway -run '^$' -fuzz FuzzHostsBlocklistParser -fuzztime 10s
 ```
 
-2026-08-11の実行ではそれぞれ61,671、140,074、141,027、120,709 inputを処理し、crashまたは不変条件違反はなかった。corpus本文はcommitせずseedだけをtestに保持する。
+2026-08-11の最終実行ではそれぞれ72,877、594,323、546,627、776,192 inputを処理し、crashまたは不変条件違反はなかった。corpus本文はcommitせずseedだけをtestに保持する。
 
 ## Dependency / supply chain
 
@@ -77,7 +77,7 @@ SUNABA_DEV_INTEGRATION=1 \
 go test -tags=integration ./test/integration -run 'TestDevSessionNetworkBoundary$' -count=1 -v
 ```
 
-このgateはdocumented `sudo ./bin/sunaba firewall enable|quiesce|disable`を使うため、許可文書の変更と当該実行を人間が確認し、対話sudoを承認できるterminalが必要である。public DNS/HTTPS、host listener、別network VM、metadata、host-to-VM inbound、稼働VMのdeny-all quiesce、session stopを一回の隔離testで確認し、作成した完全名のVM/networkだけをcleanupする。
+このgateはdocumented `sudo ./bin/sunaba firewall enable|quiesce|disable`を使うため、許可文書の変更と当該実行を人間が確認し、対話sudoを承認できるterminalが必要である。public DNS/HTTPS、host listener、別network VM、metadata、host-to-VM inbound、稼働VMのdeny-all quiesce、session stopを一回の隔離testで確認し、作成した完全名のVM/networkだけをcleanupする。2026-08-11に認証済みの人間のterminalから実行し、41.19秒でPASSした。test終了時のfirewall disableまたはVM/network cleanupが失敗した場合もtestをFAILにするため、このPASSは後処理の成功を含む。
 
 ## 通常verify
 

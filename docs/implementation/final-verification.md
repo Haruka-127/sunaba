@@ -6,44 +6,46 @@
 
 | 最終要件 | 実装・再現可能な証拠 | 現在の判定 |
 | --- | --- | --- |
-| Phase 0〜5成果物 | [`phase-0.md`](./phase-0.md)〜[`phase-5.md`](./phase-5.md)、各`internal/*` unit/race test | 実装済み。最新HEADの通常gateはPASS |
-| DG-01 secure network | `TestPhase0SecureNetworkAndGatewayTransport`、`runtime.ValidateSecureSessionSpec` attack test | 個別実機gateの通過記録あり。最終一括再実行待ち |
-| DG-02 Snapshot / Overlay / export | `TestPhase0OverlayFreezeAndExportLayout`、`internal/workspace` attack test | 個別実機gateの通過記録あり。最終一括再実行待ち |
-| DG-03 OpenCode / Model / Attach / terminal | Phase 0/1 integration、`internal/modelgateway`、`internal/attachrelay`、`internal/opencode`、`internal/trustedui` | 個別実機gateの通過記録あり。最終一括再実行待ち |
-| Phase 2 lifecycle / apply / approval | Phase 1/2 integration、`internal/session`、`internal/apply`、`internal/approval`、`internal/lease`、`internal/cleanup` | 個別実機gateの通過記録あり。公開CLI実機gate待ち |
-| 永続Project VM / shell / TTL / idle | `TestPublicCLIPersistentSupervisorAndSanitizedShell`、supervisor control unit/race test | 実装・自動test済み。公開CLI実機gate待ち |
-| Git Gateway | `TestPhase3GitGatewayInAgentVM`、`internal/gitgateway` smart HTTP/TOCTOU/partial-failure/fuzz test | 個別gateの通過記録あり。最終一括再実行待ち |
-| Web Gateway | Phase 4 measurement/integration、`internal/webgateway` attack/compatibility/fuzz test | 個別gateの通過記録あり。最終一括再実行待ち |
-| Phase 5 hardening | dependency/provenance、migration、retention/redaction、ENOSPC/reboot/partial failure、4 bounded fuzz target | 自動gateはPASS。dev pf実機gate待ち |
-| dev active-session egress | `TestDevSessionNetworkBoundary`がactive public egress、host/LAN/peer/inbound拒否、稼働VMのdeny-all quiesce、stopを検査 | 実装・compile済み。人間承認を伴うsudo実行待ち |
-| 最終cleanup / user resource非干渉 | exact nameとowner/project/session labelを再検証するcleanup、最終`container ls` / network / volume inventory | 未完了。通常stop、個別KILL、force delete、system stopが固着したexact-owned VM 2台を、承認済みの公式実装準拠launchd fallbackで復旧中。`buildkit`は事前inventoryと同一状態へ復元する |
-| Git運用 | `dev`上の意図別Conventional Commit、`git status`、remote非書込み | 本台帳のcommit後はclean、pushなし。最終操作後に再確認する |
+| Phase 0〜5成果物 | [`phase-0.md`](./phase-0.md)〜[`phase-5.md`](./phase-5.md)、各`internal/*` unit/race test | PASS。最新HEADの通常gateを再実行済み |
+| DG-01 secure network | `TestPhase0SecureNetworkAndGatewayTransport`、`runtime.ValidateSecureSessionSpec` attack test | PASS。public IPv4/IPv6、host gateway、他VM、private、metadata、UDP、外部DNS、raw ICMPを実VMで直接拒否 |
+| DG-02 Snapshot / Overlay / export | `TestPhase0OverlayFreezeAndExportLayout`、`internal/workspace` attack test | PASS。OverlayFS layout、freeze、safe exportとhost再計算を直接検証 |
+| DG-03 OpenCode / Model / Attach / terminal | Phase 0/1 integration、`internal/modelgateway`、`internal/attachrelay`、`internal/opencode`、`internal/trustedui` | PASS。固定v1.18.16、認証、version一致、pause/revoke、terminal sanitizeを直接検証 |
+| Phase 2 lifecycle / apply / approval | Phase 1/2 integration、`internal/session`、`internal/apply`、`internal/approval`、`internal/lease`、`internal/cleanup` | PASS。pause/resume、orphan cleanup、export、approval、crash-safe applyを再実行済み |
+| 永続Project VM / shell / TTL / idle | `TestPublicCLIPersistentSupervisorAndSanitizedShell`、supervisor control unit/race test | PASS。停止VMのOverlayFS再mount修正後に公開CLI実機gateを再実行 |
+| Git Gateway | `TestPhase3GitGatewayInAgentVM`、`internal/gitgateway` smart HTTP/TOCTOU/partial-failure/fuzz test | PASS。限定runtime復旧後のclean systemで実VMgateを27秒で再実行 |
+| Web Gateway | Phase 4 measurement/integration、`internal/webgateway` attack/compatibility/fuzz test | PASS。実VMattack/compatibility gateと外部dialなしmeasurementを再実行 |
+| Phase 5 hardening | dependency/provenance、migration、retention/redaction、ENOSPC/reboot/partial failure、4 bounded fuzz target | PASS。通常gateと4 target各10秒のbounded fuzzを再実行 |
+| dev active-session egress | `TestDevSessionNetworkBoundary`がactive public egress、host/LAN/peer/inbound拒否、稼働VMのdeny-all quiesce、stopを検査 | PASS。人間の認証済みterminalから41.19秒で実行し、firewall disableとexact cleanupを含め成功 |
+| 最終cleanup / user resource非干渉 | exact nameとowner/project/session labelを再検証するcleanup、最終`container ls` / network / volume / process / temp inventory | PASS。`buildkit`とbuiltin `default`だけが残り、volume、sunaba process、検証tempは残っていない |
+| Git運用 | `dev`上の意図別Conventional Commit、`git status`、remote非書込み | PASS。本台帳を意図別commit後にcleanを再確認し、pushしない |
 
-## 最新の非破壊gate
+## 最新の自動gate
 
 ```sh
 scripts/verify.sh
 SUNABA_FUZZ=1 scripts/verify.sh
 ```
 
-通常gateはformat、全unit、全race、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを通過した。bounded fuzzはModel Responses envelope、Git push binding、Web hostname、blocklist parserの4 targetを各10秒実行して通過した。実OpenAI/Git credentialを使うbillable live requestは自動実行せず、mock upstream contractを正とする。
+通常gateはformat、全unit、全race、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを通過した。bounded fuzzはModel Responses envelope、Git push binding、Web hostname、blocklist parserの4 targetを各10秒実行して通過した。実OpenAI credentialを使うbillable live requestは自動実行せず、mock upstream contractを正とする。
 
-## 未完了の最終手順
+## 最新の実機gate
 
-1. 対応Supervisor/runtime directoryがないことを再確認し、[`allowed-host-operations.md`](../plan/allowed-host-operations.md)の承認済みlaunchd fallbackとsystem startを1回だけ実行する。
-2. exact-owned stuck VMだけを復旧・削除し、`buildkit`を事前inventoryと同一状態へ復元する。runtime/plugin processや他resourceを直接変更しない。
-3. 隔離実機gateを実行する。
+2026-08-11の最新HEADで次を直接実行した。
 
-   ```sh
-   SUNABA_INTEGRATION=1 scripts/verify.sh
-   ```
+```sh
+SUNABA_INTEGRATION=1 scripts/verify.sh
+SUNABA_PHASE3_INTEGRATION=1 go test -tags=integration ./test/integration -run '^TestPhase3GitGatewayInAgentVM$' -count=1 -v
+SUNABA_PHASE4_INTEGRATION=1 go test -tags=integration ./test/integration -run '^TestPhase4WebGatewayInAgentVM$' -count=1 -v
+SUNABA_PHASE4_MEASUREMENT=1 go test -tags=integration ./test/integration -run '^TestPhase4MeasureWebClients$' -count=1 -v
+SUNABA_DEV_INTEGRATION=1 go test -tags=integration ./test/integration -run '^TestDevSessionNetworkBoundary$' -count=1 -v
+```
 
-4. pf操作の個別承認後、dev gateを実行する。
+一括scriptは通常gate、Phase 0、Phase 1、Phase 2、公開CLIまでPASSした後、Apple Container 1.2.2のguest exec/runtimeがPhase 3 VMで無応答となり中断した。VMはserver healthだけでなく個別`container exec`、通常stop、exact KILL、exact force deleteも応答しなかったため、製品test failureとruntime固着を混同せず、[`allowed-host-operations.md`](../plan/allowed-host-operations.md)の承認済み限定復旧を適用した。clean system直後の同一Phase 3 gateは27秒でPASSし、Phase 4 integrationとmeasurementも続けてPASSした。したがって全実機境界の合成判定はPASSだが、「一括scriptが無中断で完走した」とは記録しない。
 
-   ```sh
-   SUNABA_INTEGRATION=1 SUNABA_DEV_INTEGRATION=1 scripts/verify.sh
-   ```
+dev gateはsudo timestampがterminal単位であり自動実行環境から認証票を利用できなかったため、人間の同一terminalで実行した。public DNS/HTTPS、host listener、別network VM、metadata、host-to-VM inbound、deny-all quiesce、session stop、firewall disable、exact cleanupを含め41.19秒でPASSした。
 
-5. 作成したexact `sunaba-` test resourceをcleanupし、container/network/volume、一時Project、host process、worktreeの最終inventoryを記録する。
+## 復旧と最終cleanup
 
-上記が完了するまで、最新HEADの最終統合とgoalを完了扱いにしない。
+固着したVMは完全名、`dev.sunaba.owner`、Project、Session、mode label、Supervisor/runtime/guard不在を毎段再検証し、未exportの利用者成果物がない一時test VMだけを対象にした。2回の独立した復旧cycleで、Apple Container 1.2.2のAPIServerを公式stop後段と同じ`gui/501` domainのexact labelでそれぞれ1回だけbootoutし、直ちにsystem startした（合計2回）。同じcycle内でbootoutを反復せず、他prefix、sudo、runtime/plugin processへの直接signalは使っていない。
+
+復旧前にrunningだったplugin管理`buildkit`は、同じID、image、labels、mount、network設定でrunningへ復元した。system再起動により動的IP/MAC addressは再割当されたため、runtime addressまで不変とは主張しない。最終inventoryではcontainerは`buildkit`だけ、networkはbuiltin `default`だけ、volumeなし、sunaba Supervisor/client processなしである。列挙・由来確認した検証用`/private/tmp/sunaba-*` directory、socket、cacheも削除した。利用者container、network、volume、image、Project成果物、remote repositoryは変更していない。

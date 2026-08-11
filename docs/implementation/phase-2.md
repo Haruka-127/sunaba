@@ -52,7 +52,9 @@ secure policy digestはCPU、memory、workspace disk bytes、process、file size
 
 session ready前とresume時に、guest vCPU、memory、bounded filesystem size、OpenCode UID、`/proc/<pid>/limits`をhost側からprobeし、policyと一致しなければcapabilityをactiveにしない。Apple Containerは指定vCPUにkernel用1 vCPU、指定memoryに固定VM overheadを加えるため、採用版で測定した上限としてCPUは指定値+1以下、memoryは指定値+128 MiB以下を許容する。workspace disk、nproc、fsize、nofileはpolicy値以下ではなく完全一致を要求し、結果をauditする。
 
-freeze/exportではOpenCodeとguest relayを終了し、session credential fileを削除する。bounded overlayのmerged workspaceを停止VMのrootfs内へcopyし、host safe parserがtrusted baselineとの差からadd/modify/deleteを再計算する。guest提供diffやmanifestは使わない。ext4 imageはunmount後にexport対象から削除する。safe parserはpath traversal、Protected Path、hardlink、special file、xattr、size/entry上限を同じく拒否する。
+freeze/exportではOpenCodeとguest relayを終了し、session credential fileを削除する。停止したApple Containerをexport用に再開するとLinux mount namespaceが新しくなるため、先にGateway gateとleaseを失効させ、Local Attach Relayを閉じた状態でVMを再開し、ext4 loopとOverlayFS workspaceだけを再mountする。この間はOpenCode、guest relay、capabilityを再開しない。mount確認後にhost channelを閉じ、bounded overlayのmerged workspaceを停止VMのrootfs内へcopyする。
+
+host safe parserはtrusted baselineとの差からadd/modify/deleteを再計算し、guest提供diffやmanifestを使わない。snapshot manifest確定時はcallerのentry sliceを共有せず、materialize直前にもcanonical digestを再計算して一致を要求する。不一致診断はpathとfieldだけに限定し、内容やdigest値をlogへ出さない。ext4 imageはunmount後にexport対象から削除する。safe parserはpath traversal、Protected Path、hardlink、special file、xattr、size/entry上限を同じく拒否する。
 
 再現コマンド:
 
@@ -78,4 +80,4 @@ control locator、Unix socket、startup logはcurrent user所有のprivate direc
 SUNABA_CLI_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPublicCLI' -count=1 -v
 ```
 
-このgateは公開`project init`/`up`からpaused VMを作成し、shellで作ったfileがpause/resume後も残ること、悪意あるOSC/BELが可視化されること、export後にChange Setが得られsupervisor/VM/Project stateをexact cleanupできることを検証する。
+このgateは公開`project init`/`up`からpaused VMを作成し、shellで作ったfileがpause/resume後も残ること、悪意あるOSC/BELが可視化されること、停止VMのOverlayFSを再構成したexport後に正しいChange Setが得られ、supervisor/VM/Project stateをexact cleanupできることを検証する。2026-08-11の最新HEAD実機再実行でPASSした。
