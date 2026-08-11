@@ -41,6 +41,26 @@ func TestParseFrozenRootFS(t *testing.T) {
 	}
 }
 
+func TestParseFrozenRootFSRecognizesObservedWhiteoutHardlinks(t *testing.T) {
+	baseline := fixtureBaseline(t)
+	for _, linkname := range []string{"var/lib/sunaba/work/index/#7", "var/lib/sunaba/work/work/#3"} {
+		t.Run(linkname, func(t *testing.T) {
+			archive, quarantine := writeRootFSFixture(t, append(baselineTarEntries(t),
+				tarFixtureEntry{header: tar.Header{Name: upperPrefix, Typeflag: tar.TypeDir, Mode: 0755}},
+				tarFixtureEntry{header: tar.Header{Name: upperPrefix + "/deleted.txt", Typeflag: tar.TypeLink, Linkname: linkname}},
+			)...)
+			parsed, err := ParseFrozenRootFS(archive, quarantine, baseline, DefaultExportPolicy())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer parsed.Close()
+			if len(parsed.Upper) != 1 || !parsed.Upper[0].Whiteout {
+				t.Fatalf("upper=%+v", parsed.Upper)
+			}
+		})
+	}
+}
+
 func TestParseFrozenRootFSRejectsAttacks(t *testing.T) {
 	baseline := fixtureBaseline(t)
 	tests := []struct {

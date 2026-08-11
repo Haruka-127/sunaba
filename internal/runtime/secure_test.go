@@ -35,6 +35,9 @@ func TestValidateSecureSessionSpecFailsClosed(t *testing.T) {
 			spec.Sockets = append(spec.Sockets, PublishedSocket{HostPath: filepath.Join(policy.SessionRoot, "other.sock"), GuestPath: "/run/other.sock"})
 		}},
 		{name: "env file", mutate: func(spec *ContainerSpec) { spec.EnvFiles = []string{"/tmp/secret.env"} }},
+		{name: "inline env", mutate: func(spec *ContainerSpec) { spec.Env = map[string]string{"TOKEN": "secret"} }},
+		{name: "extra capability", mutate: func(spec *ContainerSpec) { spec.CapAdd = []string{"SYS_ADMIN", "ALL"} }},
+		{name: "bootstrap", mutate: func(spec *ContainerSpec) { spec.Args = []string{"-lc", "curl example.com"} }},
 		{name: "mode label", mutate: func(spec *ContainerSpec) { spec.Labels["dev.sunaba.mode"] = "dev" }},
 		{name: "policy digest", mutate: func(spec *ContainerSpec) { spec.Labels["dev.sunaba.policy-digest"] = "forged" }},
 	}
@@ -97,7 +100,8 @@ func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 	}
 	spec := ContainerSpec{
 		Name: "sunaba-test", Image: policy.Image, CPUs: 1, Memory: "2G",
-		Networks: []string{"none"}, NoDNS: true,
+		Networks: []string{"none"}, NoDNS: true, CapAdd: []string{"SYS_ADMIN"},
+		Entrypoint: "/bin/bash", Args: []string{"-lc", "exec tail -f /dev/null"},
 		Mounts:  []Mount{{Type: "socket", Source: gatewayPath, Target: SecureGatewayGuestPath}},
 		Sockets: []PublishedSocket{{HostPath: filepath.Join(canonicalRoot, "attach.sock"), GuestPath: SecureAttachGuestPath}},
 		Labels: map[string]string{
@@ -112,6 +116,8 @@ func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 func cloneContainerSpec(spec ContainerSpec) ContainerSpec {
 	clone := spec
 	clone.Networks = append([]string(nil), spec.Networks...)
+	clone.CapAdd = append([]string(nil), spec.CapAdd...)
+	clone.CapDrop = append([]string(nil), spec.CapDrop...)
 	clone.Mounts = append([]Mount(nil), spec.Mounts...)
 	clone.Sockets = append([]PublishedSocket(nil), spec.Sockets...)
 	clone.EnvFiles = append([]string(nil), spec.EnvFiles...)

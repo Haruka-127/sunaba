@@ -85,6 +85,15 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	if len(spec.EnvFiles) != 0 {
 		return fmt.Errorf("secure session does not accept environment files")
 	}
+	if len(spec.Env) != 0 {
+		return fmt.Errorf("secure session secrets and environment are copied after VM creation")
+	}
+	if len(spec.CapAdd) != 1 || spec.CapAdd[0] != "SYS_ADMIN" || len(spec.CapDrop) != 0 {
+		return fmt.Errorf("secure session requires only SYS_ADMIN for its guest-local OverlayFS")
+	}
+	if spec.Entrypoint != "/bin/bash" || len(spec.Args) != 2 || spec.Args[0] != "-lc" || spec.Args[1] != "exec tail -f /dev/null" || spec.Workdir != "" || spec.ReadOnly {
+		return fmt.Errorf("secure session bootstrap command does not match host policy")
+	}
 	if len(spec.Mounts) != 1 {
 		return fmt.Errorf("secure session requires exactly one Project-bound Gateway socket mount")
 	}

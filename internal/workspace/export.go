@@ -18,7 +18,7 @@ const (
 	upperPrefix = "var/lib/sunaba/upper"
 )
 
-var whiteoutLinkPattern = regexp.MustCompile(`^var/lib/sunaba/work/index/#[0-9]+$`)
+var whiteoutLinkPattern = regexp.MustCompile(`^var/lib/sunaba/work/(?:index|work)/#[0-9]+$`)
 
 type ExportPolicy struct {
 	Workspace         SnapshotPolicy

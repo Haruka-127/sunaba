@@ -204,6 +204,63 @@ func TestGatewayEnforcesConcurrency(t *testing.T) {
 	wait.Wait()
 }
 
+func TestGatewayEnforcesExpiryQuotaAndBodyLimits(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = io.WriteString(response, `{}`)
+	}))
+	defer upstream.Close()
+
+	expired := testCapability(t)
+	expired.ExpiresAt = time.Unix(100, 0)
+	expiredGateway, err := New(Config{
+		UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: expired,
+		Now: func() time.Time { return time.Unix(101, 0) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredServer := httptest.NewServer(expiredGateway)
+	response := gatewayRequest(t, context.Background(), expiredServer.URL, testToken, testModel)
+	_ = response.Body.Close()
+	expiredServer.Close()
+	if response.StatusCode != http.StatusUnauthorized || calls != 0 {
+		t.Fatalf("expired status=%d upstream calls=%d", response.StatusCode, calls)
+	}
+
+	limited := testCapability(t)
+	limited.MaxRequests = 1
+	limited.MaxRequestBytes = 64
+	limitedGateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: limited})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limitedServer := httptest.NewServer(limitedGateway)
+	defer limitedServer.Close()
+	first := gatewayRequest(t, context.Background(), limitedServer.URL, testToken, testModel)
+	_ = first.Body.Close()
+	second := gatewayRequest(t, context.Background(), limitedServer.URL, testToken, testModel)
+	_ = second.Body.Close()
+	if first.StatusCode != http.StatusOK || second.StatusCode != http.StatusTooManyRequests || calls != 1 {
+		t.Fatalf("quota statuses=%d,%d calls=%d", first.StatusCode, second.StatusCode, calls)
+	}
+
+	oversized := testCapability(t)
+	oversized.MaxRequestBytes = 8
+	oversizedGateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: oversized})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversizedServer := httptest.NewServer(oversizedGateway)
+	defer oversizedServer.Close()
+	tooLarge := gatewayRequest(t, context.Background(), oversizedServer.URL, testToken, testModel)
+	_ = tooLarge.Body.Close()
+	if tooLarge.StatusCode != http.StatusRequestEntityTooLarge || calls != 1 {
+		t.Fatalf("oversized status=%d calls=%d", tooLarge.StatusCode, calls)
+	}
+}
+
 func testGateway(t *testing.T, upstream string, audit func(AuditEvent)) *Gateway {
 	t.Helper()
 	gateway, err := New(Config{UpstreamBaseURL: upstream, UpstreamAPIKey: testKey, Capability: testCapability(t), Audit: audit})

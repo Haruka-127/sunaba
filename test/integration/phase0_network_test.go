@@ -132,7 +132,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		Memory:     "2G",
 		Networks:   []string{"none"},
 		NoDNS:      true,
-		CapAdd:     []string{"ALL"},
+		CapAdd:     []string{"SYS_ADMIN"},
 		Entrypoint: "/bin/bash",
 		Args:       []string{"-lc", "exec tail -f /dev/null"},
 		Mounts: []sunabaruntime.Mount{{
@@ -475,7 +475,7 @@ func unixHTTPClient(socketPath string) *http.Client {
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
 	}}
-	return &http.Client{Transport: transport, Timeout: time.Second}
+	return &http.Client{Transport: transport, Timeout: 10 * time.Second}
 }
 
 func cleanupContainer(t *testing.T, ctx context.Context, rt *sunabaruntime.AppleContainer, name, runID string) {
