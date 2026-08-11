@@ -76,7 +76,7 @@ func (c *supervisorClient) info(ctx context.Context) (supervisorInfo, error) {
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	var info supervisorInfo
-	if decoder.Decode(&info) != nil || decoder.Decode(&struct{}{}) != io.EOF || info.Version != 1 || info.ProjectID == "" || info.SessionID == "" || info.Container != "sunaba-"+info.ProjectID+"-"+info.SessionID || !filepath.IsAbs(info.RuntimeRoot) || filepath.Dir(info.RuntimeRoot) != filepath.Dir(c.socket) || !filepath.IsAbs(info.WorkspacePath) || info.AttachURL == "" || len(info.ServerPassword) < 32 || info.ExpiresAt.IsZero() {
+	if decoder.Decode(&info) != nil || decoder.Decode(&struct{}{}) != io.EOF || info.Version != 1 || info.ProjectID == "" || info.SessionID == "" || info.Container != "sunaba-"+info.ProjectID+"-"+info.SessionID || !filepath.IsAbs(info.RuntimeRoot) || filepath.Dir(info.RuntimeRoot) != filepath.Dir(c.socket) || !filepath.IsAbs(info.WorkspacePath) || info.AttachURL == "" || len(info.ServerPassword) < 32 || info.ExpiresAt.IsZero() || info.IdleSeconds < 1 || info.IdleDeadline.IsZero() {
 		return supervisorInfo{}, fmt.Errorf("active supervisor returned invalid session identity")
 	}
 	return info, nil
@@ -84,7 +84,7 @@ func (c *supervisorClient) info(ctx context.Context) (supervisorInfo, error) {
 
 func (c *supervisorClient) operation(ctx context.Context, operation string) error {
 	switch operation {
-	case "pause", "resume", "export", "destroy":
+	case "pause", "resume", "export", "destroy", "heartbeat":
 	default:
 		return fmt.Errorf("invalid supervisor operation")
 	}

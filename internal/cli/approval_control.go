@@ -59,6 +59,8 @@ type supervisorInfo struct {
 	ServerPassword string    `json:"server_password"`
 	State          string    `json:"state"`
 	ExpiresAt      time.Time `json:"expires_at"`
+	IdleSeconds    int64     `json:"idle_seconds"`
+	IdleDeadline   time.Time `json:"idle_deadline"`
 }
 
 type shellRequest struct {
@@ -89,20 +91,25 @@ type controlledSession struct {
 	projectState   string
 	serverPassword string
 	expiresAt      time.Time
+	idleTimeout    time.Duration
+	lastActivity   time.Time
+	now            func() time.Time
 	mu             sync.Mutex
 	state          string
 	exit           chan struct{}
 	exitOnce       sync.Once
 }
 
-func newControlledSession(active *session.Session, projectState, serverPassword string, expiresAt time.Time) (*controlledSession, error) {
-	if active == nil || projectState == "" || len(serverPassword) < 32 || expiresAt.IsZero() {
+func newControlledSession(active *session.Session, projectState, serverPassword string, expiresAt time.Time, idleTimeout time.Duration) (*controlledSession, error) {
+	if active == nil || projectState == "" || len(serverPassword) < 32 || expiresAt.IsZero() || idleTimeout < time.Second {
 		return nil, fmt.Errorf("supervisor session control is incomplete")
 	}
+	now := time.Now
 	return &controlledSession{
 		active: active, persistent: active, projectID: active.ProjectID, sessionID: active.SessionID, container: active.Container,
 		runtimeRoot: active.Root, workspacePath: active.WorkspacePath, attachURL: active.AttachURL,
-		projectState: projectState, serverPassword: serverPassword, expiresAt: expiresAt, state: "running", exit: make(chan struct{}),
+		projectState: projectState, serverPassword: serverPassword, expiresAt: expiresAt,
+		idleTimeout: idleTimeout, lastActivity: now(), now: now, state: "running", exit: make(chan struct{}),
 	}, nil
 }
 
@@ -112,7 +119,7 @@ func (s *controlledSession) info() supervisorInfo {
 	return supervisorInfo{
 		Version: 1, ProjectID: s.projectID, SessionID: s.sessionID, Container: s.container,
 		RuntimeRoot: s.runtimeRoot, WorkspacePath: s.workspacePath, AttachURL: s.attachURL, ServerPassword: s.serverPassword,
-		State: s.state, ExpiresAt: s.expiresAt,
+		State: s.state, ExpiresAt: s.expiresAt, IdleSeconds: int64(s.idleTimeout / time.Second), IdleDeadline: s.lastActivity.Add(s.idleTimeout),
 	}
 }
 
@@ -136,7 +143,7 @@ func (s *controlledSession) pause(ctx context.Context) error {
 func (s *controlledSession) resume(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !time.Now().Before(s.expiresAt) {
+	if !s.currentTime().Before(s.expiresAt) {
 		return fmt.Errorf("Agent Session capability expired; export or recreate the stopped VM")
 	}
 	if s.state == "running" {
@@ -152,8 +159,33 @@ func (s *controlledSession) resume(ctx context.Context) error {
 	if s.persistent != nil {
 		s.attachURL = s.persistent.AttachURL
 	}
+	s.lastActivity = s.currentTime()
 	s.state = "running"
 	return nil
+}
+
+func (s *controlledSession) heartbeat() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.currentTime()
+	if s.state != "running" || !now.Before(s.expiresAt) {
+		return fmt.Errorf("Agent Session is not active")
+	}
+	s.lastActivity = now
+	return nil
+}
+
+func (s *controlledSession) idleExpired(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state == "running" && s.idleTimeout >= time.Second && !now.Before(s.lastActivity.Add(s.idleTimeout))
+}
+
+func (s *controlledSession) currentTime() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func (s *controlledSession) exportAndDestroy(ctx context.Context) error {
@@ -203,7 +235,7 @@ func (s *controlledSession) destroy(ctx context.Context) error {
 func (s *controlledSession) shell(ctx context.Context, command string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !time.Now().Before(s.expiresAt) {
+	if !s.currentTime().Before(s.expiresAt) {
 		return "", fmt.Errorf("Agent Session capability expired")
 	}
 	if s.state != "running" {
@@ -212,6 +244,7 @@ func (s *controlledSession) shell(ctx context.Context, command string) (string, 
 	if command == "" || len(command) > 16<<10 || strings.IndexByte(command, 0) >= 0 {
 		return "", fmt.Errorf("guest shell command is invalid")
 	}
+	s.lastActivity = s.currentTime()
 	outer := "runuser -u sunaba-agent -- /run/sunaba/shell-wrapper \"$1\" 2>&1 | head -c 1048576; status=${PIPESTATUS[0]}; printf '\\n[SUNABA_EXIT=%d]\\n' \"$status\"; exit 0"
 	output, err := s.active.ExecOutput(ctx, []string{"/bin/bash", "-lc", outer, "sunaba-shell", command})
 	return trustedui.SanitizeTerminal(output), err
@@ -294,6 +327,13 @@ func startApprovalControl(projectState, runtimeBase string, broker pushApprovalB
 				response.WriteHeader(http.StatusNoContent)
 			})
 		}
+		mux.HandleFunc("POST /v1/session/heartbeat", func(response http.ResponseWriter, _ *http.Request) {
+			if err := controlled.heartbeat(); err != nil {
+				http.Error(response, err.Error(), http.StatusConflict)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+		})
 		mux.HandleFunc("POST /v1/session/shell", func(response http.ResponseWriter, request *http.Request) {
 			decoder := json.NewDecoder(io.LimitReader(request.Body, 32<<10))
 			decoder.DisallowUnknownFields()

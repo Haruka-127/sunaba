@@ -325,7 +325,9 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 		return errors.Join(err, client.operation(pauseContext, "pause"))
 	}
 	tui.Stdin, tui.Stdout, tui.Stderr = a.input, a.output, a.errors
-	tuiErr := tui.Run()
+	tuiErr := runHostTUIWithHeartbeat(ctx, tui, time.Duration(projectPolicy.Session.IdleSeconds)*time.Second, func(heartbeatContext context.Context) error {
+		return client.operation(heartbeatContext, "heartbeat")
+	})
 	pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	pauseErr := client.operation(pauseContext, "pause")
 	cancel()
@@ -333,6 +335,55 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 		fmt.Fprintf(a.output, "Agent Session paused in persistent VM %s. Resume with 'sunaba agent' or export with 'sunaba changes export'.\n", info.Container)
 	}
 	return errors.Join(tuiErr, pauseErr)
+}
+
+func runHostTUIWithHeartbeat(ctx context.Context, tui *exec.Cmd, idleTimeout time.Duration, heartbeat func(context.Context) error) error {
+	if tui == nil || heartbeat == nil || idleTimeout < time.Second {
+		return fmt.Errorf("Host TUI heartbeat configuration is incomplete")
+	}
+	if err := tui.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- tui.Wait() }()
+	interval := idleTimeout / 3
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	waitAfterInterrupt := func(reason error) error {
+		if tui.Process != nil {
+			_ = tui.Process.Signal(os.Interrupt)
+		}
+		select {
+		case waitErr := <-done:
+			return errors.Join(reason, waitErr)
+		case <-time.After(5 * time.Second):
+			if tui.Process != nil {
+				_ = tui.Process.Kill()
+			}
+			return errors.Join(reason, <-done)
+		}
+	}
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			return waitAfterInterrupt(ctx.Err())
+		case <-ticker.C:
+			heartbeatContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := heartbeat(heartbeatContext)
+			cancel()
+			if err != nil {
+				return waitAfterInterrupt(fmt.Errorf("Host TUI heartbeat failed: %w", err))
+			}
+		}
+	}
 }
 
 func (a *app) shell(ctx context.Context, args []string) (returnErr error) {
@@ -402,10 +453,16 @@ func (a *app) status(ctx context.Context, args []string) error {
 		return err
 	}
 	states := make([]string, 0)
+	sessionExpiry := "none"
+	idleDeadline := "none"
+	unexported := "none"
 	listErr := error(nil)
 	if client, clientErr := openSupervisorClient(projectState); clientErr == nil {
 		if info, infoErr := client.info(ctx); infoErr == nil && info.ProjectID == projectPolicy.ProjectID {
 			states = append(states, info.Container+"="+info.State+"/"+projectPolicy.Mode)
+			sessionExpiry = info.ExpiresAt.UTC().Format(time.RFC3339)
+			idleDeadline = info.IdleDeadline.UTC().Format(time.RFC3339)
+			unexported = "possible (run 'sunaba changes export' to compute the trusted Change Set)"
 		} else if infoErr != nil {
 			listErr = infoErr
 		} else {
@@ -418,20 +475,36 @@ func (a *app) status(ctx context.Context, args []string) error {
 		for _, item := range containers {
 			if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == projectPolicy.ProjectID {
 				states = append(states, item.Name+"="+string(item.State)+"/"+item.Labels["dev.sunaba.mode"])
+				unexported = "possible (owned VM exists without an attached supervisor)"
 			}
 		}
 	} else {
 		listErr = clientErr
 	}
 	sort.Strings(states)
+	sessionVMs := strings.Join(states, ", ")
+	if sessionVMs == "" {
+		sessionVMs = "none"
+	}
 	pending := "none"
 	if change, pendingErr := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID); pendingErr == nil {
 		pending = fmt.Sprintf("%s (%d changes)", change.ChangeSet.Digest, len(change.ChangeSet.Changes))
 	}
-	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nPending Change Set: %s\n",
+	gitState := "disabled"
+	if len(projectPolicy.Git.Remotes) == 1 {
+		gitState = "enabled (fixed HTTPS remote)"
+	}
+	webState := "disabled"
+	if projectPolicy.Web.Enabled {
+		webState = fmt.Sprintf("enabled (%d origin rules, pinned blocklist %s)", len(projectPolicy.Web.Rules), projectPolicy.Web.BlocklistSHA256)
+	}
+	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
 		projectPolicy.ProjectRoot, projectPolicy.ProjectID, projectPolicy.Mode, projectPolicy.SchemaVersion,
 		projectPolicy.Dependency.OpenCode, projectPolicy.Dependency.AppleContainer, projectPolicy.Dependency.AgentImage,
-		strings.Join(states, ", "), pending)
+		sessionVMs, sessionExpiry, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, pending,
+		projectPolicy.Resources.CPUs, projectPolicy.Resources.Memory, projectPolicy.Resources.DiskBytes, projectPolicy.Resources.ProcessMax, projectPolicy.Resources.FileSizeMax, projectPolicy.Resources.OpenFileMax,
+		projectPolicy.Model.MaxRequests, projectPolicy.Model.MaxConcurrent, projectPolicy.Model.MaxRequestBytes, projectPolicy.Model.MaxResponseBytes,
+		gitState, webState)
 	return listErr
 }
 

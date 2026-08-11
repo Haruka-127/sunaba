@@ -202,7 +202,8 @@ func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {
 		}
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt)
+	idleTimeout := time.Duration(managed.projectPolicy.Session.IdleSeconds) * time.Second
+	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, idleTimeout)
 	if err != nil {
 		return err
 	}
@@ -214,6 +215,15 @@ func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {
 	expiry := time.NewTimer(time.Until(managed.expiresAt))
 	defer expiry.Stop()
 	expiryChannel := expiry.C
+	idleInterval := idleTimeout / 3
+	if idleInterval > 30*time.Second {
+		idleInterval = 30 * time.Second
+	}
+	if idleInterval < time.Second {
+		idleInterval = time.Second
+	}
+	idleTicker := time.NewTicker(idleInterval)
+	defer idleTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -229,6 +239,15 @@ func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {
 				return fmt.Errorf("pause expired Agent Session: %w", pauseErr)
 			}
 			expiryChannel = nil
+		case now := <-idleTicker.C:
+			if controlled.idleExpired(now) {
+				pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				pauseErr := controlled.pause(pauseContext)
+				cancel()
+				if pauseErr != nil {
+					return fmt.Errorf("pause idle Agent Session: %w", pauseErr)
+				}
+			}
 		}
 	}
 }
@@ -248,7 +267,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 		}
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt)
+	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second)
 	if err != nil {
 		return err
 	}
@@ -270,7 +289,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 		return err
 	}
 	tui.Stdin, tui.Stdout, tui.Stderr = a.input, a.output, a.errors
-	tuiErr := tui.Run()
+	tuiErr := runHostTUIWithHeartbeat(ctx, tui, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second, func(context.Context) error { return controlled.heartbeat() })
 	exportContext, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	exportErr := controlled.exportAndDestroy(exportContext)
 	cancel()
@@ -300,7 +319,7 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 		}
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt)
+	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second)
 	if err != nil {
 		return err
 	}

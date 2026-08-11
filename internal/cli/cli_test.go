@@ -220,7 +220,7 @@ func TestSupervisorExpiryRejectsResumeAndShell(t *testing.T) {
 		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
 		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-session-session", workspacePath: "/workspace/sunaba-session",
 		attachURL: "http://127.0.0.1:12345", projectState: "/private/tmp/project", serverPassword: strings.Repeat("s", 32),
-		expiresAt: time.Now().Add(-time.Second), state: "paused", exit: make(chan struct{}),
+		expiresAt: time.Now().Add(-time.Second), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
 	}
 	if err := controlled.resume(context.Background()); err == nil || target.resumed != 0 {
 		t.Fatalf("expired resume error=%v resumed=%d", err, target.resumed)
@@ -231,13 +231,34 @@ func TestSupervisorExpiryRejectsResumeAndShell(t *testing.T) {
 	}
 }
 
+func TestSupervisorHeartbeatExtendsIdleDeadline(t *testing.T) {
+	clock := time.Unix(1_700_000_000, 0)
+	controlled := &controlledSession{
+		active: &fakeSessionControlTarget{}, expiresAt: clock.Add(time.Hour), idleTimeout: 10 * time.Second,
+		lastActivity: clock, now: func() time.Time { return clock }, state: "running", exit: make(chan struct{}),
+	}
+	if controlled.idleExpired(clock.Add(9 * time.Second)) {
+		t.Fatal("session expired before its idle deadline")
+	}
+	clock = clock.Add(8 * time.Second)
+	if err := controlled.heartbeat(); err != nil {
+		t.Fatal(err)
+	}
+	if controlled.idleExpired(clock.Add(9 * time.Second)) {
+		t.Fatal("heartbeat did not extend the idle deadline")
+	}
+	if !controlled.idleExpired(clock.Add(10 * time.Second)) {
+		t.Fatal("session remained active at the extended idle deadline")
+	}
+}
+
 func TestSupervisorExportWithoutChangesDestroysPersistentVM(t *testing.T) {
 	target := &fakeSessionControlTarget{}
 	controlled := &controlledSession{
 		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
 		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-session-session", workspacePath: "/workspace/sunaba-session",
 		attachURL: "http://127.0.0.1:12345", projectState: "/private/tmp/project", serverPassword: strings.Repeat("s", 32),
-		expiresAt: time.Now().Add(time.Hour), state: "paused", exit: make(chan struct{}),
+		expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
 	}
 	if err := controlled.exportAndDestroy(context.Background()); err != nil {
 		t.Fatal(err)
@@ -367,7 +388,7 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
 		runtimeRoot: filepath.Join(runtimeBase, "sunaba-session-session"), workspacePath: "/workspace/sunaba-session",
 		attachURL: "http://127.0.0.1:12345", projectState: projectState, serverPassword: strings.Repeat("s", 32),
-		expiresAt: time.Now().Add(time.Hour), state: "running", exit: make(chan struct{}),
+		expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "running", exit: make(chan struct{}),
 	}
 	control, err := startApprovalControl(projectState, runtimeBase, nil, controlled)
 	if err != nil {
@@ -386,6 +407,12 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 	info, err := client.info(context.Background())
 	if err != nil || info.State != "running" || info.Container != "sunaba-project-session" {
 		t.Fatalf("info=%+v error=%v", info, err)
+	}
+	if info.IdleSeconds != 900 || info.IdleDeadline.IsZero() {
+		t.Fatalf("idle policy missing from supervisor info: %+v", info)
+	}
+	if err := client.operation(context.Background(), "heartbeat"); err != nil {
+		t.Fatal(err)
 	}
 	if err := client.operation(context.Background(), "pause"); err != nil {
 		t.Fatal(err)
