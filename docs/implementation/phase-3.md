@@ -1,6 +1,6 @@
 # Phase 3: Git Gateway
 
-状態: 実施中。object-bound one-shot push approval、host quarantine resolver、HTTPS credential終端、smart HTTP read relayを実装済み。receive-packとsession統合は継続中。
+状態: 実施中。object-bound one-shot push approval、host quarantine resolver、HTTPS credential終端、smart HTTP read/receive relayを実装済み。session lifecycle統合は継続中。
 
 ## push approval binding
 
@@ -20,6 +20,12 @@ mode `0700`でsymlinkを含まないhost bare repositoryだけを読み、Git自
 
 標準Gitの`upload-pack`で使う固定の`info/refs`とPOSTだけをProject/VM/Session、短期限、request/body/response/concurrency上限へ束縛したguest capabilityで許可する。固定HTTPS upstreamへのAuthorizationはhostで置換し、redirect、receive-pack、別repository、別routeを拒否する。実smart HTTP serverを使った`git clone`、`git fetch`、`git pull --ff-only`で互換性とcredential非混入を検証する。
 
+## smart HTTP receive relay
+
+hostが固定したpre-receive helperはGit自身のobject quarantine pathとold/new/refだけを、mode `0600`のprivate Unix socketおよびhost-only channel tokenでbrokerへ送る。brokerはquarantine objectをhost resolverで検査する。初回pushはobject ID-bound pending approvalを作って拒否し、hostでconfirmされた同一digestのretry時だけ、upstream push transactionを実行してreceive-packを受理する。delete-only receiveではGitがobject quarantineを作らない実挙動を扱い、new objectを必要としない削除だけを同じ承認経路で処理する。
+
+実smart HTTP経路の`git push`で通常更新、non-fast-forward、ref deleteをそれぞれ初回拒否、明示承認、同一retry成功まで検証する。force/deleteはhostが再計算した別flagとしてpending bindingへ記録し、hook broker終了後のpushはupstreamへ到達しない。helperはupstream credentialやapproval結果を生成できず、brokerからの固定accept/rejectだけをpre-receive exitへ反映する。
+
 再現コマンド:
 
 ```sh
@@ -28,8 +34,7 @@ go test -race -v ./internal/gitgateway
 
 ## 残件
 
-- smart HTTP receive-packのpre-receiveをapproval transactionへ接続する
-- standard Git smart HTTPによるclone/fetch/pullと、pending approval後のpush retry
-- session終了、expiry、別Project/VM、object/ref差し替えの実統合試験
+- Agent VMのProject専用socket relayへGit read/receive handlerを統合する
+- session pause/end、expiry、別Project/VM、object/ref差し替えのVM実統合試験
 
 これらを完了するまでPhase 3を完了扱いにしない。

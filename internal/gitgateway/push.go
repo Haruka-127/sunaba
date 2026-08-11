@@ -105,6 +105,12 @@ func (e PushExecutor) push(ctx context.Context, binding PushBinding) error {
 		"GIT_CONFIG_KEY_0=http.extraHeader",
 		"GIT_CONFIG_VALUE_0=Authorization: " + e.AuthorizationHeader,
 	}
+	if e.Resolver.ObjectDirectory != "" {
+		command.Env = append(command.Env,
+			"GIT_OBJECT_DIRECTORY="+e.Resolver.ObjectDirectory,
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES="+filepath.Join(e.Resolver.RepositoryPath, "objects"),
+		)
+	}
 	if e.TLSCAInfoPath != "" {
 		command.Env = append(command.Env,
 			"GIT_CONFIG_KEY_1=http.sslCAInfo",

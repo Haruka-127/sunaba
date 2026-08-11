@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 type ProposedRefUpdate struct {
@@ -18,16 +20,21 @@ type ProposedRefUpdate struct {
 }
 
 type RepositoryResolver struct {
-	GitPath        string
-	RepositoryPath string
-	ProjectID      string
-	Repository     string
-	RemoteName     string
-	RemoteURL      string
+	GitPath         string
+	RepositoryPath  string
+	ObjectDirectory string
+	ProjectID       string
+	Repository      string
+	RemoteName      string
+	RemoteURL       string
 }
 
 func (r RepositoryResolver) Resolve(ctx context.Context, proposed []ProposedRefUpdate) (PushBinding, error) {
 	repositoryPath, err := secureRepositoryPath(r.RepositoryPath)
+	if err != nil {
+		return PushBinding{}, err
+	}
+	objectDirectory, err := secureReceiveObjectDirectory(repositoryPath, r.ObjectDirectory)
 	if err != nil {
 		return PushBinding{}, err
 	}
@@ -41,7 +48,7 @@ func (r RepositoryResolver) Resolve(ctx context.Context, proposed []ProposedRefU
 	if !filepath.IsAbs(gitPath) {
 		return PushBinding{}, fmt.Errorf("host Git path must be absolute")
 	}
-	runner := repositoryGit{binary: gitPath, repository: repositoryPath}
+	runner := repositoryGit{binary: gitPath, repository: repositoryPath, objectDirectory: objectDirectory}
 	format, err := runner.output(ctx, "rev-parse", "--show-object-format")
 	if err != nil {
 		return PushBinding{}, err
@@ -118,7 +125,7 @@ func (r RepositoryResolver) Resolve(ctx context.Context, proposed []ProposedRefU
 }
 
 func secureRepositoryPath(path string) (string, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.Contains(path, ":") {
 		return "", fmt.Errorf("host Git quarantine path must be absolute and clean")
 	}
 	info, err := os.Lstat(path)
@@ -133,8 +140,9 @@ func secureRepositoryPath(path string) (string, error) {
 }
 
 type repositoryGit struct {
-	binary     string
-	repository string
+	binary          string
+	repository      string
+	objectDirectory string
 }
 
 func (g repositoryGit) run(ctx context.Context, args ...string) error {
@@ -179,7 +187,35 @@ func (g repositoryGit) command(ctx context.Context, args ...string) *exec.Cmd {
 		"LC_ALL=C",
 		"PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
 	}
+	if g.objectDirectory != "" {
+		command.Env = append(command.Env,
+			"GIT_OBJECT_DIRECTORY="+g.objectDirectory,
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES="+filepath.Join(g.repository, "objects"),
+		)
+	}
 	command.Dir = g.repository
 	command.Stdin = nil
 	return command
+}
+
+func secureReceiveObjectDirectory(repository, objectDirectory string) (string, error) {
+	if objectDirectory == "" {
+		return "", nil
+	}
+	objectDirectory = filepath.Clean(objectDirectory)
+	objectsRoot := filepath.Join(repository, "objects")
+	if !filepath.IsAbs(objectDirectory) || filepath.Dir(objectDirectory) != objectsRoot || !strings.HasPrefix(filepath.Base(objectDirectory), "tmp_objdir-incoming-") {
+		return "", fmt.Errorf("Git receive object quarantine path is invalid")
+	}
+	info, err := os.Lstat(objectDirectory)
+	var stat unix.Stat_t
+	statErr := unix.Lstat(objectDirectory, &stat)
+	if err != nil || statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || stat.Uid != uint32(os.Geteuid()) {
+		return "", fmt.Errorf("Git receive object quarantine must be a private directory")
+	}
+	canonical, err := filepath.EvalSymlinks(objectDirectory)
+	if err != nil || canonical != objectDirectory {
+		return "", fmt.Errorf("Git receive object quarantine must not contain symlinks")
+	}
+	return objectDirectory, nil
 }
