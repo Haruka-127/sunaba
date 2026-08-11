@@ -204,6 +204,66 @@ func TestDevExportQuiesceFailureStopsVMAndCapabilities(t *testing.T) {
 	}
 }
 
+func TestPausedExportRevokesCapabilityBeforeRestartAndKeepsMountSocket(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	startObserved := false
+	fake.startHook = func() {
+		startObserved = true
+		if s.gatewayActive.Load() {
+			t.Fatal("paused export re-enabled the Gateway before restart")
+		}
+		if err := s.leaseRegistry.ValidateActive(s.ProjectID, s.Container, s.SessionID, "model"); err == nil {
+			t.Fatal("paused export restarted the VM with an active capability")
+		}
+		info, err := os.Lstat(filepath.Join(s.Root, "model-gateway.sock"))
+		if err != nil || info.Mode()&os.ModeSocket == 0 {
+			t.Fatalf("Gateway mount source disappeared before restart: mode=%v error=%v", info, err)
+		}
+	}
+	fake.startError = errors.New("injected restart failure")
+	if _, err := s.StopAndExport(context.Background()); err == nil || !strings.Contains(err.Error(), "start paused session VM for export") {
+		t.Fatalf("restart error=%v", err)
+	}
+	if !startObserved {
+		t.Fatal("paused export did not attempt a bounded restart")
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPausedExportRemountsWorkspaceBeforeFreeze(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	before := len(fake.commands)
+	if _, err := s.StopAndExport(context.Background()); err == nil || !strings.Contains(err.Error(), "export frozen session root filesystem") {
+		t.Fatalf("export error=%v", err)
+	}
+	commands := fake.commands[before:]
+	if len(commands) < 2 || !strings.Contains(commands[0], "test -f /var/lib/sunaba/overlay.img") || !strings.Contains(commands[0], "mount -t overlay overlay") || strings.Contains(commands[0], "nohup") {
+		t.Fatalf("paused export remount command=%q", commands)
+	}
+	if !strings.Contains(commands[1], "/var/lib/sunaba/merged-export") {
+		t.Fatalf("workspace freeze did not follow remount: %q", commands)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPauseFailsClosedWhenAuditCannotAppend(t *testing.T) {
 	cfg, fake := sessionFixture(t)
 	s, err := Start(context.Background(), cfg)
@@ -459,6 +519,9 @@ type fakeRuntime struct {
 	server     *http.Server
 	removed    bool
 	copies     map[string][]byte
+	commands   []string
+	startHook  func()
+	startError error
 }
 
 func (f *fakeRuntime) ImageExists(context.Context, string) (bool, error) { return true, nil }
@@ -500,6 +563,12 @@ func (f *fakeRuntime) CreateSecure(_ context.Context, spec runtime.ContainerSpec
 	return nil
 }
 func (f *fakeRuntime) Start(context.Context, string) error {
+	if f.startHook != nil {
+		f.startHook()
+	}
+	if f.startError != nil {
+		return f.startError
+	}
 	f.state = runtime.StateRunning
 	return nil
 }
@@ -516,6 +585,7 @@ func (f *fakeRuntime) Remove(context.Context, string) error {
 func (f *fakeRuntime) Exec(context.Context, string, bool, []string) error { return nil }
 func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) (string, error) {
 	joined := strings.Join(command, " ")
+	f.commands = append(f.commands, joined)
 	if strings.Contains(joined, "getconf _NPROCESSORS_ONLN") {
 		return "cpu=2\nmemory_kb=1048576\ndisk=120000000\nuid=1000\nnproc=64\nfsize=134217728\nnofile=1024\n", nil
 	}

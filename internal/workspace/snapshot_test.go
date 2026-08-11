@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -44,6 +45,18 @@ func TestSnapshotIsDeterministicAndDoesNotFollowSymlinks(t *testing.T) {
 	outside := findEntry(t, first, "outside")
 	if outside.Type != TypeSymlink || outside.LinkTarget != external || outside.SHA256 != "" {
 		t.Fatalf("outside entry=%+v", outside)
+	}
+}
+
+func TestFinalizedManifestDoesNotAliasCallerEntries(t *testing.T) {
+	entries := []SnapshotEntry{{Path: "file.txt", Type: TypeFile, Mode: 0600, Size: 4, SHA256: strings.Repeat("a", 64)}}
+	manifest, err := finalizeSnapshotManifest("/snapshot", entries, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries[0].Mode = 0777
+	if manifest.Entries[0].Mode != 0600 || !manifestDigestIsCanonical(manifest) {
+		t.Fatalf("finalized manifest retained caller alias: %+v", manifest.Entries[0])
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -89,6 +90,19 @@ func TestMaterializeMergedViewRejectsFabricatedStagedPath(t *testing.T) {
 	}
 	if _, err := MaterializeMergedView(baseline.Root, filepath.Join(quarantine, "sunaba-merged-evil"), baseline, frozen, DefaultSnapshotPolicy()); err == nil {
 		t.Fatal("fabricated staged path was accepted")
+	}
+}
+
+func TestFirstManifestDifferenceReportsFieldWithoutContent(t *testing.T) {
+	expected := SnapshotManifest{Entries: []SnapshotEntry{{Path: "file.txt", Type: TypeFile, Mode: 0600, Size: 6, SHA256: "secret-digest"}}}
+	actual := expected
+	actual.Entries = append([]SnapshotEntry(nil), expected.Entries...)
+	actual.Entries[0].Mode = 0644
+	if got := firstManifestDifference(expected, actual); got != `path "file.txt" mode differs` {
+		t.Fatalf("difference=%q", got)
+	}
+	if strings.Contains(firstManifestDifference(expected, actual), "secret-digest") {
+		t.Fatal("diagnostic disclosed content-derived metadata")
 	}
 }
 

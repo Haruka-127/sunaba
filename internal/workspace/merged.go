@@ -128,6 +128,9 @@ func MaterializeMergedView(snapshotRoot, destination string, baseline SnapshotMa
 	if err != nil {
 		return MergedView{}, err
 	}
+	if !manifestDigestIsCanonical(manifest) {
+		return MergedView{}, fmt.Errorf("computed merged manifest digest is internally inconsistent before materialization")
+	}
 	if err := materializeMergedState(snapshotRoot, destination, state, manifest, policy); err != nil {
 		return MergedView{}, err
 	}
@@ -380,9 +383,55 @@ func materializeMergedState(snapshotRoot, destination string, state map[string]m
 		return err
 	}
 	if verified.Digest != manifest.Digest {
-		return fmt.Errorf("materialized merged digest does not match computed manifest")
+		return fmt.Errorf("materialized merged digest does not match computed manifest: %s", firstManifestDifference(manifest, verified))
 	}
 	return nil
+}
+
+func firstManifestDifference(expected, actual SnapshotManifest) string {
+	if expected.Version != actual.Version {
+		return fmt.Sprintf("manifest version differs: expected=%d actual=%d", expected.Version, actual.Version)
+	}
+	limit := len(expected.Entries)
+	if len(actual.Entries) < limit {
+		limit = len(actual.Entries)
+	}
+	for index := 0; index < limit; index++ {
+		left, right := expected.Entries[index], actual.Entries[index]
+		if left.Path != right.Path {
+			return fmt.Sprintf("entry %d path differs", index)
+		}
+		switch {
+		case left.Type != right.Type:
+			return fmt.Sprintf("path %q type differs", left.Path)
+		case left.Mode != right.Mode:
+			return fmt.Sprintf("path %q mode differs", left.Path)
+		case left.Size != right.Size:
+			return fmt.Sprintf("path %q size differs", left.Path)
+		case left.SHA256 != right.SHA256:
+			return fmt.Sprintf("path %q content digest differs", left.Path)
+		case left.LinkTarget != right.LinkTarget:
+			return fmt.Sprintf("path %q symlink target differs", left.Path)
+		}
+	}
+	if len(expected.Entries) != len(actual.Entries) {
+		return fmt.Sprintf("entry count differs: expected=%d actual=%d", len(expected.Entries), len(actual.Entries))
+	}
+	if expected.TotalSize != actual.TotalSize {
+		return fmt.Sprintf("total size differs: expected=%d actual=%d", expected.TotalSize, actual.TotalSize)
+	}
+	if !manifestDigestIsCanonical(expected) {
+		return "computed manifest digest is internally inconsistent"
+	}
+	if !manifestDigestIsCanonical(actual) {
+		return "materialized manifest digest is internally inconsistent"
+	}
+	return "digest differs without an entry mismatch"
+}
+
+func manifestDigestIsCanonical(manifest SnapshotManifest) bool {
+	canonical, err := finalizeSnapshotManifest("", append([]SnapshotEntry(nil), manifest.Entries...), manifest.TotalSize)
+	return err == nil && manifest.Version == canonical.Version && manifest.Digest == canonical.Digest
 }
 
 func copyMergedFile(lowerRootFD, destinationRootFD int, item mergedEntry, maximum int64) error {

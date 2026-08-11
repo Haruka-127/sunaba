@@ -763,7 +763,8 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 			return ExportResult{}, err
 		}
 	}
-	if err := s.stopChannels(ctx); err != nil {
+	s.gatewayActive.Store(false)
+	if err := s.stopAttach(ctx); err != nil {
 		return ExportResult{}, err
 	}
 	if s.leaseCreated {
@@ -781,16 +782,22 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	}
 	if containerState == runtime.StateStopped {
 		if err := s.cfg.Runtime.Start(ctx, s.Container); err != nil {
+			return ExportResult{}, fmt.Errorf("start paused session VM for export: %w", err)
+		}
+		if err := s.mountPausedWorkspaceForExport(ctx); err != nil {
 			return ExportResult{}, err
 		}
 	} else if containerState != runtime.StateRunning {
 		return ExportResult{}, fmt.Errorf("session VM cannot be frozen from state %s", containerState)
 	}
+	if err := s.stopChannels(ctx); err != nil {
+		return ExportResult{}, err
+	}
 	if err := s.prepareGuestExport(ctx); err != nil {
 		return ExportResult{}, err
 	}
 	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
-		return ExportResult{}, err
+		return ExportResult{}, fmt.Errorf("stop session VM for frozen export: %w", err)
 	}
 	s.paused = true
 	if stopped, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || stopped != runtime.StateStopped {
@@ -802,7 +809,7 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	}
 	archive := filepath.Join(quarantine, "rootfs.tar")
 	if err := s.cfg.Runtime.Export(ctx, s.Container, archive); err != nil {
-		return ExportResult{}, err
+		return ExportResult{}, fmt.Errorf("export frozen session root filesystem: %w", err)
 	}
 	frozen, err := workspace.ParseFrozenRootFS(archive, quarantine, s.Baseline, workspace.DefaultExportPolicy())
 	if err != nil {
@@ -826,6 +833,21 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, err
 	}
 	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: merged.Manifest, ChangeSet: changeSet}, nil
+}
+
+func (s *Session) mountPausedWorkspaceForExport(ctx context.Context) error {
+	script := strings.Join([]string{
+		"set -eu",
+		"test -d /var/lib/sunaba/lower",
+		"test -f /var/lib/sunaba/overlay.img",
+		"if ! grep -Fqs ' /var/lib/sunaba/overlay ' /proc/mounts; then mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay; fi",
+		"if ! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/overlay/upper,workdir=/var/lib/sunaba/overlay/work " + s.WorkspacePath + "; fi",
+		"grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts",
+	}, "\n")
+	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", script}); err != nil {
+		return fmt.Errorf("remount paused workspace for export: %w: %s", err, approval.SanitizeText(out))
+	}
+	return nil
 }
 
 func (s *Session) prepareGuestExport(ctx context.Context) error {

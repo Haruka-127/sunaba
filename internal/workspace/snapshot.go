@@ -110,16 +110,17 @@ func BuildSnapshotManifest(root string, policy SnapshotPolicy) (SnapshotManifest
 }
 
 func finalizeSnapshotManifest(root string, entries []SnapshotEntry, totalSize int64) (SnapshotManifest, error) {
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	canonicalEntries := append([]SnapshotEntry(nil), entries...)
+	sort.Slice(canonicalEntries, func(i, j int) bool { return canonicalEntries[i].Path < canonicalEntries[j].Path })
 	digestInput, err := json.Marshal(manifestDigestInput{
-		Version: manifestVersion, Entries: entries, TotalSize: totalSize,
+		Version: manifestVersion, Entries: canonicalEntries, TotalSize: totalSize,
 	})
 	if err != nil {
 		return SnapshotManifest{}, err
 	}
 	digest := sha256.Sum256(digestInput)
 	return SnapshotManifest{
-		Version: manifestVersion, Root: root, Entries: entries, TotalSize: totalSize,
+		Version: manifestVersion, Root: root, Entries: canonicalEntries, TotalSize: totalSize,
 		Digest: hex.EncodeToString(digest[:]),
 	}, nil
 }

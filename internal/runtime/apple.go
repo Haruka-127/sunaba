@@ -158,13 +158,15 @@ func createArgs(spec ContainerSpec) []string {
 func (r *AppleContainer) Start(ctx context.Context, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
-	return r.run(ctx, "container", "start", name)
+	_, err := r.output(ctx, "container", "start", name)
+	return err
 }
 
 func (r *AppleContainer) Stop(ctx context.Context, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
-	return r.run(ctx, "container", "stop", name)
+	_, err := r.output(ctx, "container", "stop", name)
+	return err
 }
 
 func (r *AppleContainer) Remove(ctx context.Context, name string) error {
@@ -242,7 +244,8 @@ func (r *AppleContainer) Export(ctx context.Context, name, output string) error 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	return r.run(ctx, "container", "export", "--output", output, name)
+	_, err = r.output(ctx, "container", "export", "--output", output, name)
+	return err
 }
 
 func (r *AppleContainer) IPAddress(ctx context.Context, name string) (string, error) {
