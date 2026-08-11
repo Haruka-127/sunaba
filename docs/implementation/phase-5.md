@@ -68,7 +68,7 @@ go test -race ./internal/session ./internal/apply ./internal/cleanup ./internal/
 
 final integration用にProject/session専用Apple Container networkを追加した。default networkを共有せず、owner/project/session/mode labelとinspect結果を毎回照合する。source IPv4/IPv6 subnetへ束縛したpf anchorはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、別VM private subnet、unsolicited inboundを拒否する。
 
-同時dev sessionはcurrent-user所有のmode `0600` flockで1つへ制限する。開始・再開前にnetworkを再inspectしてpfを再検証し、pause/export時はVM停止、destroy時はVM削除後にanchorとnetworkを失効する。secure sessionは引き続き`network none`でありpfへ依存しない。
+同時dev sessionはcurrent-user所有のmode `0600` flockで1つへ制限する。開始・再開前にnetworkを再inspectしてpfを再検証する。export前は、既存のexact source subnet用child anchorをdeny-allへ原子的にquiesceしてloaded main/child rulesを再検証してからVMを停止する。quiesce失敗時はGatewayをinactiveにしVM停止を試み、exportは拒否する。destroy時はVM削除後にanchorとnetworkを失効する。secure sessionは引き続き`network none`でありpfへ依存しない。
 
 再現コマンド:
 
@@ -77,7 +77,7 @@ SUNABA_DEV_INTEGRATION=1 \
 go test -tags=integration ./test/integration -run 'TestDevSessionNetworkBoundary$' -count=1 -v
 ```
 
-このgateはdocumented `sudo ./bin/sunaba firewall enable|disable`を使うため、対話sudoを承認できるterminalが必要である。public DNS/HTTPS、host listener、別network VM、metadata、host-to-VM inbound、session stopを一回の隔離testで確認し、作成した完全名のVM/networkだけをcleanupする。
+このgateはdocumented `sudo ./bin/sunaba firewall enable|quiesce|disable`を使うため、許可文書の変更と当該実行を人間が確認し、対話sudoを承認できるterminalが必要である。public DNS/HTTPS、host listener、別network VM、metadata、host-to-VM inbound、稼働VMのdeny-all quiesce、session stopを一回の隔離testで確認し、作成した完全名のVM/networkだけをcleanupする。
 
 ## 通常verify
 
@@ -91,7 +91,7 @@ scripts/verify.sh
 - `go test ./...`
 - `go test -race ./...`
 - `go vet ./...`
-- `sunaba`、guest relay、Git hook helperのbuild
+- `sunaba`、Linux/AArch64 guest relay、Git hook helperのbuildとguest relay ELF形式検証
 - CLI helpと旧unsafe entrypointのstatic boundary
 
 container mutation、pf、optional fuzz、live credentialは通常gateで暗黙に実行しない。

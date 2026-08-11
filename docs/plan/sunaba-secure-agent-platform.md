@@ -1063,9 +1063,9 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 
 ```text
 sunaba project init <path>       Project登録と初期snapshot
-sunaba up [--mode secure|dev]    Project VM作成/起動（session networkはまだ付与しない）
+sunaba up [--mode secure|dev]    secure VMを作成してpause、devはforeground session用artifactだけ準備
 sunaba agent                     server、relay、Host TUIを起動してAgent Session開始
-sunaba shell                     terminal sanitizer経由のguest shell（安全性検証後に提供）
+sunaba shell                     bounded line commandをterminal sanitizer経由で実行
 sunaba status                    mode、VM、session、quota、未export変更を表示
 sunaba changes export            freeze/exportとChange Set作成
 sunaba changes apply             Trusted Approval UIでChange Set確認後にhost適用
@@ -1078,7 +1078,10 @@ sunaba destroy                   対象Project VMと隔離状態の破棄
 期待する通常体験は次である。
 
 - Agent VM内ではOpenCodeとshellを通常どおり使える。
-- `sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、server、capabilityを失効する。
+- secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後にVMを停止して返す。返却時はLocal Attach Relay、Gateway gate、永続leaseがinactiveであり、一般session channelは到達不能である。
+- secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway gate、leaseをinactiveへして同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineでも同じfail-closed pauseを行う。期限内の再実行は同じVM/upperをresumeするが、TTL到達後はresumeせずexportまたはrecreateを要求する。`changes export`またはdestroyでcapability、listener、credentialを最終失効する。
+- devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。background supervisorへdirect egressを残さない。
+- `sunaba shell`はraw execや未検証PTYではなく、bounded line commandの全出力をhost terminal sanitizerへ通す。
 - Model Gatewayの存在を会話やツール選択で意識する必要はない。
 - secureで一般Webが未提供なら、コマンドが明確なnetwork policy errorで失敗する。
 - devへ切り替える場合は、情報流出防止を保証しない旨を明示する。

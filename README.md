@@ -41,13 +41,16 @@ container system start
 
 ```sh
 bin/sunaba project init /absolute/project/path --mode secure
-bin/sunaba up --dir /absolute/project/path
-OPENAI_API_KEY=... bin/sunaba agent --dir /absolute/project/path
+OPENAI_API_KEY=... bin/sunaba up --dir /absolute/project/path
+bin/sunaba agent --dir /absolute/project/path
+bin/sunaba shell --dir /absolute/project/path
 bin/sunaba changes export --dir /absolute/project/path
 bin/sunaba changes apply --dir /absolute/project/path
 ```
 
-`OPENAI_API_KEY`はhost Model Gatewayだけが読み、VM、Host TUI、Project、auditへ保存しません。`agent`は固定OpenCode serverと隔離Host TUIを同時管理し、TUI終了後にcapabilityを失効してVMを停止・exportします。変更があれば、検証済みMerged ViewとChange Setをsunaba state内のpending領域へ保存します。`changes apply`はhost生成nonceを表示し、同じnonceの手入力後だけtransactional applyを実行します。
+`OPENAI_API_KEY`はhost Model Gatewayだけが読み、VM、Host TUI、Project、auditへ保存しません。secureの`up`（または最初の`agent`/`shell`）はowner-only supervisorを起動し、Project VMを作成後にpausedへします。`agent`は固定OpenCode serverと隔離Host TUIを同時管理し、TUI終了時にGatewayをinactiveへして同じVMを停止します。次の`agent`/`shell`は期限内なら同じVMとupperをresumeします。`changes export`だけがVMをfreeze/export/destroyし、変更があれば検証済みMerged ViewとChange Setをsunaba state内のpending領域へ保存します。`changes apply`はhost生成nonceを表示し、同じnonceの手入力後だけtransactional applyを実行します。
+
+`shell`はraw `container exec`や未検証PTYを公開せず、1行ずつbounded commandを実行します。stdout/stderrのESC、OSC、BEL、C0/C1、双方向制御、不正UTF-8をhost側で可視化してから表示します。
 
 dev modeへの変更は明示的に行います。
 
@@ -56,15 +59,25 @@ bin/sunaba up --dir /absolute/project/path --mode dev
 OPENAI_API_KEY=... bin/sunaba agent --dir /absolute/project/path
 ```
 
-dev sessionのpf構成では、許可文書に記載した`sudo bin/sunaba firewall ...`だけが使われます。secure modeはpfやdefault container networkに依存しません。
+devの`up`は固定artifactだけを準備し、VMやdirect-egress networkをbackgroundで残しません。`agent`/`shell`は可視foreground processの寿命中だけVMと専用networkを作成し、終了時にegressをdeny-allへquiesceしてからexport/destroyします。pf構成では、許可文書に記載した`sudo bin/sunaba firewall ...`だけが使われます。secure modeはpfやdefault container networkに依存しません。
 
-コマンド一覧は`bin/sunaba help`を正とします。guest shellは、interactive terminal relayへ同じsanitizerを強制できるまでfail closedで無効です。raw `container exec`へのfallbackは提供しません。
+コマンド一覧は`bin/sunaba help`を正とします。
 
 ## Git / Web Gateway
 
 Git Gatewayはfixed HTTPS upstream、host credential終端、bare quarantine、standard smart HTTP、object/ref/force/deleteへ束縛したone-shot approvalを実装しています。Web Gatewayはorigin allowlistとhost DNS全回答/IP検査を持つTLS非終端forward proxyで、HTTPはGET/HEADのみ、CONNECTは443のみです。TLS tunnel内部のmethod/path/uploadは復号しないため保証しません。
 
-両Gatewayのproduction contractは実Agent VM integration testで検証しています。Project policy schemaはGit remoteとWeb origin/blocklistを保持しますが、credential取得やblocklist snapshot作成を暗黙に行いません。未構成のpolicyでGatewayを有効にした場合、CLIは安全性の低い経路へfallbackせず開始を拒否します。
+Project policyは公開CLIで構成します。
+
+```sh
+bin/sunaba git set --remote https://git.example/owner/repository.git --dir /absolute/project/path
+bin/sunaba web enable --origin https://docs.example --dir /absolute/project/path
+bin/sunaba web refresh --dir /absolute/project/path
+bin/sunaba git disable --dir /absolute/project/path
+bin/sunaba web disable --dir /absolute/project/path
+```
+
+Git credentialはhostの非対話credential helperから取得し、VM、argv、policy、auditへ保存しません。Web enable/refreshは固定blocklistをhostで取得し、digestと期限へ束縛したsnapshotをmode `0600`で保存します。未構成・期限切れ・unsafeなremote/originでは安全性の低い経路へfallbackせずsession開始を拒否します。policy変更はactive/paused VMがある間は拒否し、export/recreate後に行います。
 
 ## Stateとcleanup
 
@@ -87,7 +100,7 @@ cleanupは`sunaba-` prefixだけでは削除せず、完全名、owner/project/s
 scripts/verify.sh
 ```
 
-これはformat、`go test ./...`、`go test -race ./...`、`go vet ./...`、3 binary build、CLI/static boundaryを実行します。bounded fuzzとApple Container実機gateは明示的に有効化します。
+これはformat、`go test ./...`、`go test -race ./...`、`go vet ./...`、3 binary build、Linux/AArch64 guest relay形式、CLI/static boundaryを実行します。bounded fuzzとApple Container実機gateは明示的に有効化します。実機gateには公開`up`、永続VM、sanitized shell、export/destroyも含みます。
 
 ```sh
 SUNABA_FUZZ=1 scripts/verify.sh

@@ -25,6 +25,7 @@
 
 ```sh
 sudo sunaba firewall enable
+sudo sunaba firewall quiesce
 sudo sunaba firewall disable
 sudo sunaba firewall status
 ```
@@ -33,11 +34,16 @@ sudo sunaba firewall status
 
 ```sh
 sudo ./bin/sunaba firewall enable
+sudo ./bin/sunaba firewall quiesce
 sudo ./bin/sunaba firewall disable
 sudo ./bin/sunaba firewall status
 ```
 
-`sunaba firewall enable` / `disable` の内部実装でのみ、以下の root 権限操作を許可する。
+`quiesce`は、既に`enable`が構成・検証したexactなdev IPv4/IPv6 source subnetのchild anchorをdeny-allへ原子的に置換し、VMを停止してexportするまでのegress窓を閉じる操作である。既存main anchorの新規作成や修復は行わず、対象subnetとloaded rulesを再検証できなければ拒否する。
+
+`quiesce`の実機実行は、本文書への追加を人間が確認し、当該検証について明示的に承認した後に限る。実装者が本文書を更新したこと自体は実行承認とみなさない。
+
+`sunaba firewall enable` / `quiesce` / `disable` の内部実装でのみ、以下の root 権限操作を許可する。
 
 - `/etc/pf.conf` を `/etc/pf.conf.sunaba.bak` にバックアップする
 - `/etc/pf.conf` の sunaba 管理ブロックだけを追加・更新・削除する
@@ -45,6 +51,7 @@ sudo ./bin/sunaba firewall status
 - `/etc` と `/etc/pf.anchors` に `.sunaba-` プレフィックスの一時ファイルを作成し、構文検査成功後に上記2ファイルへ原子的に置換する。処理終了時に一時ファイルを削除する
 - `/sbin/pfctl -nf /etc/pf.conf` または上記sunaba一時ファイルで構文検査する
 - `/sbin/pfctl -a sunaba -nf /etc/pf.anchors/sunaba` または上記sunaba一時ファイルでanchorを構文検査する
+- `/sbin/pfctl -a sunaba -f /etc/pf.anchors/sunaba` で検証済みactiveまたはdeny-all child anchorだけを再読み込みする
 - `/sbin/pfctl -f /etc/pf.conf` で pf 設定を再読み込みする
 - `/sbin/pfctl -E` で pf を有効化する
 - `/sbin/pfctl -sr` でルール状態を確認する

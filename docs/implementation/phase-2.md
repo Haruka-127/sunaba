@@ -1,6 +1,6 @@
 # Phase 2: Projectライフサイクルと成果物境界
 
-状態: 実施中。Trusted Approval、crash-safe host apply、永続session leaseを伴う同一VMのpause/resume、orphan cleanup、resource limit、host audit統合を実装・検証済み。製品CLI統合は継続中。
+状態: 完了。Trusted Approval、crash-safe host apply、永続session leaseを伴う同一VMのpause/resume、orphan cleanup、resource limit、host audit、公開CLI supervisor、sanitized shellを実装し、自動testと再現可能な実機gateへ固定した。
 
 ## Trusted Approval
 
@@ -64,8 +64,18 @@ SUNABA_PHASE2_INTEGRATION=1 go test -tags=integration -run TestPhase2ActualOrpha
 
 実Apple Container試験はstart、pause中のattach到達不能と有効tokenによるModel Gateway requestの`503`拒否、同じVMのresume、再度のOpenCode tool call、停止export、承認済みbaselineからのclean recreation、Trusted Approval、host applyまでを通過した。実OpenCodeが生成したadd/modify/deleteだけが反映され、Protected Pathの`.git`は保持された。128 MiB bounded diskへの160 MiB writeとhard process limit引き上げが失敗し、CPU/memory/runtime hard limitのprobeも通過した。frozen archive、host audit、Projectにupstream key、capability、server passwordが存在しないことを確認した。別の実機試験ではlive guard中のVMを維持し、guard解放後だけ同じVMをorphanとして停止・削除した。
 
-## 残件
+## 公開CLI lifecycle
 
-- Trusted Approval UIの製品CLI統合
+secureの`sunaba up`はowner-only detached supervisorを起動し、VMを作成後にGateway/leaseをinactiveへしてpausedで返す。`agent`/`shell`は期限内の同じVMとupperをresumeし、終了時に再びpauseする。`changes export`は停止VMをexportしてChange Setを永続化し、ownership再検証後にVMをdestroyする。`down`、`recreate`、`destroy`も同じcontrol socketを使い、stale locatorはexact ownership/lease orphan cleanup後だけ除去する。
 
-これらを完了するまでPhase 2およびMVPを完了扱いにしない。
+control locator、Unix socket、startup logはcurrent user所有のprivate directoryへ置き、locator/socketはmode `0600`で検証する。OpenCode server passwordはsocket応答以外へ永続化しない。TTL到達時はVMをpauseし、それ以降のresume/shellを拒否する。active Host TUIはpolicyのidle timeoutより短い間隔でowner-only heartbeatを送り、client消失後にidle deadlineへ到達するとSupervisorがGatewayをinactive化してVMをpauseする。Git push承認も同じowner-only control socket上のhost Trusted UIからだけ処理する。
+
+`sunaba shell`は16 KiB以下の1行command、commandごとの2分timeout、1 MiB出力上限を持つ。guestのUID 1000、Overlay workspace、同じGateway policyで実行し、host表示前にESC/OSC/BEL/C0/C1/bidi/invalid UTF-8を必ずescapeする。未検証PTYとraw `container exec`は公開しない。
+
+公開CLI実機gate:
+
+```sh
+SUNABA_CLI_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPublicCLI' -count=1 -v
+```
+
+このgateは公開`project init`/`up`からpaused VMを作成し、shellで作ったfileがpause/resume後も残ること、悪意あるOSC/BELが可視化されること、export後にChange Setが得られsupervisor/VM/Project stateをexact cleanupできることを検証する。
