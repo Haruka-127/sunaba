@@ -30,6 +30,12 @@ unit/race testはadd、modify、delete、rename、Protected Path保持、承認�
 
 Model Gateway capabilityはmode `0700`のhost state directoryに、mode `0600`のJSON recordとして原子的に永続化する。recordはProject ID、VM ID、Session ID、用途、状態、絶対有効期限へ束縛し、symlink、所有者・mode不一致、不正identity、期限切れ、別Project/VM/用途を拒否する。起動中はpausedで発行し、OpenCode serverのhealth/version確認後だけactiveにする。pauseはVM停止より先にpausedへ遷移し、session終了・export・VM破棄・起動失敗ではrevokedへ遷移する。revoked recordとSession IDは再利用しない。Supervisor processが終了すると専用Unix listenerも失われるため、persisted active recordだけからcapabilityを再発行せずfail closedとなる。
 
+## host boundary audit
+
+旧prototypeのguest OpenCode SSE収集とは別に、Supervisorが信頼境界eventをhost state配下のProject別JSONLへ直接追記する。directoryはmode `0700`、logはmode `0600`かつcurrent user所有のregular fileに限定し、`O_NOFOLLOW`、process間排他、1 event 1 JSON line、`fsync`を強制する。symlink・mode・owner不一致、64 KiB超のevent、token/password/API key/body/prompt/content等の機密keyを拒否し、guest由来文字列のterminal制御文字を可視化する。
+
+secure sessionはこのrecorderを必須とし、Project/VM/Session identity、snapshot、VM lifecycle、attach relay、Model Gateway lifecycleとrequest metadata、capability、pause/resume、export後のChange Set digest、cleanupを記録する。本文、upstream key、capability token、OpenCode server passwordは記録しない。audit追記不能時のpause/cleanupは、先にGateway gateと永続leaseをinactiveにしてVM停止・所有VM cleanupを継続し、操作自体はerrorとして返す。
+
 再現コマンド:
 
 ```sh
@@ -37,12 +43,12 @@ go test -race -v ./internal/approval ./internal/apply ./internal/lease ./interna
 SUNABA_PHASE1_INTEGRATION=1 go test -tags=integration -run TestPhase1SecureSessionVerticalSlice -count=1 -v ./test/integration
 ```
 
-実Apple Container試験はstart、pause中のattach到達不能と有効tokenによるModel Gateway requestの`503`拒否、同じVMのresume、再度のOpenCode tool call、停止export、承認済みbaselineからのclean recreationまでを通過した。試験終了後に所有VMが残っていないことも確認した。
+実Apple Container試験はstart、pause中のattach到達不能と有効tokenによるModel Gateway requestの`503`拒否、同じVMのresume、再度のOpenCode tool call、停止export、承認済みbaselineからのclean recreationまでを通過した。host JSONLにsession、Gateway、export、cleanup eventが存在し、3種のsecretが存在しないこと、および試験終了後に所有VMが残っていないことも確認した。
 
 ## 残件
 
 - ownership labelとactive leaseを照合するorphan cleanup
-- session/Gateway/export/applyをhost JSONLへ安全に永続化するaudit recorder
+- Trusted Approvalとcrash-safe applyのhost audit統合
 - actual Phase 1 export artifactから承認・applyまでの統合試験
 - resource quotaとTrusted UIのCLI統合
 

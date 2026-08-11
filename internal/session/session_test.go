@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
@@ -72,6 +73,49 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if !fake.removed {
 		t.Fatal("owned VM was not destroyed")
 	}
+	logs, err := filepath.Glob(filepath.Join(cfg.Audit.Root, s.ProjectID, "audit-*.jsonl"))
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("audit logs=%v error=%v", logs, err)
+	}
+	encodedAudit, err := os.ReadFile(logs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"capability.issued", "snapshot.created", "vm.created", "session.ready", "session.paused", "session.resumed", "capability.revoked", "vm.destroyed"} {
+		if !strings.Contains(string(encodedAudit), `"action":"`+action+`"`) {
+			t.Fatalf("audit missing action %q: %s", action, encodedAudit)
+		}
+	}
+	if strings.Contains(string(encodedAudit), cfg.ModelToken) || strings.Contains(string(encodedAudit), cfg.ServerPassword) {
+		t.Fatal("session secret was written to host audit")
+	}
+}
+
+func TestPauseFailsClosedWhenAuditCannotAppend(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectAudit := filepath.Join(cfg.Audit.Root, s.ProjectID)
+	if err := os.Chmod(projectAudit, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(context.Background()); err == nil {
+		t.Fatal("audit failure was hidden")
+	}
+	if fake.state != runtime.StateStopped || s.gatewayActive.Load() {
+		t.Fatalf("pause did not fail closed: state=%s gate=%v", fake.state, s.gatewayActive.Load())
+	}
+	if err := s.leaseRegistry.ValidateActive(s.ProjectID, s.Container, s.SessionID, "model"); err == nil {
+		t.Fatal("audit failure left the persistent capability active")
+	}
+	if err := os.Chmod(projectAudit, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestStartFailureRemovesOwnedVMAndReleasesProjectLock(t *testing.T) {
@@ -122,6 +166,10 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		t.Fatal(err)
 	}
 	fake := &fakeRuntime{}
+	auditRecorder, err := audit.NewRecorder(filepath.Join(root, "state", "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-runtime-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -136,8 +184,8 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		CPUs: 2, Memory: "2G", GuestRelayBinary: relay, ProviderConfig: []byte(`{"provider":{}}`),
 		ModelGateway: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
 		ModelToken:   strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
-		LeaseTTL: time.Minute,
-		OnEvent:  func(Event) {},
+		LeaseTTL: time.Minute, Audit: auditRecorder,
+		OnEvent: func(Event) {},
 	}, fake
 }
 

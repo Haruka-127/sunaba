@@ -11,10 +11,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
 	"sunaba/internal/modelgateway"
 	"sunaba/internal/opencode"
@@ -92,6 +94,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		writeResponsesFunctionCallStream(w, modelID, "apply_patch", `{"patchText":`+fmt.Sprintf("%q", patchText)+`}`)
 	}))
 	defer upstream.Close()
+	auditErrors := make(chan error, 16)
 	newConfig := func(sessionID string) session.Config {
 		modelToken, err := session.NewSecret()
 		if err != nil {
@@ -106,7 +109,26 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		gateway, err := modelgateway.New(modelgateway.Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: upstreamKey, Capability: capability})
+		auditRecorder, err := audit.NewRecorder(filepath.Join(runtimeBase, "state", "audit"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gateway, err := modelgateway.New(modelgateway.Config{
+			UpstreamBaseURL: upstream.URL, UpstreamAPIKey: upstreamKey, Capability: capability,
+			Audit: func(event modelgateway.AuditEvent) {
+				outcome := "allowed"
+				if event.Status < 200 || event.Status >= 300 {
+					outcome = "rejected"
+				}
+				if err := auditRecorder.Append(audit.BoundaryEvent{
+					At: event.At, Category: "gateway", Action: "model.request", Outcome: outcome,
+					ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID,
+					Details: map[string]string{"model": event.Model, "status": strconv.Itoa(event.Status), "request_bytes": strconv.FormatInt(event.RequestBytes, 10), "response_bytes": strconv.FormatInt(event.ResponseBytes, 10), "reason": event.Reason},
+				}); err != nil {
+					auditErrors <- err
+				}
+			},
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,8 +144,8 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 			ProjectRoot: projectRoot, RuntimeBase: runtimeBase, SessionID: sessionID,
 			Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", GuestRelayBinary: relay,
 			ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken, ServerPassword: password,
-			LeaseTTL: 3 * time.Minute,
-			OnEvent:  func(session.Event) {},
+			LeaseTTL: 3 * time.Minute, Audit: auditRecorder,
+			OnEvent: func(session.Event) {},
 		}
 	}
 
@@ -229,6 +251,27 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	}
 	if current, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy()); err != nil || current.Digest != hostBefore.Digest {
 		t.Fatalf("host Project changed after clean regeneration: %v", err)
+	}
+	auditLogs, err := filepath.Glob(filepath.Join(runtimeBase, "state", "audit", state.ProjectID(projectRoot), "audit-*.jsonl"))
+	if err != nil || len(auditLogs) != 1 {
+		t.Fatalf("host audit logs=%v error=%v", auditLogs, err)
+	}
+	auditBytes, err := os.ReadFile(auditLogs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"capability.issued", "session.paused", "session.resumed", "model.request", "changeset.created", "capability.revoked", "vm.destroyed"} {
+		if !strings.Contains(string(auditBytes), `"action":"`+action+`"`) {
+			t.Fatalf("actual host audit missing %q", action)
+		}
+	}
+	if strings.Contains(string(auditBytes), upstreamKey) || strings.Contains(string(auditBytes), first.ModelToken) || strings.Contains(string(auditBytes), first.ServerPassword) {
+		t.Fatal("actual host audit contained a session or upstream secret")
+	}
+	select {
+	case err := <-auditErrors:
+		t.Fatalf("Model Gateway audit append failed: %v", err)
+	default:
 	}
 }
 

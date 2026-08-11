@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"sunaba/internal/attachrelay"
+	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
 	"sunaba/internal/lease"
 	"sunaba/internal/opencode"
@@ -52,6 +53,7 @@ type Config struct {
 	ModelToken       string
 	ServerPassword   string
 	LeaseTTL         time.Duration
+	Audit            *audit.Recorder
 	OnEvent          func(Event)
 }
 
@@ -120,6 +122,9 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, err
 	}
 	s.leaseCreated = true
+	if err := s.emit("capability.issued", "paused"); err != nil {
+		return nil, err
+	}
 	if err := makeNewPrivateDirectory(s.Root); err != nil {
 		return nil, err
 	}
@@ -128,7 +133,9 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	if err != nil {
 		return nil, err
 	}
-	s.emit("snapshot.created", s.Baseline.Digest)
+	if err := s.emit("snapshot.created", s.Baseline.Digest); err != nil {
+		return nil, err
+	}
 	if err := s.startGateway(); err != nil {
 		return nil, err
 	}
@@ -153,7 +160,9 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, err
 	}
 	s.vmCreated = true
-	s.emit("vm.created", s.Container)
+	if err := s.emit("vm.created", s.Container); err != nil {
+		return nil, err
+	}
 	if err := s.configureGuest(ctx); err != nil {
 		return nil, err
 	}
@@ -170,8 +179,13 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	if _, err := s.leaseRegistry.Activate(s.SessionID); err != nil {
 		return nil, err
 	}
+	if err := s.emit("capability.activated", "model"); err != nil {
+		return nil, err
+	}
+	if err := s.emit("session.ready", health.Version); err != nil {
+		return nil, err
+	}
 	s.gatewayActive.Store(true)
-	s.emit("session.ready", health.Version)
 	return s, nil
 }
 
@@ -199,8 +213,8 @@ func validateConfig(cfg Config) error {
 	if !secretPattern.MatchString(cfg.ModelToken) || !secretPattern.MatchString(cfg.ServerPassword) || cfg.ModelToken == cfg.ServerPassword {
 		return fmt.Errorf("session secrets must be distinct high-entropy URL-safe values")
 	}
-	if cfg.OnEvent == nil {
-		return fmt.Errorf("secure session requires a host audit event sink")
+	if cfg.Audit == nil || filepath.Clean(cfg.Audit.Root) != filepath.Join(filepath.Clean(cfg.Store.Root), "audit") {
+		return fmt.Errorf("secure session requires its host audit recorder under the state store")
 	}
 	if cfg.LeaseTTL <= 0 || cfg.LeaseTTL > 24*time.Hour {
 		return fmt.Errorf("secure session requires a bounded lease lifetime")
@@ -256,30 +270,30 @@ func (s *Session) startGateway() error {
 		done <- err
 		close(done)
 	}()
-	s.emit("model_gateway.started", "")
-	return nil
+	return s.emit("model_gateway.started", "")
 }
 
 func (s *Session) Pause(ctx context.Context) error {
 	if !s.vmCreated || s.paused {
 		return fmt.Errorf("session is not in a resumable running state")
 	}
-	if err := s.stopAttach(ctx); err != nil {
-		return err
-	}
+	var pauseErr error
+	pauseErr = errors.Join(pauseErr, s.stopAttach(ctx))
 	s.gatewayActive.Store(false)
 	if _, err := s.leaseRegistry.Pause(s.SessionID); err != nil {
-		return err
+		return errors.Join(pauseErr, err)
 	}
 	s.paused = true
+	if err := s.emit("capability.paused", "model"); err != nil {
+		pauseErr = errors.Join(pauseErr, err)
+	}
 	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
-		return err
+		return errors.Join(pauseErr, err)
 	}
 	if current, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || current != runtime.StateStopped {
-		return fmt.Errorf("session VM did not stop: state=%s error=%v", current, err)
+		return errors.Join(pauseErr, fmt.Errorf("session VM did not stop: state=%s error=%v", current, err))
 	}
-	s.emit("session.paused", "")
-	return nil
+	return errors.Join(pauseErr, s.emit("session.paused", ""))
 }
 
 func (s *Session) Resume(ctx context.Context) (err error) {
@@ -290,9 +304,13 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 		return fmt.Errorf("paused session lost its fixed Model Gateway listener")
 	}
 	s.gatewayActive.Store(false)
+	leaseActivated := false
 	defer func() {
 		if err != nil {
 			s.gatewayActive.Store(false)
+			if leaseActivated {
+				_, _ = s.leaseRegistry.Pause(s.SessionID)
+			}
 			_ = s.stopAttach(context.Background())
 		}
 	}()
@@ -323,9 +341,16 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 	if _, err := s.leaseRegistry.Activate(s.SessionID); err != nil {
 		return err
 	}
+	leaseActivated = true
+	if err := s.emit("capability.activated", "model"); err != nil {
+		return err
+	}
+	if err := s.emit("session.resumed", health.Version); err != nil {
+		return err
+	}
 	s.gatewayActive.Store(true)
 	s.paused = false
-	s.emit("session.resumed", health.Version)
+	leaseActivated = false
 	return nil
 }
 
@@ -412,7 +437,10 @@ func (s *Session) startAttachRelay(ctx context.Context) error {
 		return err
 	}
 	s.attachCancel, s.attachDone, s.AttachURL = cancel, done, url
-	s.emit("attach_relay.started", url)
+	if err := s.emit("attach_relay.started", url); err != nil {
+		cancel()
+		return err
+	}
 	return nil
 }
 
@@ -432,6 +460,10 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	s.paused = true
 	if s.leaseCreated {
 		if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
+			return ExportResult{}, err
+		}
+		s.leaseCreated = false
+		if err := s.emit("capability.revoked", "export"); err != nil {
 			return ExportResult{}, err
 		}
 	}
@@ -464,62 +496,71 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	if err != nil {
 		return ExportResult{}, err
 	}
-	s.emit("changeset.created", changeSet.Digest)
+	if err := s.emit("changeset.created", changeSet.Digest); err != nil {
+		return ExportResult{}, err
+	}
 	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: merged.Manifest, ChangeSet: changeSet}, nil
 }
 
 func (s *Session) Destroy(ctx context.Context) error {
+	var destroyErr error
 	if err := s.stopChannels(ctx); err != nil {
-		return err
+		destroyErr = errors.Join(destroyErr, err)
+	}
+	if s.leaseCreated {
+		if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
+			destroyErr = errors.Join(destroyErr, err)
+		} else {
+			s.leaseCreated = false
+			if err := s.emit("capability.revoked", "destroy"); err != nil {
+				destroyErr = errors.Join(destroyErr, err)
+			}
+		}
 	}
 	info, err := s.cfg.Runtime.Inspect(ctx, s.Container)
 	if err == nil {
 		if info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != s.ProjectID || info.Labels["dev.sunaba.session"] != s.SessionID {
-			return fmt.Errorf("refusing to remove container without matching ownership labels")
+			return errors.Join(destroyErr, fmt.Errorf("refusing to remove container without matching ownership labels"))
 		}
 		if info.State == runtime.StateRunning {
 			if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
-				return err
+				return errors.Join(destroyErr, err)
 			}
 		}
 		if err := s.cfg.Runtime.Remove(ctx, s.Container); err != nil {
-			return err
+			return errors.Join(destroyErr, err)
 		}
 		s.vmCreated = false
 		s.paused = false
 	} else if current, stateErr := s.cfg.Runtime.ContainerState(ctx, s.Container); stateErr != nil || current != runtime.StateNotFound {
-		return fmt.Errorf("inspect owned container before removal: %w", err)
+		return errors.Join(destroyErr, fmt.Errorf("inspect owned container before removal: %w", err))
 	}
-	s.emit("vm.destroyed", s.Container)
-	if s.leaseCreated {
-		if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
-			return err
-		}
+	if err := s.emit("vm.destroyed", s.Container); err != nil {
+		destroyErr = errors.Join(destroyErr, err)
 	}
-	return s.Close()
+	return errors.Join(destroyErr, s.Close())
 }
 
 func (s *Session) stopChannels(ctx context.Context) error {
-	if err := s.stopAttach(ctx); err != nil {
-		return err
-	}
+	var stopErr error
+	stopErr = errors.Join(stopErr, s.stopAttach(ctx))
 	s.gatewayActive.Store(false)
 	if s.gatewayServer != nil {
 		shutdown, cancel := context.WithTimeout(ctx, 3*time.Second)
 		err := s.gatewayServer.Shutdown(shutdown)
 		cancel()
 		if err != nil {
-			return err
+			stopErr = errors.Join(stopErr, err)
 		}
 		if s.gatewayDone != nil {
 			if err := <-s.gatewayDone; err != nil {
-				return err
+				stopErr = errors.Join(stopErr, err)
 			}
 		}
 		s.gatewayServer, s.gatewayDone = nil, nil
-		s.emit("model_gateway.stopped", "")
+		stopErr = errors.Join(stopErr, s.emit("model_gateway.stopped", ""))
 	}
-	return nil
+	return stopErr
 }
 
 func (s *Session) stopAttach(ctx context.Context) error {
@@ -536,7 +577,7 @@ func (s *Session) stopAttach(ctx context.Context) error {
 			}
 		}
 		s.attachCancel, s.attachDone = nil, nil
-		s.emit("attach_relay.stopped", "")
+		return s.emit("attach_relay.stopped", "")
 	}
 	return nil
 }
@@ -559,6 +600,11 @@ func (s *Session) Close() error {
 		if s.leaseCreated && s.leaseRegistry != nil {
 			if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil && s.closeErr == nil {
 				s.closeErr = err
+			} else if err == nil {
+				s.leaseCreated = false
+				if auditErr := s.emit("capability.revoked", "close"); auditErr != nil && s.closeErr == nil {
+					s.closeErr = auditErr
+				}
 			}
 		}
 		if s.projectLock != nil {
@@ -570,10 +616,22 @@ func (s *Session) Close() error {
 	return s.closeErr
 }
 
-func (s *Session) emit(eventType, detail string) {
+func (s *Session) emit(eventType, detail string) error {
+	category := strings.SplitN(eventType, ".", 2)[0]
+	details := map[string]string(nil)
+	if detail != "" {
+		details = map[string]string{"value": detail}
+	}
+	if err := s.cfg.Audit.Append(audit.BoundaryEvent{
+		Category: category, Action: eventType, Outcome: "success", ProjectID: s.ProjectID,
+		VMID: s.Container, SessionID: s.SessionID, Details: details,
+	}); err != nil {
+		return fmt.Errorf("append host audit event %s: %w", eventType, err)
+	}
 	if s.cfg.OnEvent != nil {
 		s.cfg.OnEvent(Event{Type: eventType, ProjectID: s.ProjectID, SessionID: s.SessionID, Detail: detail, At: time.Now().UTC()})
 	}
+	return nil
 }
 
 func makeNewPrivateDirectory(path string) error {
