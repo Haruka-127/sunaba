@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -63,8 +64,15 @@ func (r *AppleContainer) ContainerState(ctx context.Context, name string) (State
 }
 
 func (r *AppleContainer) Create(ctx context.Context, spec ContainerSpec) error {
+	if !strings.HasPrefix(spec.Name, "sunaba-") {
+		return fmt.Errorf("refusing to create non-sunaba container %q", spec.Name)
+	}
 	ctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
+	return r.run(ctx, "container", createArgs(spec)...)
+}
+
+func createArgs(spec ContainerSpec) []string {
 	args := []string{"run", "--detach", "--name", spec.Name}
 	if spec.CPUs > 0 {
 		args = append(args, "--cpus", fmt.Sprint(spec.CPUs))
@@ -72,16 +80,58 @@ func (r *AppleContainer) Create(ctx context.Context, spec ContainerSpec) error {
 	if spec.Memory != "" {
 		args = append(args, "--memory", spec.Memory)
 	}
+	for _, network := range spec.Networks {
+		args = append(args, "--network", network)
+	}
+	if spec.NoDNS {
+		args = append(args, "--no-dns")
+	}
+	if spec.ReadOnly {
+		args = append(args, "--read-only")
+	}
+	for _, capability := range spec.CapDrop {
+		args = append(args, "--cap-drop", capability)
+	}
+	for _, capability := range spec.CapAdd {
+		args = append(args, "--cap-add", capability)
+	}
 	for _, m := range spec.Mounts {
-		args = append(args, "--volume", m.Source+":"+m.Target)
+		if m.Type == "" || m.Type == "socket" {
+			value := m.Source + ":" + m.Target
+			if m.ReadOnly {
+				value += ":ro"
+			}
+			args = append(args, "--volume", value)
+			continue
+		}
+		value := "type=" + m.Type + ",source=" + m.Source + ",target=" + m.Target
+		if m.ReadOnly {
+			value += ",readonly"
+		}
+		args = append(args, "--mount", value)
+	}
+	for _, socket := range spec.Sockets {
+		args = append(args, "--publish-socket", socket.HostPath+":"+socket.GuestPath)
 	}
 	for _, f := range spec.EnvFiles {
 		args = append(args, "--env-file", f)
 	}
-	for k, v := range spec.Env {
+	envKeys := make([]string, 0, len(spec.Env))
+	for k := range spec.Env {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	for _, k := range envKeys {
+		v := spec.Env[k]
 		args = append(args, "--env", k+"="+v)
 	}
-	for k, v := range spec.Labels {
+	labelKeys := make([]string, 0, len(spec.Labels))
+	for k := range spec.Labels {
+		labelKeys = append(labelKeys, k)
+	}
+	sort.Strings(labelKeys)
+	for _, k := range labelKeys {
+		v := spec.Labels[k]
 		args = append(args, "--label", k+"="+v)
 	}
 	if spec.Workdir != "" {
@@ -92,7 +142,7 @@ func (r *AppleContainer) Create(ctx context.Context, spec ContainerSpec) error {
 	}
 	args = append(args, spec.Image)
 	args = append(args, spec.Args...)
-	return r.run(ctx, "container", args...)
+	return args
 }
 
 func (r *AppleContainer) Start(ctx context.Context, name string) error {
@@ -131,6 +181,18 @@ func (r *AppleContainer) ExecOutput(ctx context.Context, name string, command []
 	defer cancel()
 	args := append([]string{"exec", name}, command...)
 	return r.output(ctx, "container", args...)
+}
+
+func (r *AppleContainer) CopyTo(ctx context.Context, name, source, target string) error {
+	if !strings.HasPrefix(name, "sunaba-") {
+		return fmt.Errorf("refusing to copy into non-sunaba container %q", name)
+	}
+	if !strings.HasPrefix(target, "/") {
+		return fmt.Errorf("container copy target must be absolute: %q", target)
+	}
+	ctx, cancel := context.WithTimeout(ctx, r.timeout())
+	defer cancel()
+	return r.run(ctx, "container", "cp", source, name+":"+target)
 }
 
 func (r *AppleContainer) IPAddress(ctx context.Context, name string) (string, error) {
@@ -213,6 +275,7 @@ func parseInspect(out, fallbackName string) (Info, error) {
 		return Info{}, errors.New("unexpected inspect JSON")
 	}
 	info := Info{Name: fallbackName}
+	info.Labels = findStringMap(m, "labels")
 	walk(m, func(path []string, val any) {
 		key := strings.ToLower(path[len(path)-1])
 		s, _ := val.(string)
@@ -247,6 +310,35 @@ func parseInspect(out, fallbackName string) (Info, error) {
 		info.State = StateUnknown
 	}
 	return info, nil
+}
+
+func findStringMap(value any, wantKey string) map[string]string {
+	switch x := value.(type) {
+	case map[string]any:
+		for key, child := range x {
+			if strings.EqualFold(key, wantKey) {
+				if raw, ok := child.(map[string]any); ok {
+					out := make(map[string]string, len(raw))
+					for label, value := range raw {
+						if text, ok := value.(string); ok {
+							out[label] = text
+						}
+					}
+					return out
+				}
+			}
+			if found := findStringMap(child, wantKey); found != nil {
+				return found
+			}
+		}
+	case []any:
+		for _, child := range x {
+			if found := findStringMap(child, wantKey); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
 }
 
 func parseList(out string) []Info {

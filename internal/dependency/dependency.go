@@ -30,6 +30,13 @@ type Manifest struct {
 		Version string `json:"version"`
 		Commit  string `json:"commit"`
 	} `json:"apple_container"`
+	BaseImage struct {
+		Reference   string `json:"reference"`
+		IndexSHA256 string `json:"index_sha256"`
+	} `json:"base_image"`
+	AgentImage struct {
+		Tag string `json:"tag"`
+	} `json:"agent_image"`
 	OpenCode struct {
 		Version string   `json:"version"`
 		Host    Artifact `json:"host"`
@@ -69,6 +76,12 @@ func (m Manifest) Validate() error {
 	}
 	if m.OpenCode.Version != OpenCodeVersion {
 		return fmt.Errorf("OpenCode version %q does not match compiled contract %q", m.OpenCode.Version, OpenCodeVersion)
+	}
+	if !strings.HasSuffix(m.BaseImage.Reference, "@sha256:"+m.BaseImage.IndexSHA256) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(m.BaseImage.IndexSHA256) {
+		return fmt.Errorf("base image must be pinned by a valid index SHA-256")
+	}
+	if m.AgentImage.Tag != "sunaba-base:"+OpenCodeVersion+"-secure.1" {
+		return fmt.Errorf("unexpected agent image tag %q", m.AgentImage.Tag)
 	}
 	if strings.Contains(strings.ToLower(m.OpenCode.Host.URL), "latest") || strings.Contains(strings.ToLower(m.OpenCode.Guest.URL), "latest") {
 		return fmt.Errorf("dependency URLs must not use latest")

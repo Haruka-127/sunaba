@@ -14,6 +14,10 @@ import (
 )
 
 func Tag(version string) string {
+	pinned := dependency.MustPinned()
+	if version == pinned.OpenCode.Version {
+		return pinned.AgentImage.Tag
+	}
 	return "sunaba-base:" + version
 }
 

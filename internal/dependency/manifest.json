@@ -4,6 +4,13 @@
     "version": "1.2.2",
     "commit": "0190097d06df0b9065f4c2d2c7873c649d81d493"
   },
+  "base_image": {
+    "reference": "docker.io/library/debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
+    "index_sha256": "60eac759739651111db372c07be67863818726f754804b8707c90979bda511df"
+  },
+  "agent_image": {
+    "tag": "sunaba-base:1.18.16-secure.1"
+  },
   "opencode": {
     "version": "1.18.16",
     "host": {

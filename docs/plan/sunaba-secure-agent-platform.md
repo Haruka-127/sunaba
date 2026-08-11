@@ -300,7 +300,7 @@ Host TUIは利便性のためホストで動かすため、固定・検証され
 2. secureモードでは任意の直接外向き通信が遮断されていることを検査する。
 3. セッションに必要なGateway capability、OpenCode server password、attach relay identityを発行する。
 4. Model Gatewayの接続先と短命tokenをVM内OpenCode serverのセッション環境へ注入する。
-5. VM内で固定バージョンの`opencode serve`を起動する。`--hostname`、`--port`、`--no-mdns`をSupervisorが明示し、guest loopbackまたはProject専用interfaceだけでlistenする。
+5. VM内で固定バージョンの`opencode serve`を起動する。`--hostname`、`--port`、`--mdns=false`をSupervisorが明示し、guest loopbackまたはProject専用interfaceだけでlistenする。v1.18.16には`--no-mdns` flagが存在しないため使用しない。
 6. Local Attach Relayをhost loopbackのrandom portで起動し、Project/VM専用transportでserverへ接続する。
 7. `/global/health`でserver versionがHost TUIと完全一致することを検証する。不一致なら終了する。
 8. host Project外のsunaba管理directoryをcwd/HOME/config rootにした、固定バージョンの`opencode attach`を`--pure`で起動する。
@@ -631,7 +631,7 @@ OpenCodeはv1系の最新stable releaseを互換試験後に固定して使う�
 
 Agent VMでは`opencode serve`をmerged workspaceで動かす。Projectの`opencode.json`、`.opencode/`、plugin、hook、MCP、AGENTS.md等はVM内serverだけが読み込み、VM内で自由に実行できる。serverは`OPENCODE_DISABLE_AUTOUPDATE=1`と`OPENCODE_DISABLE_MODELS_FETCH=1`を設定し、Model Gateway用のmodel metadataをsunabaが明示的に与える。secureモードでModels.devやupdate endpointへの直接通信を前提にしない。
 
-Project設定はuntrustedであり、OpenCode v1では`server.hostname`、`server.port`、`server.mdns`、`server.cors`も設定できる。したがって、listen先とmDNSはSupervisorがCLI引数`--hostname`、`--port`、`--no-mdns`で上書きし、CORS設定の有無をnetwork boundaryや認証の根拠にしない。Local Attach RelayはOpenCodeのCORS応答とは独立して、許可したTUI接続、HTTP method/path、basic auth、Project/VM channelだけを受け付ける。
+Project設定はuntrustedであり、OpenCode v1では`server.hostname`、`server.port`、`server.mdns`、`server.cors`も設定できる。したがって、listen先とmDNSはSupervisorがCLI引数`--hostname`、`--port`、`--mdns=false`で上書きし、CORS設定の有無をnetwork boundaryや認証の根拠にしない。v1.18.16のboolean flagは`--mdns`であり`--no-mdns`は存在しない。Local Attach RelayはOpenCodeのCORS応答とは独立して、許可したTUI接続、HTTP method/path、basic auth、Project/VM channelだけを受け付ける。
 
 serverは次を満たす。
 

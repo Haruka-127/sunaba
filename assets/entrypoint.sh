@@ -22,4 +22,4 @@ chown agent:agent /home/agent /home/agent/.cache 2>/dev/null || true
 chown -R agent:agent /home/agent/.local /home/agent/.config 2>/dev/null || true
 
 cd "$SUNABA_WORKDIR"
-exec sudo -E -H -u agent opencode serve --hostname 0.0.0.0 --port 4096
+exec sudo -E -H -u agent opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false
