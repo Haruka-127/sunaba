@@ -9,10 +9,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
-
-	"sunaba/internal/approval"
 )
 
 const maxRecordBytes = 64 << 10
@@ -67,7 +66,7 @@ func (r *Recorder) Append(event BoundaryEvent) error {
 			if _, forbidden := forbiddenDetailKeys[strings.ToLower(key)]; forbidden {
 				return fmt.Errorf("audit detail key %q may contain sensitive content", key)
 			}
-			value = approval.SanitizeText(value)
+			value = sanitizeText(value)
 			if len(value) > 4096 {
 				value = value[:4096] + "<TRUNCATED>"
 			}
@@ -88,6 +87,25 @@ func (r *Recorder) Append(event BoundaryEvent) error {
 	}
 	filename := filepath.Join(projectDir, "audit-"+event.At.Format("20060102")+".jsonl")
 	return appendDurable(filename, append(encoded, '\n'))
+}
+
+func sanitizeText(value string) string {
+	var output strings.Builder
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if r == utf8.RuneError && size == 1 {
+			output.WriteString("<INVALID-UTF8>")
+			value = value[1:]
+			continue
+		}
+		if r == '\n' || r == '\r' || r == '\t' || r == 0x1b || r == 0x7f || (r >= 0 && r < 0x20) || (r >= 0x80 && r <= 0x9f) || r == 0x200e || r == 0x200f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
+			fmt.Fprintf(&output, "<U+%04X>", r)
+		} else {
+			output.WriteRune(r)
+		}
+		value = value[size:]
+	}
+	return output.String()
 }
 
 func (r *Recorder) ensureRoot() error {

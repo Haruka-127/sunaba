@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"sunaba/internal/approval"
+	"sunaba/internal/audit"
 	"sunaba/internal/state"
 	"sunaba/internal/workspace"
 )
@@ -52,6 +53,21 @@ func TestApplyRejectsChangedHostBaselineBeforeConsumingGrant(t *testing.T) {
 		t.Fatalf("baseline conflict error=%v", err)
 	}
 	assertContent(t, filepath.Join(cfg.ProjectRoot, "host-edit.txt"), "concurrent\n")
+}
+
+func TestApplyRequiresWritableAuditBeforeMutation(t *testing.T) {
+	cfg := applyFixture(t)
+	cfg.Grant = approve(t, cfg)
+	before := mustManifest(t, cfg.ProjectRoot)
+	if err := os.Chmod(cfg.Audit.Root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(cfg); err == nil {
+		t.Fatal("unwritable audit was accepted")
+	}
+	if after := mustManifest(t, cfg.ProjectRoot); after.Digest != before.Digest {
+		t.Fatal("apply mutated Project before durable audit")
+	}
 }
 
 func TestApplyRollsBackInjectedFailure(t *testing.T) {
@@ -254,8 +270,13 @@ func fixtureFromProject(t *testing.T, project string, mutate func(string)) Confi
 	if err != nil {
 		t.Fatal(err)
 	}
+	store := &state.Store{Root: filepath.Join(root, "state")}
+	recorder, err := audit.NewRecorder(filepath.Join(store.Root, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return Config{
-		Store: &state.Store{Root: filepath.Join(root, "state")}, ProjectRoot: canonical, ProjectID: state.ProjectID(canonical),
+		Store: store, ProjectRoot: canonical, ProjectID: state.ProjectID(canonical), Audit: recorder,
 		MergedRoot: mergedRoot, Baseline: baseline, Merged: merged, ChangeSet: changeSet, Approvals: approval.NewManager(nil),
 	}
 }

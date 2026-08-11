@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	hostapply "sunaba/internal/apply"
+	"sunaba/internal/approval"
 	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
 	"sunaba/internal/modelgateway"
@@ -47,6 +49,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	}
 	writeIntegrationFile(t, filepath.Join(projectRoot, "modify.txt"), "before\n")
 	writeIntegrationFile(t, filepath.Join(projectRoot, "delete.txt"), "delete\n")
+	writeIntegrationFile(t, filepath.Join(projectRoot, ".git", "config"), "host-only\n")
 	hostBefore, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -252,6 +255,36 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	if current, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy()); err != nil || current.Digest != hostBefore.Digest {
 		t.Fatalf("host Project changed after clean regeneration: %v", err)
 	}
+	binding := approval.Binding{ProjectID: active.ProjectID, BaselineDigest: active.Baseline.Digest, MergedDigest: result.Merged.Digest, ChangeSetDigest: result.ChangeSet.Digest}
+	approvals, err := approval.NewAuditedManager(nil, first.Audit, active.ProjectID, active.Container, active.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalRequest, err := approvals.NewRequest(binding, "model summary\x1b]52;c;fake\a\n", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(approvalRequest.Display, "\x1b\a") || !strings.Contains(approvalRequest.Display, "<U+001B>") {
+		t.Fatalf("unsafe Trusted Approval display=%q", approvalRequest.Display)
+	}
+	grant, err := approvals.Confirm(approvalRequest.Nonce, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := hostapply.Apply(hostapply.Config{
+		Store: first.Store, ProjectRoot: projectRoot, ProjectID: active.ProjectID, MergedRoot: result.MergedRoot,
+		Baseline: active.Baseline, Merged: result.Merged, ChangeSet: result.ChangeSet,
+		Approvals: approvals, Grant: grant, Audit: first.Audit,
+	})
+	if err != nil || applied.Digest != result.Merged.Digest {
+		t.Fatalf("approved actual apply digest=%s error=%v", applied.Digest, err)
+	}
+	assertIntegrationFile(t, filepath.Join(projectRoot, "modify.txt"), "after\n")
+	assertIntegrationFile(t, filepath.Join(projectRoot, "model-edit.txt"), "created by model\n")
+	assertIntegrationFile(t, filepath.Join(projectRoot, ".git", "config"), "host-only\n")
+	if _, err := os.Lstat(filepath.Join(projectRoot, "delete.txt")); !os.IsNotExist(err) {
+		t.Fatalf("approved delete was not applied: %v", err)
+	}
 	auditLogs, err := filepath.Glob(filepath.Join(runtimeBase, "state", "audit", state.ProjectID(projectRoot), "audit-*.jsonl"))
 	if err != nil || len(auditLogs) != 1 {
 		t.Fatalf("host audit logs=%v error=%v", auditLogs, err)
@@ -260,7 +293,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, action := range []string{"capability.issued", "session.paused", "session.resumed", "model.request", "changeset.created", "capability.revoked", "vm.destroyed"} {
+	for _, action := range []string{"capability.issued", "session.paused", "session.resumed", "model.request", "changeset.created", "capability.revoked", "vm.destroyed", "approval.request", "approval.confirm", "approval.consume", "changeset.apply"} {
 		if !strings.Contains(string(auditBytes), `"action":"`+action+`"`) {
 			t.Fatalf("actual host audit missing %q", action)
 		}
@@ -320,5 +353,16 @@ func writeResponsesFunctionCallStream(w http.ResponseWriter, modelID, name, argu
 		if flusher != nil {
 			flusher.Flush()
 		}
+	}
+}
+
+func assertIntegrationFile(t *testing.T, filename, expected string) {
+	t.Helper()
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != expected {
+		t.Fatalf("%s=%q, want %q", filename, content, expected)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"sunaba/internal/approval"
+	"sunaba/internal/audit"
 	"sunaba/internal/state"
 	"sunaba/internal/workspace"
 )
@@ -27,6 +28,7 @@ type Config struct {
 	ChangeSet   workspace.ChangeSet
 	Approvals   *approval.Manager
 	Grant       *approval.Grant
+	Audit       *audit.Recorder
 }
 
 type journalEntry struct {
@@ -45,10 +47,29 @@ type journal struct {
 	Entries         []journalEntry `json:"entries"`
 }
 
-func Apply(cfg Config) (workspace.SnapshotManifest, error) {
+func Apply(cfg Config) (result workspace.SnapshotManifest, err error) {
 	if err := validateConfig(cfg); err != nil {
 		return workspace.SnapshotManifest{}, err
 	}
+	details := map[string]string{
+		"baseline_digest": cfg.Baseline.Digest, "merged_digest": cfg.Merged.Digest, "change_set_digest": cfg.ChangeSet.Digest,
+	}
+	if err := cfg.Audit.Append(audit.BoundaryEvent{Category: "apply", Action: "changeset.apply", Outcome: "started", ProjectID: cfg.ProjectID, Details: details}); err != nil {
+		return workspace.SnapshotManifest{}, err
+	}
+	defer func() {
+		outcome := "success"
+		finalDetails := details
+		if err != nil {
+			outcome = "rejected"
+			finalDetails = map[string]string{
+				"baseline_digest": cfg.Baseline.Digest, "merged_digest": cfg.Merged.Digest,
+				"change_set_digest": cfg.ChangeSet.Digest, "reason": err.Error(),
+			}
+		}
+		auditErr := cfg.Audit.Append(audit.BoundaryEvent{Category: "apply", Action: "changeset.apply", Outcome: outcome, ProjectID: cfg.ProjectID, Details: finalDetails})
+		err = errors.Join(err, auditErr)
+	}()
 	lock, err := cfg.Store.AcquireProjectLock(cfg.ProjectRoot)
 	if err != nil {
 		return workspace.SnapshotManifest{}, err
@@ -80,8 +101,11 @@ func Apply(cfg Config) (workspace.SnapshotManifest, error) {
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.Store == nil || cfg.Approvals == nil || !filepath.IsAbs(cfg.ProjectRoot) || !filepath.IsAbs(cfg.MergedRoot) || cfg.ProjectID == "" {
-		return fmt.Errorf("apply requires absolute roots, Project identity, store, and approval manager")
+	if cfg.Store == nil || cfg.Approvals == nil || cfg.Audit == nil || !filepath.IsAbs(cfg.ProjectRoot) || !filepath.IsAbs(cfg.MergedRoot) || cfg.ProjectID == "" {
+		return fmt.Errorf("apply requires absolute roots, Project identity, store, approval manager, and host audit")
+	}
+	if filepath.Clean(cfg.Audit.Root) != filepath.Join(filepath.Clean(cfg.Store.Root), "audit") {
+		return fmt.Errorf("apply audit must be under the state store")
 	}
 	return nil
 }

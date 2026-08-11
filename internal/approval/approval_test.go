@@ -1,9 +1,13 @@
 package approval
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"sunaba/internal/audit"
 )
 
 func TestApprovalBindsDigestsAndIsOneShot(t *testing.T) {
@@ -57,6 +61,45 @@ func TestApprovalExpiresAndConsumesNonceOnFailure(t *testing.T) {
 	now = time.Unix(100, 0)
 	if _, err := manager.Confirm(request.Nonce, testBinding()); err == nil {
 		t.Fatal("failed approval nonce was reusable")
+	}
+}
+
+func TestAuditedApprovalRecordsBindingsWithoutSummaryContent(t *testing.T) {
+	recorder, err := audit.NewRecorder(filepath.Join(t.TempDir(), "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewAuditedManager(nil, recorder, "project", "vm", "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := testBinding()
+	request, err := manager.NewRequest(binding, "secret summary content", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := manager.Confirm(request.Nonce, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Consume(grant, binding); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := filepath.Glob(filepath.Join(recorder.Root, "project", "audit-*.jsonl"))
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("logs=%v error=%v", logs, err)
+	}
+	encoded, err := os.ReadFile(logs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"approval.request", "approval.confirm", "approval.consume"} {
+		if !strings.Contains(string(encoded), `"action":"`+action+`"`) {
+			t.Fatalf("audit missing %s: %s", action, encoded)
+		}
+	}
+	if strings.Contains(string(encoded), "secret summary content") || !strings.Contains(string(encoded), request.Nonce) {
+		t.Fatalf("audit summary/nonce policy violated: %s", encoded)
 	}
 }
 
