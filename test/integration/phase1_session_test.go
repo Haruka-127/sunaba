@@ -27,6 +27,7 @@ import (
 	sunabaruntime "sunaba/internal/runtime"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
+	"sunaba/internal/trustedui"
 	"sunaba/internal/workspace"
 )
 
@@ -275,8 +276,12 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.ContainsAny(approvalRequest.Display, "\x1b\a") || !strings.Contains(approvalRequest.Display, "<U+001B>") {
-		t.Fatalf("unsafe Trusted Approval display=%q", approvalRequest.Display)
+	var trustedOutput bytes.Buffer
+	if err := trustedui.ConfirmApply(strings.NewReader(approvalRequest.Nonce+"\n"), &trustedOutput, approvalRequest); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(trustedOutput.String(), "\x1b\a") || !strings.Contains(trustedOutput.String(), "SUNABA HOST TRUSTED APPROVAL") || !strings.Contains(trustedOutput.String(), "<U+001B>") {
+		t.Fatalf("unsafe Trusted Approval display=%q", trustedOutput.String())
 	}
 	grant, err := approvals.Confirm(approvalRequest.Nonce, binding)
 	if err != nil {

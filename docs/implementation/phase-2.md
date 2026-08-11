@@ -8,6 +8,8 @@ host memory上のApproval Managerが256-bit nonceを生成し、Project ID、hos
 
 承認表示のguest由来summaryは、改行、tab、C0/C1、ESC/OSC構成文字、BEL、双方向制御文字、不正UTF-8を`<U+XXXX>`等へ可視化する。nonceと4つのidentity/digestはhostが構成した固定fieldとして表示するため、guestの偽画面やserver eventだけではgrantを生成できない。
 
+Trusted Approval UIはmanagerの自由形式`Display`を描画せず、structured requestのProject ID、3 digest、expiry、nonceから固定host画面を再構成する。利用者が短い1行でnonceを完全一致入力した場合だけ承認し、`yes`、前後空白、追加文字、control sequence、512 byte超の入力を拒否する。比較はnonceのSHA-256をconstant-timeで行う。UI確認後もmanagerが同じbindingとexpiryを再検証するため、画面表示だけでgrantは成立しない。
+
 audited managerはrequest、confirmの成功・拒否、grant consumeをProject/VM/Sessionへ束縛してhost JSONLへ記録する。表示対象nonceと3 digest、summaryのSHA-256だけを記録し、guest由来summary本文は保存しない。requestのauditに失敗した場合はpending nonceを破棄し、confirmのauditに失敗した場合はgrantを発行せず、consumeのauditに失敗した場合はgrantを失効させてapplyを拒否する。
 
 ## crash-safe apply

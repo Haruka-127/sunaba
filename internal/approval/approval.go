@@ -28,6 +28,7 @@ type Request struct {
 	Nonce     string
 	Binding   Binding
 	ExpiresAt time.Time
+	Summary   string
 	Display   string
 }
 
@@ -93,8 +94,10 @@ func (m *Manager) NewRequest(binding Binding, summary string, lifetime time.Dura
 	display := fmt.Sprintf("Project: %s\nBaseline: %s\nMerged: %s\nChange Set: %s\nSummary: %s\nNonce: %s",
 		SanitizeText(binding.ProjectID), binding.BaselineDigest, binding.MergedDigest, binding.ChangeSetDigest,
 		SanitizeText(summary), nonce)
-	return Request{Nonce: nonce, Binding: binding, ExpiresAt: expires, Display: display}, nil
+	return Request{Nonce: nonce, Binding: binding, ExpiresAt: expires, Summary: SanitizeText(summary), Display: display}, nil
 }
+
+func ValidateBinding(binding Binding) error { return validateBinding(binding) }
 
 func (m *Manager) Confirm(nonce string, presented Binding) (*Grant, error) {
 	id := sha256.Sum256([]byte(nonce))
