@@ -1,6 +1,6 @@
 # Phase 4: Web Gateway
 
-状態: 方式決定済み、実装中。実Agent VMの通信計測を完了し、正本14章へProject専用forward proxy方式と保証範囲を固定した。
+状態: 完了。実Agent VMの通信計測、方式決定、Web Gateway実装、secure session統合、attack/compatibility gateを完了した。
 
 ## 実通信計測
 
@@ -40,13 +40,28 @@ pinned OpenCodeソースとの照合:
 
 ## 実装gate
 
-- strict proxy parser、capability、origin policy、quota、audit
-- host DNS/IP validationとdial pinning
-- HTTP GET/HEAD、redirect origin再検証
-- HTTPS CONNECT tunnel、byte/time/concurrency上限
-- private/link-local/metadata/host/LAN/他VM、IP literal、非許可port、upload attack
-- secure session socket、proxy env、NO_PROXY、pause/resume/end
-- 実OpenCode webfetch/websearch、curl/wget/apt gate
-- blocklist manifest、expiry、fail-closed更新
+- 完了: strict proxy parser、Project/VM/Session/policy digest capability、origin policy、request/concurrency/time/upload/download/total quota、内容非保持audit
+- 完了: host DNSの全回答検査、public IP判定、検査済みIPへの直接dial。private/link-local/metadata/CGN/documentation/benchmark/multicast/unspecified、mixed answer、IP literalを拒否
+- 完了: HTTP GET/HEADだけ、body/upload拒否、client追跡redirectのorigin再検証
+- 完了: TLS非終端CONNECT、443固定、byte/time/concurrency上限、client証明書検証維持
+- 完了: 3本目のProject socket、guest `127.0.0.1:4343` relay、大小文字proxy環境、loopbackだけの`NO_PROXY`、apt専用config、pause/resume/end失効、export前secret除去
+- 完了: URLhaus由来の外部maintainer feedをStevenBlack hosts repositoryの固定HTTPS pathからhostが取得する。各snapshotをSHA-256、取得時刻、最大14日の期限へ固定し、redirect、形式逸脱、改ざん、期限切れをfail closedにする
+- 完了: 実OpenCode webfetch/websearch、curl、wget、非root apt metadata、証明書検証付きHTTPS CONNECTの実VM gate
+- 完了: private/metadata、blocklist、direct IP、HTTP upload、cross-origin redirect、pause、secret export、audit redaction attack gate
 
-これらを完了するまでPhase 4を完了扱いにしない。
+既定blocklist source:
+
+```text
+https://raw.githubusercontent.com/StevenBlack/hosts/master/data/URLHaus/hosts
+```
+
+source URL自体は固定し、mutable contentは取得時のdigestへ固定する。期限内snapshotだけをpolicy作成に利用する。allowlistとの積集合でのみ効くため、feed単独をsecurity boundaryにしない。
+
+再現コマンド:
+
+```sh
+go test -race ./internal/webgateway ./internal/runtime ./internal/session
+SUNABA_PHASE4_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase4WebGatewayInAgentVM$' -count=1 -v
+```
+
+実VM gateはAgent VMのnetwork `none`、実OpenCode `v1.18.16`、curl `7.88.1`、wget `1.21.3`、apt `2.6.1`で通過した。exact baseに存在しないnpm/pip/go/cargo CLIは未対応を暗黙に表明せず、追加時に同じ計測とorigin/CDN policy gateを要求する。

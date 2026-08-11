@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	BlocklistFormatHosts = "hosts-v1"
-	maxBlocklistBytes    = 8 << 20
-	maxBlocklistDomains  = 100_000
-	maxBlocklistTTL      = 14 * 24 * time.Hour
+	DefaultBlocklistSourceURL = "https://raw.githubusercontent.com/StevenBlack/hosts/master/data/URLHaus/hosts"
+	BlocklistFormatHosts      = "hosts-v1"
+	maxBlocklistBytes         = 8 << 20
+	maxBlocklistDomains       = 100_000
+	maxBlocklistTTL           = 14 * 24 * time.Hour
 )
 
 type BlocklistManifest struct {

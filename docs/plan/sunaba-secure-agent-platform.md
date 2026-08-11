@@ -793,7 +793,7 @@ host auditにはProject/VM/Session、category、正規化hostname、port、HTTP 
 
 HTTPS CONNECT内部のmethod、path、upload、cookie、同一origin side effectは識別できず、許可originへの情報流出を防ぐ保証はしない。Web検索queryと取得URL自体も情報を含み得る。利用者にはorigin categoryとこの非保証を表示し、機密Projectではgeneral web/search ruleを無効にできるようにする。完全なread-only意味論が必要なoriginは将来のtyped fetch/mirrorを別途使い、opaque CONNECTを許可しない。
 
-Web Gatewayの実装gateが完成するまで、secureモードで一般Webや`apt update`が使えるとは表明しない。直接インターネットが必要な未対応作業は、リスクを表示したうえでdevモードを利用する。
+Web Gatewayの実装gateはPhase 4で完成した。secureモードではProject policyで明示したorigin categoryだけを有効にし、未登録originやexact baseに存在しないpackage managerを利用可能とは表明しない。追加toolは実通信計測とorigin/CDN policy gateを通してから有効にする。
 
 ---
 
@@ -1208,7 +1208,8 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 - 確定: 単一Agent VM、Project単位、OverlayFS、Change Set、secure/dev、Model Gatewayの最小構成
 - 固定dependency: OpenCode `v1.18.16`のhost TUI / guest server同一version
 - 完了段階: Git Gatewayとpush承認
-- 次段階: Phase 4 Web Gatewayの実装gate
+- 完了段階: Phase 4 Web Gatewayの方式決定、実装、実VM gate
+- 次段階: Phase 5 hardeningと運用gate
 - 別承認: `allowed-host-operations.md`の範囲外となるホスト操作
 
 Phase 0でsecure networkまたはOverlayFS/exportの中核不変条件を実現できないと判明した場合は、見かけ上の実装を続けず、アーキテクチャ判断を更新する。
