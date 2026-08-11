@@ -235,7 +235,7 @@ func TestSupervisorHeartbeatExtendsIdleDeadline(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0)
 	controlled := &controlledSession{
 		active: &fakeSessionControlTarget{}, expiresAt: clock.Add(time.Hour), idleTimeout: 10 * time.Second,
-		lastActivity: clock, now: func() time.Time { return clock }, state: "running", exit: make(chan struct{}),
+		lastActivity: clock, now: func() time.Time { return clock }, activity: make(chan struct{}, 1), state: "running", exit: make(chan struct{}),
 	}
 	if controlled.idleExpired(clock.Add(9 * time.Second)) {
 		t.Fatal("session expired before its idle deadline")
@@ -243,6 +243,14 @@ func TestSupervisorHeartbeatExtendsIdleDeadline(t *testing.T) {
 	clock = clock.Add(8 * time.Second)
 	if err := controlled.heartbeat(); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-controlled.activity:
+	default:
+		t.Fatal("heartbeat did not notify the idle deadline timer")
+	}
+	if delay := controlled.idleDelay(clock.Add(3 * time.Second)); delay != 7*time.Second {
+		t.Fatalf("idle timer delay=%s", delay)
 	}
 	if controlled.idleExpired(clock.Add(9 * time.Second)) {
 		t.Fatal("heartbeat did not extend the idle deadline")

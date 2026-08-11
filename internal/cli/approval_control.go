@@ -94,6 +94,7 @@ type controlledSession struct {
 	idleTimeout    time.Duration
 	lastActivity   time.Time
 	now            func() time.Time
+	activity       chan struct{}
 	mu             sync.Mutex
 	state          string
 	exit           chan struct{}
@@ -109,7 +110,7 @@ func newControlledSession(active *session.Session, projectState, serverPassword 
 		active: active, persistent: active, projectID: active.ProjectID, sessionID: active.SessionID, container: active.Container,
 		runtimeRoot: active.Root, workspacePath: active.WorkspacePath, attachURL: active.AttachURL,
 		projectState: projectState, serverPassword: serverPassword, expiresAt: expiresAt,
-		idleTimeout: idleTimeout, lastActivity: now(), now: now, state: "running", exit: make(chan struct{}),
+		idleTimeout: idleTimeout, lastActivity: now(), now: now, activity: make(chan struct{}, 1), state: "running", exit: make(chan struct{}),
 	}, nil
 }
 
@@ -159,7 +160,7 @@ func (s *controlledSession) resume(ctx context.Context) error {
 	if s.persistent != nil {
 		s.attachURL = s.persistent.AttachURL
 	}
-	s.lastActivity = s.currentTime()
+	s.touchLocked(s.currentTime())
 	s.state = "running"
 	return nil
 }
@@ -171,7 +172,7 @@ func (s *controlledSession) heartbeat() error {
 	if s.state != "running" || !now.Before(s.expiresAt) {
 		return fmt.Errorf("Agent Session is not active")
 	}
-	s.lastActivity = now
+	s.touchLocked(now)
 	return nil
 }
 
@@ -181,11 +182,31 @@ func (s *controlledSession) idleExpired(now time.Time) bool {
 	return s.state == "running" && s.idleTimeout >= time.Second && !now.Before(s.lastActivity.Add(s.idleTimeout))
 }
 
+func (s *controlledSession) idleDelay(now time.Time) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delay := s.lastActivity.Add(s.idleTimeout).Sub(now)
+	if delay <= 0 {
+		return time.Nanosecond
+	}
+	return delay
+}
+
 func (s *controlledSession) currentTime() time.Time {
 	if s.now != nil {
 		return s.now()
 	}
 	return time.Now()
+}
+
+func (s *controlledSession) touchLocked(now time.Time) {
+	s.lastActivity = now
+	if s.activity != nil {
+		select {
+		case s.activity <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (s *controlledSession) exportAndDestroy(ctx context.Context) error {
@@ -244,7 +265,7 @@ func (s *controlledSession) shell(ctx context.Context, command string) (string, 
 	if command == "" || len(command) > 16<<10 || strings.IndexByte(command, 0) >= 0 {
 		return "", fmt.Errorf("guest shell command is invalid")
 	}
-	s.lastActivity = s.currentTime()
+	s.touchLocked(s.currentTime())
 	outer := "runuser -u sunaba-agent -- /run/sunaba/shell-wrapper \"$1\" 2>&1 | head -c 1048576; status=${PIPESTATUS[0]}; printf '\\n[SUNABA_EXIT=%d]\\n' \"$status\"; exit 0"
 	output, err := s.active.ExecOutput(ctx, []string{"/bin/bash", "-lc", outer, "sunaba-shell", command})
 	return trustedui.SanitizeTerminal(output), err

@@ -215,15 +215,17 @@ func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {
 	expiry := time.NewTimer(time.Until(managed.expiresAt))
 	defer expiry.Stop()
 	expiryChannel := expiry.C
-	idleInterval := idleTimeout / 3
-	if idleInterval > 30*time.Second {
-		idleInterval = 30 * time.Second
+	idleTimer := time.NewTimer(controlled.idleDelay(time.Now()))
+	defer idleTimer.Stop()
+	resetIdle := func(delay time.Duration) {
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(delay)
 	}
-	if idleInterval < time.Second {
-		idleInterval = time.Second
-	}
-	idleTicker := time.NewTicker(idleInterval)
-	defer idleTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -239,7 +241,9 @@ func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {
 				return fmt.Errorf("pause expired Agent Session: %w", pauseErr)
 			}
 			expiryChannel = nil
-		case now := <-idleTicker.C:
+		case <-controlled.activity:
+			resetIdle(controlled.idleDelay(time.Now()))
+		case now := <-idleTimer.C:
 			if controlled.idleExpired(now) {
 				pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				pauseErr := controlled.pause(pauseContext)
@@ -248,6 +252,7 @@ func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {
 					return fmt.Errorf("pause idle Agent Session: %w", pauseErr)
 				}
 			}
+			idleTimer.Reset(controlled.idleDelay(time.Now()))
 		}
 	}
 }
