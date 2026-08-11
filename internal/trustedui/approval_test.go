@@ -3,11 +3,14 @@ package trustedui
 import (
 	"bytes"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"sunaba/internal/approval"
+	"sunaba/internal/audit"
+	"sunaba/internal/gitgateway"
 )
 
 func TestConfirmApplyRendersStructuredSanitizedHostUI(t *testing.T) {
@@ -32,6 +35,53 @@ func TestConfirmApplyRendersStructuredSanitizedHostUI(t *testing.T) {
 			t.Fatalf("Trusted UI missing %q: %q", required, text)
 		}
 	}
+}
+
+func TestConfirmPushDisplaysObjectForceAndDeleteBinding(t *testing.T) {
+	request := gitgateway.PushRequest{
+		Nonce: strings.Repeat("n", 43), Digest: "",
+		ExpiresAt: time.Now().Add(time.Minute),
+		Binding: gitgateway.PushBinding{
+			ProjectID: "project", Repository: "repository", RemoteName: "origin", RemoteURL: "https://example.com/repository.git",
+			Updates: []gitgateway.RefUpdate{
+				{Ref: "refs/heads/main", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40), Force: true},
+				{Ref: "refs/heads/obsolete", Old: strings.Repeat("c", 40), New: strings.Repeat("0", 40), Delete: true},
+			},
+		},
+	}
+	request.Digest = pushRequestDigest(t, request)
+	var output bytes.Buffer
+	if err := ConfirmPush(strings.NewReader(request.Nonce+"\n"), &output, request); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, required := range []string{"Operation: Git push", request.Binding.RemoteURL, request.Digest, "refs/heads/main", "Force: true", "refs/heads/obsolete", "Delete: true", "Approved by host input"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Trusted Git UI missing %q: %q", required, text)
+		}
+	}
+	changed := request
+	changed.Digest = strings.Repeat("f", 64)
+	if err := ConfirmPush(strings.NewReader(changed.Nonce+"\n"), ioDiscard{}, changed); err == nil {
+		t.Fatal("Trusted Git UI accepted mismatched digest")
+	}
+}
+
+func pushRequestDigest(t *testing.T, request gitgateway.PushRequest) string {
+	t.Helper()
+	recorder, err := audit.NewRecorder(filepath.Join(t.TempDir(), "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := gitgateway.NewPushApprovalManager(nil, recorder, "vm", "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := manager.NewRequest(request.Binding, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return generated.Digest
 }
 
 func TestConfirmApplyRejectsAnythingExceptExactBoundedNonce(t *testing.T) {

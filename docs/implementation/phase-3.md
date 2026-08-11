@@ -26,6 +26,10 @@ hostが固定したpre-receive helperはGit自身のobject quarantine pathとold
 
 実smart HTTP経路の`git push`で通常更新、non-fast-forward、ref deleteをそれぞれ初回拒否、明示承認、同一retry成功まで検証する。force/deleteはhostが再計算した別flagとしてpending bindingへ記録し、hook broker終了後のpushはupstreamへ到達しない。helperはupstream credentialやapproval結果を生成できず、brokerからの固定accept/rejectだけをpre-receive exitへ反映する。
 
+## Trusted Git Approval UI
+
+host UIはProject、repository、remote名、固定送信先、push digest、期限、各refのold/new object IDとforce/deleteを構造化表示する。表示したbindingとdigestの整合性を再検証してから、host生成nonceの完全一致入力だけを受理する。OpenCode、guest terminal、hook messageだけではconfirmを呼べず、force/deleteを通常pushとして表示できない。
+
 再現コマンド:
 
 ```sh

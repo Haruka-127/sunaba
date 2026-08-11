@@ -191,6 +191,14 @@ func equalDigest(left, right string) bool {
 	return len(left) == 64 && len(right) == 64 && subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
 }
 
+func ValidatePushRequest(request PushRequest) error {
+	_, digest, err := canonicalBinding(request.Binding)
+	if err != nil || len(request.Nonce) < 32 || request.ExpiresAt.IsZero() || !equalDigest(digest, request.Digest) {
+		return fmt.Errorf("invalid Git push approval request")
+	}
+	return nil
+}
+
 func (m *PushApprovalManager) record(action, outcome string, binding PushBinding, digest, nonce string) error {
 	details := map[string]string{"repository": binding.Repository, "remote_name": binding.RemoteName, "remote_url": binding.RemoteURL, "push_digest": digest}
 	if nonce != "" {
