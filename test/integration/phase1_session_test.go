@@ -122,7 +122,8 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 			ProjectRoot: projectRoot, RuntimeBase: runtimeBase, SessionID: sessionID,
 			Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", GuestRelayBinary: relay,
 			ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken, ServerPassword: password,
-			OnEvent: func(session.Event) {},
+			LeaseTTL: 3 * time.Minute,
+			OnEvent:  func(session.Event) {},
 		}
 	}
 

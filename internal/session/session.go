@@ -19,6 +19,7 @@ import (
 
 	"sunaba/internal/attachrelay"
 	"sunaba/internal/dependency"
+	"sunaba/internal/lease"
 	"sunaba/internal/opencode"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
@@ -50,6 +51,7 @@ type Config struct {
 	ModelGateway     http.Handler
 	ModelToken       string
 	ServerPassword   string
+	LeaseTTL         time.Duration
 	OnEvent          func(Event)
 }
 
@@ -66,6 +68,8 @@ type Session struct {
 
 	cfg           Config
 	projectLock   *state.ProjectLock
+	leaseRegistry *lease.Registry
+	leaseCreated  bool
 	gatewayServer *http.Server
 	gatewayDone   chan error
 	gatewayActive atomic.Bool
@@ -111,6 +115,11 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	s.Root = filepath.Join(cfg.RuntimeBase, "sunaba-session-"+cfg.SessionID)
 	s.Container = "sunaba-" + s.ProjectID + "-" + cfg.SessionID
 	s.WorkspacePath = "/workspace/sunaba-" + cfg.SessionID
+	s.leaseRegistry = &lease.Registry{Root: filepath.Join(cfg.Store.Root, "leases")}
+	if _, err := s.leaseRegistry.RegisterPaused(s.ProjectID, s.Container, s.SessionID, "model", cfg.LeaseTTL); err != nil {
+		return nil, err
+	}
+	s.leaseCreated = true
 	if err := makeNewPrivateDirectory(s.Root); err != nil {
 		return nil, err
 	}
@@ -158,6 +167,10 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	if health.Version != dependency.OpenCodeVersion {
 		return nil, fmt.Errorf("OpenCode server version %q does not match pinned Host TUI %q", health.Version, dependency.OpenCodeVersion)
 	}
+	if _, err := s.leaseRegistry.Activate(s.SessionID); err != nil {
+		return nil, err
+	}
+	s.gatewayActive.Store(true)
 	s.emit("session.ready", health.Version)
 	return s, nil
 }
@@ -188,6 +201,9 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.OnEvent == nil {
 		return fmt.Errorf("secure session requires a host audit event sink")
+	}
+	if cfg.LeaseTTL <= 0 || cfg.LeaseTTL > 24*time.Hour {
+		return fmt.Errorf("secure session requires a bounded lease lifetime")
 	}
 	return nil
 }
@@ -220,9 +236,9 @@ func (s *Session) startGateway() error {
 		listener.Close()
 		return err
 	}
-	s.gatewayActive.Store(true)
+	s.gatewayActive.Store(false)
 	gatedGateway := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if !s.gatewayActive.Load() {
+		if !s.gatewayActive.Load() || s.leaseRegistry.ValidateActive(s.ProjectID, s.Container, s.SessionID, "model") != nil {
 			http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 			return
 		}
@@ -252,13 +268,16 @@ func (s *Session) Pause(ctx context.Context) error {
 		return err
 	}
 	s.gatewayActive.Store(false)
+	if _, err := s.leaseRegistry.Pause(s.SessionID); err != nil {
+		return err
+	}
+	s.paused = true
 	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
 		return err
 	}
 	if current, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || current != runtime.StateStopped {
 		return fmt.Errorf("session VM did not stop: state=%s error=%v", current, err)
 	}
-	s.paused = true
 	s.emit("session.paused", "")
 	return nil
 }
@@ -270,15 +289,23 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 	if s.gatewayServer == nil {
 		return fmt.Errorf("paused session lost its fixed Model Gateway listener")
 	}
-	s.gatewayActive.Store(true)
+	s.gatewayActive.Store(false)
 	defer func() {
 		if err != nil {
 			s.gatewayActive.Store(false)
 			_ = s.stopAttach(context.Background())
 		}
 	}()
-	if err := s.cfg.Runtime.Start(ctx, s.Container); err != nil {
-		return err
+	current, stateErr := s.cfg.Runtime.ContainerState(ctx, s.Container)
+	if stateErr != nil {
+		return stateErr
+	}
+	if current == runtime.StateStopped {
+		if err := s.cfg.Runtime.Start(ctx, s.Container); err != nil {
+			return err
+		}
+	} else if current != runtime.StateRunning {
+		return fmt.Errorf("paused session VM is not resumable: state=%s", current)
 	}
 	if err := s.resumeGuest(ctx); err != nil {
 		return err
@@ -293,6 +320,10 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 	if health.Version != dependency.OpenCodeVersion {
 		return fmt.Errorf("resumed OpenCode version %q does not match pinned version", health.Version)
 	}
+	if _, err := s.leaseRegistry.Activate(s.SessionID); err != nil {
+		return err
+	}
+	s.gatewayActive.Store(true)
 	s.paused = false
 	s.emit("session.resumed", health.Version)
 	return nil
@@ -399,6 +430,11 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 		}
 	}
 	s.paused = true
+	if s.leaseCreated {
+		if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
+			return ExportResult{}, err
+		}
+	}
 	if stopped, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || stopped != runtime.StateStopped {
 		return ExportResult{}, fmt.Errorf("VM is not frozen: state=%s error=%v", stopped, err)
 	}
@@ -455,6 +491,11 @@ func (s *Session) Destroy(ctx context.Context) error {
 		return fmt.Errorf("inspect owned container before removal: %w", err)
 	}
 	s.emit("vm.destroyed", s.Container)
+	if s.leaseCreated {
+		if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
+			return err
+		}
+	}
 	return s.Close()
 }
 
@@ -512,6 +553,11 @@ func (s *Session) Close() error {
 		}
 		for _, secret := range []string{"session.env"} {
 			if err := os.Remove(filepath.Join(s.Root, secret)); err != nil && !errors.Is(err, os.ErrNotExist) && s.closeErr == nil {
+				s.closeErr = err
+			}
+		}
+		if s.leaseCreated && s.leaseRegistry != nil {
+			if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil && s.closeErr == nil {
 				s.closeErr = err
 			}
 		}

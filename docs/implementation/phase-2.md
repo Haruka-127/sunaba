@@ -1,6 +1,6 @@
 # Phase 2: Projectライフサイクルと成果物境界
 
-状態: 実施中。Trusted Approval、crash-safe host apply、同一VMのpause/resumeを実装・検証済み。orphan cleanup、永続audit hardeningは継続中。
+状態: 実施中。Trusted Approval、crash-safe host apply、永続session leaseを伴う同一VMのpause/resumeを実装・検証済み。orphan cleanup、永続audit hardeningは継続中。
 
 ## Trusted Approval
 
@@ -24,17 +24,23 @@ unit/race testはadd、modify、delete、rename、Protected Path保持、承認�
 
 ## pause / resume
 
-同じsession objectとProject lockを保持したままVMをpause/resumeできる。Apple Containerのsocket mountはVM作成時のhost Unix listenerへ結び付くため、Model Gateway listenerはVM寿命中固定し、pause時はhost側atomic gateをinactiveにして同じtokenのrequestも`503`で拒否する。Local Attach Relayを閉じてからVMを停止し、停止状態を確認する。resumeは同じlistenerのgateをactiveにし、VM start、Local Attach Relay、health/version完全一致を再確認してからactiveへ戻す。pause中もProject lockを解放せず、attach capabilityは到達不能である。
+同じsession objectとProject lockを保持したままVMをpause/resumeできる。Apple Containerのsocket mountはVM作成時のhost Unix listenerへ結び付くため、Model Gateway listenerはVM寿命中固定する。pauseはLocal Attach Relayを閉じ、host側atomic gateと永続leaseをinactiveにしてからVMを停止する。このため、停止処理が途中で失敗しても正しいtokenのrequestを含めてfail closedで`503`にする。resumeはVMとguest serviceを再開し、Local Attach Relay経由のhealth/version完全一致を確認してからleaseとgateをactiveへ戻す。pause中もProject lockを解放せず、attach capabilityは到達不能である。
+
+## 永続session lease
+
+Model Gateway capabilityはmode `0700`のhost state directoryに、mode `0600`のJSON recordとして原子的に永続化する。recordはProject ID、VM ID、Session ID、用途、状態、絶対有効期限へ束縛し、symlink、所有者・mode不一致、不正identity、期限切れ、別Project/VM/用途を拒否する。起動中はpausedで発行し、OpenCode serverのhealth/version確認後だけactiveにする。pauseはVM停止より先にpausedへ遷移し、session終了・export・VM破棄・起動失敗ではrevokedへ遷移する。revoked recordとSession IDは再利用しない。Supervisor processが終了すると専用Unix listenerも失われるため、persisted active recordだけからcapabilityを再発行せずfail closedとなる。
 
 再現コマンド:
 
 ```sh
-go test -race -v ./internal/approval ./internal/apply
+go test -race -v ./internal/approval ./internal/apply ./internal/lease ./internal/session
+SUNABA_PHASE1_INTEGRATION=1 go test -tags=integration -run TestPhase1SecureSessionVerticalSlice -count=1 -v ./test/integration
 ```
+
+実Apple Container試験はstart、pause中のattach到達不能と有効tokenによるModel Gateway requestの`503`拒否、同じVMのresume、再度のOpenCode tool call、停止export、承認済みbaselineからのclean recreationまでを通過した。試験終了後に所有VMが残っていないことも確認した。
 
 ## 残件
 
-- pause/resumeの実Apple Container試験と、process再起動を跨ぐ永続session lease
 - ownership labelとactive leaseを照合するorphan cleanup
 - session/Gateway/export/applyをhost JSONLへ安全に永続化するaudit recorder
 - actual Phase 1 export artifactから承認・applyまでの統合試験

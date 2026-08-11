@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"sunaba/internal/dependency"
 	"sunaba/internal/runtime"
@@ -84,6 +85,7 @@ func TestStartFailureRemovesOwnedVMAndReleasesProjectLock(t *testing.T) {
 	}
 	fake.setupError = nil
 	fake.removed = false
+	cfg.SessionID = "phase1retry"
 	s, err := Start(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Project lock remained after rollback: %v", err)
@@ -134,7 +136,8 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		CPUs: 2, Memory: "2G", GuestRelayBinary: relay, ProviderConfig: []byte(`{"provider":{}}`),
 		ModelGateway: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
 		ModelToken:   strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
-		OnEvent: func(Event) {},
+		LeaseTTL: time.Minute,
+		OnEvent:  func(Event) {},
 	}, fake
 }
 
