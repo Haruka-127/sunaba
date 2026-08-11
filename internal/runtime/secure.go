@@ -1,0 +1,142 @@
+package runtime
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+)
+
+const (
+	SecureGatewayGuestPath = "/run/sunaba/model-gateway.sock"
+	SecureAttachGuestPath  = "/run/sunaba/attach.sock"
+)
+
+var secureIdentityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+
+type SecureSessionPolicy struct {
+	ProjectID   string `json:"project_id"`
+	SessionID   string `json:"session_id"`
+	Image       string `json:"image"`
+	SessionRoot string `json:"session_root"`
+}
+
+func (p SecureSessionPolicy) Digest() (string, error) {
+	canonical, err := p.canonical()
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func (p SecureSessionPolicy) canonical() (SecureSessionPolicy, error) {
+	if !secureIdentityPattern.MatchString(p.ProjectID) || !secureIdentityPattern.MatchString(p.SessionID) {
+		return SecureSessionPolicy{}, fmt.Errorf("secure Project and session identities must be explicit safe identifiers")
+	}
+	if p.Image == "" {
+		return SecureSessionPolicy{}, fmt.Errorf("secure session image is required")
+	}
+	if !filepath.IsAbs(p.SessionRoot) || filepath.Base(p.SessionRoot) != "sunaba-session-"+p.SessionID {
+		return SecureSessionPolicy{}, fmt.Errorf("secure session root must be an absolute session-bound sunaba directory")
+	}
+	info, err := os.Lstat(p.SessionRoot)
+	if err != nil {
+		return SecureSessionPolicy{}, fmt.Errorf("inspect secure session root: %w", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0700 {
+		return SecureSessionPolicy{}, fmt.Errorf("secure session root must be a mode 0700 directory")
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(p.SessionRoot)
+	if err != nil {
+		return SecureSessionPolicy{}, err
+	}
+	p.SessionRoot = canonicalRoot
+	return p, nil
+}
+
+func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) error {
+	canonical, err := policy.canonical()
+	if err != nil {
+		return err
+	}
+	digest, err := canonical.Digest()
+	if err != nil {
+		return err
+	}
+	if !secureIdentityPattern.MatchString(spec.Name) || len(spec.Name) < len("sunaba-") || spec.Name[:len("sunaba-")] != "sunaba-" {
+		return fmt.Errorf("secure container name must be a safe sunaba-* identity")
+	}
+	if spec.Image != canonical.Image || spec.CPUs <= 0 || spec.Memory == "" {
+		return fmt.Errorf("secure image and resource limits must match host policy")
+	}
+	if len(spec.Networks) != 1 || spec.Networks[0] != "none" || !spec.NoDNS {
+		return fmt.Errorf("secure session requires exactly --network none and --no-dns")
+	}
+	if len(spec.EnvFiles) != 0 {
+		return fmt.Errorf("secure session does not accept environment files")
+	}
+	if len(spec.Mounts) != 1 {
+		return fmt.Errorf("secure session requires exactly one Project-bound Gateway socket mount")
+	}
+	gatewayPath := filepath.Join(canonical.SessionRoot, "model-gateway.sock")
+	mount := spec.Mounts[0]
+	if mount.Type != "socket" || mount.Source != gatewayPath || mount.Target != SecureGatewayGuestPath || mount.ReadOnly {
+		return fmt.Errorf("secure session Gateway mount does not match Project/session policy")
+	}
+	if err := validateHostUnixSocket(gatewayPath); err != nil {
+		return err
+	}
+	if len(spec.Sockets) != 1 {
+		return fmt.Errorf("secure session requires exactly one Project-bound attach socket")
+	}
+	attachPath := filepath.Join(canonical.SessionRoot, "attach.sock")
+	if spec.Sockets[0].HostPath != attachPath || spec.Sockets[0].GuestPath != SecureAttachGuestPath {
+		return fmt.Errorf("secure session attach socket does not match Project/session policy")
+	}
+	if _, err := os.Lstat(attachPath); err == nil {
+		return fmt.Errorf("secure attach socket path already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	requiredLabels := map[string]string{
+		"dev.sunaba.owner":         "sunaba-supervisor",
+		"dev.sunaba.project":       canonical.ProjectID,
+		"dev.sunaba.session":       canonical.SessionID,
+		"dev.sunaba.mode":          "secure",
+		"dev.sunaba.policy-digest": digest,
+	}
+	for key, expected := range requiredLabels {
+		if spec.Labels[key] != expected {
+			return fmt.Errorf("secure session label %q does not match host policy", key)
+		}
+	}
+	return nil
+}
+
+func validateHostUnixSocket(socketPath string) error {
+	info, err := os.Lstat(socketPath)
+	if err != nil {
+		return fmt.Errorf("inspect Gateway socket: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 {
+		return fmt.Errorf("Gateway endpoint must be a mode 0600 Unix socket")
+	}
+	return nil
+}
+
+func (r *AppleContainer) CreateSecure(ctx context.Context, spec ContainerSpec, policy SecureSessionPolicy) error {
+	if err := ValidateSecureSessionSpec(spec, policy); err != nil {
+		return fmt.Errorf("secure session configuration rejected: %w", err)
+	}
+	return r.Create(ctx, spec)
+}

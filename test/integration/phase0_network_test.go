@@ -41,14 +41,11 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		t.Fatalf("probe resource name is not unused: state=%s error=%v", state, err)
 	}
 
-	tempDir, err := os.MkdirTemp("/private/tmp", "sunaba-p0-")
-	if err != nil {
+	tempDir := filepath.Join("/private/tmp", "sunaba-session-"+runID)
+	if err := os.Mkdir(tempDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(tempDir)
-	if err := os.Chmod(tempDir, 0700); err != nil {
-		t.Fatal(err)
-	}
 	socketPath := filepath.Join(tempDir, "model-gateway.sock")
 	attachSocketPath := filepath.Join(tempDir, "attach.sock")
 	listener, err := net.Listen("unix", socketPath)
@@ -73,6 +70,28 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		_ = server.Close()
 		<-serverDone
 	}()
+	otherRoot := filepath.Join("/private/tmp", "sunaba-session-other-"+runID)
+	if err := os.Mkdir(otherRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(otherRoot)
+	otherSocketPath := filepath.Join(otherRoot, "model-gateway.sock")
+	otherListener, err := net.Listen("unix", otherSocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherListener.Close()
+	if err := os.Chmod(otherSocketPath, 0600); err != nil {
+		t.Fatal(err)
+	}
+	policy := sunabaruntime.SecureSessionPolicy{
+		ProjectID: "phase0-project-a", SessionID: runID,
+		Image: manifest.AgentImage.Tag, SessionRoot: tempDir,
+	}
+	policyDigest, err := policy.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	spec := sunabaruntime.ContainerSpec{
 		Name:       name,
@@ -85,19 +104,23 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		Entrypoint: "/bin/bash",
 		Args:       []string{"-lc", "exec tail -f /dev/null"},
 		Mounts: []sunabaruntime.Mount{{
-			Type: "socket", Source: socketPath, Target: "/run/sunaba/model-gateway.sock",
+			Type: "socket", Source: socketPath, Target: sunabaruntime.SecureGatewayGuestPath,
 		}},
 		Sockets: []sunabaruntime.PublishedSocket{{
-			HostPath: attachSocketPath, GuestPath: "/run/sunaba/attach.sock",
+			HostPath: attachSocketPath, GuestPath: sunabaruntime.SecureAttachGuestPath,
 		}},
 		Labels: map[string]string{
-			"dev.sunaba.owner":   "integration-test",
-			"dev.sunaba.test":    "phase0-network",
-			"dev.sunaba.run-id":  runID,
-			"dev.sunaba.version": manifest.AppleContainer.Version,
+			"dev.sunaba.owner":         "sunaba-supervisor",
+			"dev.sunaba.test":          "phase0-network",
+			"dev.sunaba.run-id":        runID,
+			"dev.sunaba.version":       manifest.AppleContainer.Version,
+			"dev.sunaba.project":       policy.ProjectID,
+			"dev.sunaba.session":       policy.SessionID,
+			"dev.sunaba.mode":          "secure",
+			"dev.sunaba.policy-digest": policyDigest,
 		},
 	}
-	if err := rt.Create(ctx, spec); err != nil {
+	if err := rt.CreateSecure(ctx, spec, policy); err != nil {
 		t.Fatal(err)
 	}
 	defer cleanupContainer(t, ctx, rt, name, runID)
@@ -123,6 +146,11 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != nonce {
 		t.Fatalf("gateway response=%q, want %q", out, nonce)
+	}
+	if out, err := rt.ExecOutput(ctx, name, []string{
+		"/bin/bash", "-lc", "test ! -e /run/sunaba/other-project.sock && ! curl --max-time 1 --unix-socket /run/sunaba/other-project.sock http://localhost/health",
+	}); err != nil {
+		t.Fatalf("other Project socket was reachable: %v: %s", err, out)
 	}
 
 	guestRelay := buildLinuxBinary(t, ctx, tempDir, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
@@ -217,7 +245,8 @@ func cleanupContainer(t *testing.T, ctx context.Context, rt *sunabaruntime.Apple
 		t.Errorf("inspect cleanup target identity: %v", err)
 		return
 	}
-	if info.Name != name || info.Labels["dev.sunaba.owner"] != "integration-test" || info.Labels["dev.sunaba.run-id"] != runID {
+	owner := info.Labels["dev.sunaba.owner"]
+	if info.Name != name || (owner != "integration-test" && owner != "sunaba-supervisor") || info.Labels["dev.sunaba.run-id"] != runID {
 		t.Errorf("refusing cleanup of mismatched resource: name=%q labels=%v", info.Name, info.Labels)
 		return
 	}

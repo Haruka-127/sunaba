@@ -58,6 +58,7 @@ type Runtime interface {
 	BuildImage(ctx context.Context, tag, contextDir string, buildArgs map[string]string) error
 	ContainerState(ctx context.Context, name string) (State, error)
 	Create(ctx context.Context, spec ContainerSpec) error
+	CreateSecure(ctx context.Context, spec ContainerSpec, policy SecureSessionPolicy) error
 	Start(ctx context.Context, name string) error
 	Stop(ctx context.Context, name string) error
 	Remove(ctx context.Context, name string) error

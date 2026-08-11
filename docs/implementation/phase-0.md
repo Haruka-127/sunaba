@@ -1,6 +1,6 @@
 # Phase 0: 契約固定と技術probe
 
-状態: 実施中。DG-02は通過。DG-01とDG-03は未通過。
+状態: 実施中。DG-01とDG-02は通過。DG-03は未通過。
 
 ## Dependency contract
 
@@ -43,6 +43,8 @@ shasum -a 256 "$ARTIFACT_DIR"/*
 
 ## DG-01 secure network probe
 
+状態: **通過**。2026-08-11に固定版Apple Container 1.2.2で再現した。
+
 採用候補は、secure VMをApple Container `--network none --no-dns`で作成し、Project/VMごとのhost Unix socketだけをApple Container 1.2.2のvsock socket relayでguestへ渡す方式とする。固定版sourceの次の実装を確認した。
 
 - `Sources/Services/ContainerAPIService/Client/Utility.swift`: network名`none`をnetwork attachmentなしへ変換
@@ -58,6 +60,9 @@ shasum -a 256 "$ARTIFACT_DIR"/*
 - guest loopbackだけでlistenするOpenCode 1.18.16をreverse Unix socket relay経由でhostからhealth確認
 - OpenCode healthはBasic認証なしでは拒否
 - probe containerは`dev.sunaba.owner`と一意run IDをinspectしてから停止・削除し、一覧から消えたことを確認
+- 別Project用host Unix socketはguestへmountされず、guest内に対応pathが存在せず到達不能
+- secure session validatorは固定image/resource、`--network none`単独、`--no-dns`、Project/session専用のmode `0600` Gateway socketとattach socket、host policy digest labelを一致させる。不足、追加network、host directory mount、別Project socket、env file、mode/digest改変はcontainer CLIを呼ぶ前に拒否
+- 採用経路はApple Container CLI 1.2.2の公開機能だけで成立し、pf、default network、既存container、host設定を変更しない
 
 再現コマンド:
 
@@ -66,7 +71,7 @@ SUNABA_PHASE0_INTEGRATION=1 \
 go test -tags=integration -run TestPhase0SecureNetworkAndGatewayTransport -v ./test/integration
 ```
 
-この結果はDG-01のsecure egress、guest-to-host Gateway transport、host-to-guest reverse attach transportの中核証拠である。DG-01通過には、別Project socket非共有、構成検証失敗時のsession fail-closed、dev session egress leaseも追加で実測する。
+この結果はGateway専用経路、public/host/LAN/private/link-local/other VMの同時遮断、既存host設定への非干渉、CLI経路の安定利用を満たすため、DG-01を通過とする。devモードのactive session限定egress leaseはsecure networkのDecision Gateとは分け、該当Phaseのsession lifecycleで実装・検証する。
 
 ## DG-02 Snapshot + OverlayFS + export
 
@@ -107,7 +112,6 @@ attack/unit testはpath traversal、Protected Pathとredirect、任意hardlink�
 
 ## 未解決のDecision Gate
 
-- DG-01: Project間socket分離、fail-closed、dev egress leaseの実測
 - DG-03: pinned host artifact、serve/attach、isolated config、terminal境界、Responses contractの実測
 
 これらが再現可能なintegration/attack testで成功するまでPhase 1へ進まない。
