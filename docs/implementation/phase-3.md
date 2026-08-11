@@ -12,6 +12,10 @@ object ID、ref、force/delete、remote、Projectのいずれかがapproval後�
 
 mode `0700`でsymlinkを含まないhost bare repositoryだけを読み、Git自身の`check-ref-format`とobject databaseを使ってbindingを構築する。current refがguestのold object IDと一致すること、new objectがhost quarantineに存在すること、branch targetがcommitであることを確認する。deleteはzero objectから、forceはhostのcommit graphに対するancestor判定から再計算する。Git subprocessはshellを使わず、system/global config、terminal prompt、継承環境を無効化する。
 
+## upstream push transaction
+
+承認retryではhost repository lock内でresolverとone-shot grant consumeを再実行し、HTTPS upstreamへ`--atomic`かつrefごとのexact object leaseを付けてpushする。Authorizationはhost Git subprocessの環境設定だけへ注入し、remote URL、argv、guest、auditへ返さない。upstream refが承認時のold objectから変化していれば拒否し、失敗したgrantも再利用できない。
+
 再現コマンド:
 
 ```sh
@@ -20,7 +24,7 @@ go test -race -v ./internal/gitgateway
 
 ## 残件
 
-- approval confirm/retryとhost bare quarantine resolverを単一transaction lock内で接続する
+- smart HTTP receive-packのpre-receiveをapproval transactionへ接続する
 - Git credentialをguestへ返さずhost transportだけへ注入する
 - standard Git smart HTTPによるclone/fetch/pullと、pending approval後のpush retry
 - session終了、expiry、別Project/VM、object/ref差し替えの実統合試験
