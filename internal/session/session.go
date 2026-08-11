@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sunaba/internal/attachrelay"
@@ -67,9 +68,11 @@ type Session struct {
 	projectLock   *state.ProjectLock
 	gatewayServer *http.Server
 	gatewayDone   chan error
+	gatewayActive atomic.Bool
 	attachCancel  context.CancelFunc
 	attachDone    <-chan error
 	vmCreated     bool
+	paused        bool
 	closeOnce     sync.Once
 	closeErr      error
 }
@@ -199,6 +202,16 @@ func NewSecret() (string, error) {
 
 func (s *Session) startGateway() error {
 	path := filepath.Join(s.Root, "model-gateway.sock")
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("Model Gateway path was replaced with a non-socket")
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		return err
@@ -207,7 +220,15 @@ func (s *Session) startGateway() error {
 		listener.Close()
 		return err
 	}
-	s.gatewayServer = &http.Server{Handler: s.cfg.ModelGateway, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
+	s.gatewayActive.Store(true)
+	gatedGateway := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if !s.gatewayActive.Load() {
+			http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
+		s.cfg.ModelGateway.ServeHTTP(response, request)
+	})
+	s.gatewayServer = &http.Server{Handler: gatedGateway, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 1)
 	server := s.gatewayServer
 	s.gatewayDone = done
@@ -220,6 +241,75 @@ func (s *Session) startGateway() error {
 		close(done)
 	}()
 	s.emit("model_gateway.started", "")
+	return nil
+}
+
+func (s *Session) Pause(ctx context.Context) error {
+	if !s.vmCreated || s.paused {
+		return fmt.Errorf("session is not in a resumable running state")
+	}
+	if err := s.stopAttach(ctx); err != nil {
+		return err
+	}
+	s.gatewayActive.Store(false)
+	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
+		return err
+	}
+	if current, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || current != runtime.StateStopped {
+		return fmt.Errorf("session VM did not stop: state=%s error=%v", current, err)
+	}
+	s.paused = true
+	s.emit("session.paused", "")
+	return nil
+}
+
+func (s *Session) Resume(ctx context.Context) (err error) {
+	if !s.vmCreated || !s.paused {
+		return fmt.Errorf("session is not paused")
+	}
+	if s.gatewayServer == nil {
+		return fmt.Errorf("paused session lost its fixed Model Gateway listener")
+	}
+	s.gatewayActive.Store(true)
+	defer func() {
+		if err != nil {
+			s.gatewayActive.Store(false)
+			_ = s.stopAttach(context.Background())
+		}
+	}()
+	if err := s.cfg.Runtime.Start(ctx, s.Container); err != nil {
+		return err
+	}
+	if err := s.resumeGuest(ctx); err != nil {
+		return err
+	}
+	if err := s.startAttachRelay(ctx); err != nil {
+		return err
+	}
+	health, err := opencode.WaitHealth(ctx, s.AttachURL, s.cfg.ServerPassword, 60*time.Second)
+	if err != nil {
+		return err
+	}
+	if health.Version != dependency.OpenCodeVersion {
+		return fmt.Errorf("resumed OpenCode version %q does not match pinned version", health.Version)
+	}
+	s.paused = false
+	s.emit("session.resumed", health.Version)
+	return nil
+}
+
+func (s *Session) resumeGuest(ctx context.Context) error {
+	resume := strings.Join([]string{
+		"set -eu",
+		"if ! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/upper,workdir=/var/lib/sunaba/work " + s.WorkspacePath + "; fi",
+		"test -d /var/lib/sunaba/repository",
+		"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4141 --unix-target /run/sunaba/model-gateway.sock >/run/sunaba/model-relay.log 2>&1 &",
+		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
+		"nohup /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; ulimit -u 512; ulimit -f 2097152; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &",
+	}, "\n")
+	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", resume}); err != nil {
+		return fmt.Errorf("resume secure guest services: %w: %s", err, out)
+	}
 	return nil
 }
 
@@ -308,6 +398,7 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 			return ExportResult{}, err
 		}
 	}
+	s.paused = true
 	if stopped, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || stopped != runtime.StateStopped {
 		return ExportResult{}, fmt.Errorf("VM is not frozen: state=%s error=%v", stopped, err)
 	}
@@ -359,6 +450,7 @@ func (s *Session) Destroy(ctx context.Context) error {
 			return err
 		}
 		s.vmCreated = false
+		s.paused = false
 	} else if current, stateErr := s.cfg.Runtime.ContainerState(ctx, s.Container); stateErr != nil || current != runtime.StateNotFound {
 		return fmt.Errorf("inspect owned container before removal: %w", err)
 	}
@@ -367,21 +459,10 @@ func (s *Session) Destroy(ctx context.Context) error {
 }
 
 func (s *Session) stopChannels(ctx context.Context) error {
-	if s.attachCancel != nil {
-		s.attachCancel()
-		if s.attachDone != nil {
-			select {
-			case err := <-s.attachDone:
-				if err != nil {
-					return err
-				}
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		s.attachCancel, s.attachDone = nil, nil
-		s.emit("attach_relay.stopped", "")
+	if err := s.stopAttach(ctx); err != nil {
+		return err
 	}
+	s.gatewayActive.Store(false)
 	if s.gatewayServer != nil {
 		shutdown, cancel := context.WithTimeout(ctx, 3*time.Second)
 		err := s.gatewayServer.Shutdown(shutdown)
@@ -396,6 +477,25 @@ func (s *Session) stopChannels(ctx context.Context) error {
 		}
 		s.gatewayServer, s.gatewayDone = nil, nil
 		s.emit("model_gateway.stopped", "")
+	}
+	return nil
+}
+
+func (s *Session) stopAttach(ctx context.Context) error {
+	if s.attachCancel != nil {
+		s.attachCancel()
+		if s.attachDone != nil {
+			select {
+			case err := <-s.attachDone:
+				if err != nil {
+					return err
+				}
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		s.attachCancel, s.attachDone = nil, nil
+		s.emit("attach_relay.stopped", "")
 	}
 	return nil
 }

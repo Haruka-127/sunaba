@@ -1,6 +1,6 @@
 # Phase 2: Projectライフサイクルと成果物境界
 
-状態: 実施中。Trusted Approvalとcrash-safe host applyの中核transactionを実装・検証済み。session reuse、orphan cleanup、永続audit hardeningは継続中。
+状態: 実施中。Trusted Approval、crash-safe host apply、同一VMのpause/resumeを実装・検証済み。orphan cleanup、永続audit hardeningは継続中。
 
 ## Trusted Approval
 
@@ -22,6 +22,10 @@ applyはProject lockを取得し、残存transactionを回復してからhost ba
 
 unit/race testはadd、modify、delete、rename、Protected Path保持、承認なし、digest差し替え、baseline競合、grant再利用、symlink parent race、途中error rollbackを検証する。別test processを実際にentry install直後の`os.Exit(42)`で終了させ、次process相当のRecoveryが元baselineを復元しjournal/backupを片付けることも確認する。
 
+## pause / resume
+
+同じsession objectとProject lockを保持したままVMをpause/resumeできる。Apple Containerのsocket mountはVM作成時のhost Unix listenerへ結び付くため、Model Gateway listenerはVM寿命中固定し、pause時はhost側atomic gateをinactiveにして同じtokenのrequestも`503`で拒否する。Local Attach Relayを閉じてからVMを停止し、停止状態を確認する。resumeは同じlistenerのgateをactiveにし、VM start、Local Attach Relay、health/version完全一致を再確認してからactiveへ戻す。pause中もProject lockを解放せず、attach capabilityは到達不能である。
+
 再現コマンド:
 
 ```sh
@@ -30,7 +34,7 @@ go test -race -v ./internal/approval ./internal/apply
 
 ## 残件
 
-- stop/start/reuseを含む永続session leaseと期限失効
+- pause/resumeの実Apple Container試験と、process再起動を跨ぐ永続session lease
 - ownership labelとactive leaseを照合するorphan cleanup
 - session/Gateway/export/applyをhost JSONLへ安全に永続化するaudit recorder
 - actual Phase 1 export artifactから承認・applyまでの統合試験

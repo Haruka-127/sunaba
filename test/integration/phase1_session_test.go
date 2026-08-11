@@ -132,6 +132,33 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer active.Destroy(context.Background())
+	prePauseURL := active.AttachURL
+	if err := active.Pause(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pausedRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, prePauseURL+"/global/health", nil)
+	pausedRequest.SetBasicAuth("opencode", first.ServerPassword)
+	if response, err := (&http.Client{Timeout: time.Second}).Do(pausedRequest); err == nil {
+		_ = response.Body.Close()
+		t.Fatal("paused session retained an attach capability")
+	}
+	pausedModelRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://sunaba/v1/responses", strings.NewReader(`{"model":"`+modelID+`","stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pausedModelRequest.Header.Set("Authorization", "Bearer "+first.ModelToken)
+	pausedModelRequest.Header.Set("Content-Type", "application/json")
+	pausedModelResponse, err := unixHTTPClient(filepath.Join(active.Root, "model-gateway.sock")).Do(pausedModelRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pausedModelResponse.Body.Close()
+	if pausedModelResponse.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("paused Model Gateway status=%d", pausedModelResponse.StatusCode)
+	}
+	if err := active.Resume(ctx); err != nil {
+		t.Fatal(err)
+	}
 	message := exerciseOpenCodeResponses(t, ctx, filepath.Join(active.Root, "attach.sock"), first.ServerPassword, modelID)
 	if !strings.Contains(message, "phase1 tool complete") {
 		t.Fatalf("OpenCode did not use Model Gateway: %s", message)

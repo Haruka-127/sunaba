@@ -44,6 +44,24 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if _, err := Start(context.Background(), cfg); !errors.Is(err, state.ErrProjectLocked) {
 		t.Fatalf("concurrent session error=%v", err)
 	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fake.state != runtime.StateStopped {
+		t.Fatalf("paused state=%s", fake.state)
+	}
+	if _, err := Start(context.Background(), cfg); !errors.Is(err, state.ErrProjectLocked) {
+		t.Fatalf("pause released Project lock: %v", err)
+	}
+	if err := s.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fake.state != runtime.StateRunning {
+		t.Fatalf("resumed state=%s", fake.state)
+	}
+	if !strings.Contains(fake.setup, "test -d /var/lib/sunaba/repository") {
+		t.Fatalf("resume did not restart guest services: %s", fake.setup)
+	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
 	}
