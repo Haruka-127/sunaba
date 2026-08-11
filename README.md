@@ -2,7 +2,7 @@
 
 sunabaは、侵害済みのOpenCode serverとVM内rootを前提に、Projectの開発セッションをApple Container VMへ隔離するmacOS向け実行基盤です。host worktreeや実credentialをVMへ渡さず、host側のSupervisor、Gateway、Snapshot、OverlayFS、Change Set、Trusted Approval UIで境界を強制します。
 
-製品仕様の正本は[`docs/plan/sunaba-secure-agent-platform.md`](./docs/plan/sunaba-secure-agent-platform.md)、実装・検証で許可するhost操作は[`docs/plan/allowed-host-operations.md`](./docs/plan/allowed-host-operations.md)です。
+製品仕様の正本は[`docs/plan/sunaba-secure-agent-platform.md`](./docs/plan/sunaba-secure-agent-platform.md)、実装・検証で許可するhost操作は[`docs/plan/allowed-host-operations.md`](./docs/plan/allowed-host-operations.md)です。導入から日常操作、Git/Web、復旧までの手順は[`docs/user-guide.md`](./docs/user-guide.md)を参照してください。
 
 ## 固定dependency
 
@@ -40,15 +40,16 @@ container system start
 ## 基本操作
 
 ```sh
+bin/sunaba credentials openai set
 bin/sunaba project init /absolute/project/path --mode secure
-OPENAI_API_KEY=... bin/sunaba up --dir /absolute/project/path
+bin/sunaba up --dir /absolute/project/path
 bin/sunaba agent --dir /absolute/project/path
 bin/sunaba shell --dir /absolute/project/path
 bin/sunaba changes export --dir /absolute/project/path
 bin/sunaba changes apply --dir /absolute/project/path
 ```
 
-`OPENAI_API_KEY`はhost Model Gatewayだけが読み、VM、Host TUI、Project、auditへ保存しません。secureの`up`（または最初の`agent`/`shell`）はowner-only supervisorを起動し、Project VMを作成後にpausedへします。`agent`は固定OpenCode serverと隔離Host TUIを同時管理し、TUI終了時にGatewayをinactiveへして同じVMを停止します。次の`agent`/`shell`は期限内なら同じVMとupperをresumeします。`changes export`だけがVMをfreeze/export/destroyし、変更があれば検証済みMerged ViewとChange Setをsunaba state内のpending領域へ保存します。`changes apply`はhost生成nonceを表示し、同じnonceの手入力後だけtransactional applyを実行します。
+OpenAI API keyは固定identityのmacOS login Keychain itemへ対話登録し、host Model Gatewayだけが読みます。環境変数、VM、Host TUI、Project、auditへ保存しません。secureの`up`（または最初の`agent`/`shell`）はowner-only supervisorを起動し、Project VMを作成後にpausedへします。`agent`は固定OpenCode serverと隔離Host TUIを同時管理し、TUI終了時にGatewayをinactiveへして同じVMを停止します。次の`agent`/`shell`は期限内なら同じVMとupperをresumeします。`changes export`だけがVMをfreeze/export/destroyし、変更があれば検証済みMerged ViewとChange Setをsunaba state内のpending領域へ保存します。`changes apply`はhost生成nonceを表示し、同じnonceの手入力後だけtransactional applyを実行します。
 
 `shell`はraw `container exec`や未検証PTYを公開せず、1行ずつbounded commandを実行します。stdout/stderrのESC、OSC、BEL、C0/C1、双方向制御、不正UTF-8をhost側で可視化してから表示します。
 
@@ -56,7 +57,7 @@ dev modeへの変更は明示的に行います。
 
 ```sh
 bin/sunaba up --dir /absolute/project/path --mode dev
-OPENAI_API_KEY=... bin/sunaba agent --dir /absolute/project/path
+bin/sunaba agent --dir /absolute/project/path
 ```
 
 devの`up`は固定artifactだけを準備し、VMやdirect-egress networkをbackgroundで残しません。`agent`/`shell`は可視foreground processの寿命中だけVMと専用networkを作成し、終了時にegressをdeny-allへquiesceしてからexport/destroyします。pf構成では、許可文書に記載した`sudo bin/sunaba firewall ...`だけが使われます。secure modeはpfやdefault container networkに依存しません。
@@ -70,14 +71,16 @@ Git Gatewayはfixed HTTPS upstream、host credential終端、bare quarantine、s
 Project policyは公開CLIで構成します。
 
 ```sh
-bin/sunaba git set --remote https://git.example/owner/repository.git --dir /absolute/project/path
+bin/sunaba git remote add --name origin --url https://git.example/owner/repository.git --dir /absolute/project/path
+bin/sunaba git remote add --name upstream --url https://git.example/upstream/repository.git --dir /absolute/project/path
+bin/sunaba git remote list --dir /absolute/project/path
 bin/sunaba web enable --origin https://docs.example --dir /absolute/project/path
 bin/sunaba web refresh --dir /absolute/project/path
-bin/sunaba git disable --dir /absolute/project/path
+bin/sunaba git remote remove --name upstream --dir /absolute/project/path
 bin/sunaba web disable --dir /absolute/project/path
 ```
 
-Git credentialはhostの非対話credential helperから取得し、VM、argv、policy、auditへ保存しません。Web enable/refreshは固定blocklistをhostで取得し、digestと期限へ束縛したsnapshotをmode `0600`で保存します。未構成・期限切れ・unsafeなremote/originでは安全性の低い経路へfallbackせずsession開始を拒否します。policy変更はactive/paused VMがある間は拒否し、export/recreate後に行います。
+各Git remoteは名前、固定HTTPS送信先、host quarantine、短命capability、push approval bindingを個別に持ちます。Git credentialはremoteごとにhostの非対話credential helperから取得し、VM、argv、policy、auditへ保存しません。Web enable/refreshは固定blocklistをhostで取得し、digestと期限へ束縛したsnapshotをmode `0600`で保存します。未構成・期限切れ・unsafeなremote/originでは安全性の低い経路へfallbackせずsession開始を拒否します。policy変更はactive/paused VMがある間は拒否し、export/recreate後に行います。
 
 ## Stateとcleanup
 
@@ -106,9 +109,10 @@ scripts/verify.sh
 SUNABA_FUZZ=1 scripts/verify.sh
 SUNABA_INTEGRATION=1 scripts/verify.sh
 SUNABA_INTEGRATION=1 SUNABA_DEV_INTEGRATION=1 scripts/verify.sh
+SUNABA_INTEGRATION=1 SUNABA_LIVE_OPENAI=1 scripts/verify.sh
 ```
 
-dev integrationはdocumented pf操作の対話承認が可能なterminalで実行します。実OpenAI/Git credentialを必要とするlive testは自動実行せず、mock upstreamで同じcontractを検証します。Decision Gateの証拠と個別コマンドは[`docs/implementation/`](./docs/implementation/)にあります。
+dev integrationはdocumented pf操作の対話承認が可能なterminalで実行します。実OpenAI gateは明示した場合だけKeychain credentialを使って1回以上の従量課金requestを送るため、通常はmock upstream contractを使います。Decision Gateの証拠と個別コマンドは[`docs/implementation/`](./docs/implementation/)にあります。
 
 ## 残余リスク
 
