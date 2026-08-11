@@ -119,6 +119,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 	policy := sunabaruntime.SecureSessionPolicy{
 		ProjectID: "phase0-project-a", SessionID: runID,
 		Image: manifest.AgentImage.Tag, SessionRoot: tempDir,
+		CPUs: 1, Memory: "2G", DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
 	}
 	policyDigest, err := policy.Digest()
 	if err != nil {
@@ -126,10 +127,13 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 	}
 
 	spec := sunabaruntime.ContainerSpec{
-		Name:       name,
-		Image:      manifest.AgentImage.Tag,
-		CPUs:       1,
-		Memory:     "2G",
+		Name:   name,
+		Image:  manifest.AgentImage.Tag,
+		CPUs:   1,
+		Memory: "2G",
+		Ulimits: map[string]sunabaruntime.RLimit{
+			"nproc": {Soft: 64, Hard: 64}, "fsize": {Soft: 128 << 20, Hard: 128 << 20}, "nofile": {Soft: 1024, Hard: 1024},
+		},
 		Networks:   []string{"none"},
 		NoDNS:      true,
 		CapAdd:     []string{"SYS_ADMIN"},

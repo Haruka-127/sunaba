@@ -182,6 +182,7 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		Store: &state.Store{Root: filepath.Join(root, "state")}, Runtime: fake,
 		ProjectRoot: project, RuntimeBase: runtimeBase, SessionID: "phase1test", Image: dependency.MustPinned().AgentImage.Tag,
 		CPUs: 2, Memory: "2G", GuestRelayBinary: relay, ProviderConfig: []byte(`{"provider":{}}`),
+		DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
 		ModelGateway: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
 		ModelToken:   strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
 		LeaseTTL: time.Minute, Audit: auditRecorder,
@@ -254,7 +255,11 @@ func (f *fakeRuntime) Remove(context.Context, string) error {
 }
 func (f *fakeRuntime) Exec(context.Context, string, bool, []string) error { return nil }
 func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) (string, error) {
-	f.setup = strings.Join(command, " ")
+	joined := strings.Join(command, " ")
+	if strings.Contains(joined, "getconf _NPROCESSORS_ONLN") {
+		return "cpu=2\nmemory_kb=1048576\ndisk=120000000\nuid=1000\nnproc=64\nfsize=134217728\nnofile=1024\n", nil
+	}
+	f.setup = joined
 	return "", f.setupError
 }
 func (f *fakeRuntime) CopyTo(context.Context, string, string, string) error { return nil }

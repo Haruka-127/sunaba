@@ -24,6 +24,12 @@ type SecureSessionPolicy struct {
 	SessionID   string `json:"session_id"`
 	Image       string `json:"image"`
 	SessionRoot string `json:"session_root"`
+	CPUs        int    `json:"cpus"`
+	Memory      string `json:"memory"`
+	DiskBytes   int64  `json:"disk_bytes"`
+	ProcessMax  int64  `json:"process_max"`
+	FileSizeMax int64  `json:"file_size_max"`
+	OpenFileMax int64  `json:"open_file_max"`
 }
 
 func (p SecureSessionPolicy) Digest() (string, error) {
@@ -45,6 +51,9 @@ func (p SecureSessionPolicy) canonical() (SecureSessionPolicy, error) {
 	}
 	if p.Image == "" {
 		return SecureSessionPolicy{}, fmt.Errorf("secure session image is required")
+	}
+	if p.CPUs <= 0 || p.Memory == "" || p.DiskBytes < 64<<20 || p.ProcessMax <= 0 || p.FileSizeMax != p.DiskBytes || p.OpenFileMax <= 0 {
+		return SecureSessionPolicy{}, fmt.Errorf("secure session resource policy is invalid")
 	}
 	if !filepath.IsAbs(p.SessionRoot) || filepath.Base(p.SessionRoot) != "sunaba-session-"+p.SessionID {
 		return SecureSessionPolicy{}, fmt.Errorf("secure session root must be an absolute session-bound sunaba directory")
@@ -76,8 +85,21 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	if !secureIdentityPattern.MatchString(spec.Name) || len(spec.Name) < len("sunaba-") || spec.Name[:len("sunaba-")] != "sunaba-" {
 		return fmt.Errorf("secure container name must be a safe sunaba-* identity")
 	}
-	if spec.Image != canonical.Image || spec.CPUs <= 0 || spec.Memory == "" {
+	if spec.Image != canonical.Image || spec.CPUs != canonical.CPUs || spec.Memory != canonical.Memory {
 		return fmt.Errorf("secure image and resource limits must match host policy")
+	}
+	wantLimits := map[string]RLimit{
+		"fsize":  {Soft: canonical.FileSizeMax, Hard: canonical.FileSizeMax},
+		"nofile": {Soft: canonical.OpenFileMax, Hard: canonical.OpenFileMax},
+		"nproc":  {Soft: canonical.ProcessMax, Hard: canonical.ProcessMax},
+	}
+	if len(spec.Ulimits) != len(wantLimits) {
+		return fmt.Errorf("secure session requires exact hard process and file limits")
+	}
+	for name, expected := range wantLimits {
+		if spec.Ulimits[name] != expected {
+			return fmt.Errorf("secure session limit %q does not match host policy", name)
+		}
 	}
 	if len(spec.Networks) != 1 || spec.Networks[0] != "none" || !spec.NoDNS {
 		return fmt.Errorf("secure session requires exactly --network none and --no-dns")

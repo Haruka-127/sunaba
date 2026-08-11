@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	lowerPrefix = "var/lib/sunaba/lower"
-	upperPrefix = "var/lib/sunaba/upper"
+	lowerPrefix  = "var/lib/sunaba/lower"
+	upperPrefix  = "var/lib/sunaba/upper"
+	mergedPrefix = "var/lib/sunaba/merged-export"
 )
 
 var whiteoutLinkPattern = regexp.MustCompile(`^var/lib/sunaba/work/(?:index|work)/#[0-9]+$`)
@@ -126,12 +127,14 @@ func ParseFrozenRootFS(archivePath, quarantine string, baseline SnapshotManifest
 	lowerEntries := make([]SnapshotEntry, 0, len(baseline.Entries))
 	lowerSeen := make(map[string]struct{}, len(baseline.Entries))
 	upperSeen := make(map[string]struct{})
+	mergedSeen := make(map[string]struct{})
+	var parsedUpper, parsedMerged []OverlayEntry
 	baselineByPath := make(map[string]SnapshotEntry, len(baseline.Entries))
 	for _, entry := range baseline.Entries {
 		baselineByPath[entry.Path] = entry
 	}
 	var lowerTotal, upperTotal int64
-	var lowerRootSeen, upperRootSeen bool
+	var lowerRootSeen, upperRootSeen, mergedRootSeen bool
 	archiveEntries := 0
 	for {
 		header, nextErr := reader.Next()
@@ -198,11 +201,41 @@ func ParseFrozenRootFS(archivePath, quarantine string, baseline SnapshotManifest
 			if upperTotal > policy.Workspace.MaxTotalSize {
 				return FrozenExport{}, fmt.Errorf("exported upper exceeds workspace total size")
 			}
-			result.Upper = append(result.Upper, entry)
+			parsedUpper = append(parsedUpper, entry)
+		case name == mergedPrefix:
+			if mergedRootSeen || header.Typeflag != tar.TypeDir {
+				return FrozenExport{}, fmt.Errorf("duplicate or invalid merged export root")
+			}
+			mergedRootSeen = true
+		case strings.HasPrefix(name, mergedPrefix+"/"):
+			relative := strings.TrimPrefix(name, mergedPrefix+"/")
+			if _, exists := mergedSeen[relative]; exists {
+				return FrozenExport{}, fmt.Errorf("duplicate merged export path %q", relative)
+			}
+			mergedSeen[relative] = struct{}{}
+			entry, size, err := parseMergedEntry(reader, header, relative, staging, policy.Workspace)
+			if err != nil {
+				return FrozenExport{}, err
+			}
+			upperTotal += size
+			if upperTotal > policy.Workspace.MaxTotalSize {
+				return FrozenExport{}, fmt.Errorf("exported merged workspace exceeds total size")
+			}
+			parsedMerged = append(parsedMerged, entry)
 		}
 	}
-	if !lowerRootSeen || !upperRootSeen {
-		return FrozenExport{}, fmt.Errorf("rootfs export is missing lower or upper root")
+	if !lowerRootSeen || (!upperRootSeen && !mergedRootSeen) {
+		return FrozenExport{}, fmt.Errorf("rootfs export is missing lower and a workspace result root")
+	}
+	if mergedRootSeen {
+		result.Upper = parsedMerged
+		for _, entry := range baseline.Entries {
+			if _, exists := mergedSeen[entry.Path]; !exists {
+				result.Upper = append(result.Upper, OverlayEntry{Path: entry.Path, Whiteout: true})
+			}
+		}
+	} else {
+		result.Upper = parsedUpper
 	}
 	if len(lowerEntries) > policy.Workspace.MaxEntries || len(result.Upper) > policy.Workspace.MaxEntries {
 		return FrozenExport{}, fmt.Errorf("exported workspace exceeds entry limit")
@@ -215,6 +248,38 @@ func ParseFrozenRootFS(archivePath, quarantine string, baseline SnapshotManifest
 		return FrozenExport{}, fmt.Errorf("exported lower digest %s does not match trusted baseline %s", result.Lower.Digest, baseline.Digest)
 	}
 	return result, nil
+}
+
+func parseMergedEntry(reader io.Reader, header *tar.Header, relative, staging string, policy SnapshotPolicy) (OverlayEntry, int64, error) {
+	if err := validateWorkspacePath(relative, policy); err != nil {
+		return OverlayEntry{}, 0, err
+	}
+	for key := range header.PAXRecords {
+		if strings.Contains(strings.ToLower(key), "xattr") {
+			return OverlayEntry{}, 0, fmt.Errorf("merged export entry %q has forbidden metadata %q", relative, key)
+		}
+	}
+	entry := OverlayEntry{Path: relative, Mode: uint32(header.Mode) & 0777}
+	switch header.Typeflag {
+	case tar.TypeDir:
+		entry.Type = TypeDirectory
+		return entry, 0, nil
+	case tar.TypeReg, tar.TypeRegA:
+		dataPath, hash, size, err := stageTarContent(reader, staging, header.Size, policy.MaxFileSize)
+		if err != nil {
+			return OverlayEntry{}, 0, err
+		}
+		entry.Type, entry.DataPath, entry.SHA256, entry.Size = TypeFile, dataPath, hash, size
+		return entry, size, nil
+	case tar.TypeSymlink:
+		if header.Linkname == "" || strings.ContainsRune(header.Linkname, '\x00') || len(header.Linkname) > policy.MaxSymlinkSize {
+			return OverlayEntry{}, 0, fmt.Errorf("merged symlink %q target exceeds limit", relative)
+		}
+		entry.Type, entry.Mode, entry.LinkTarget = TypeSymlink, 0777, header.Linkname
+		return entry, 0, nil
+	default:
+		return OverlayEntry{}, 0, fmt.Errorf("merged export entry %q has forbidden type %d", relative, header.Typeflag)
+	}
 }
 
 func (p ExportPolicy) validate() error {

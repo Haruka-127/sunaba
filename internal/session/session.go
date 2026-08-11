@@ -12,11 +12,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"sunaba/internal/approval"
 	"sunaba/internal/attachrelay"
 	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
@@ -47,6 +49,10 @@ type Config struct {
 	Image            string
 	CPUs             int
 	Memory           string
+	DiskBytes        int64
+	ProcessMax       int64
+	FileSizeMax      int64
+	OpenFileMax      int64
 	GuestRelayBinary string
 	ProviderConfig   []byte
 	ModelGateway     http.Handler
@@ -144,13 +150,22 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	if err := s.startGateway(); err != nil {
 		return nil, err
 	}
-	policy := runtime.SecureSessionPolicy{ProjectID: s.ProjectID, SessionID: s.SessionID, Image: cfg.Image, SessionRoot: s.Root}
+	policy := runtime.SecureSessionPolicy{
+		ProjectID: s.ProjectID, SessionID: s.SessionID, Image: cfg.Image, SessionRoot: s.Root,
+		CPUs: cfg.CPUs, Memory: cfg.Memory, DiskBytes: cfg.DiskBytes,
+		ProcessMax: cfg.ProcessMax, FileSizeMax: cfg.FileSizeMax, OpenFileMax: cfg.OpenFileMax,
+	}
 	policyDigest, err := policy.Digest()
 	if err != nil {
 		return nil, err
 	}
 	spec := runtime.ContainerSpec{
 		Name: s.Container, Image: cfg.Image, CPUs: cfg.CPUs, Memory: cfg.Memory,
+		Ulimits: map[string]runtime.RLimit{
+			"nproc":  {Soft: cfg.ProcessMax, Hard: cfg.ProcessMax},
+			"fsize":  {Soft: cfg.FileSizeMax, Hard: cfg.FileSizeMax},
+			"nofile": {Soft: cfg.OpenFileMax, Hard: cfg.OpenFileMax},
+		},
 		Networks: []string{"none"}, NoDNS: true, CapAdd: []string{"SYS_ADMIN"},
 		Entrypoint: "/bin/bash", Args: []string{"-lc", "exec tail -f /dev/null"},
 		Mounts:  []runtime.Mount{{Type: "socket", Source: filepath.Join(s.Root, "model-gateway.sock"), Target: runtime.SecureGatewayGuestPath}},
@@ -176,10 +191,14 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	}
 	health, err := opencode.WaitHealth(ctx, s.AttachURL, cfg.ServerPassword, 60*time.Second)
 	if err != nil {
-		return nil, err
+		serverLog, _ := cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", "tail -n 80 /run/sunaba/server.log 2>/dev/null || true"})
+		return nil, fmt.Errorf("%w; guest server log: %s", err, approval.SanitizeText(serverLog))
 	}
 	if health.Version != dependency.OpenCodeVersion {
 		return nil, fmt.Errorf("OpenCode server version %q does not match pinned Host TUI %q", health.Version, dependency.OpenCodeVersion)
+	}
+	if err := s.verifyGuestResources(ctx); err != nil {
+		return nil, err
 	}
 	if _, err := s.leaseRegistry.Activate(s.SessionID); err != nil {
 		return nil, err
@@ -207,6 +226,12 @@ func validateConfig(cfg Config) error {
 	}
 	if !sessionIDPattern.MatchString(cfg.SessionID) || cfg.Image != dependency.MustPinned().AgentImage.Tag || cfg.CPUs <= 0 || cfg.Memory == "" {
 		return fmt.Errorf("secure session identity, pinned image, and resources are required")
+	}
+	if _, err := parseMemoryBytes(cfg.Memory); err != nil {
+		return err
+	}
+	if cfg.DiskBytes < 64<<20 || cfg.DiskBytes > 8<<30 || cfg.ProcessMax < 16 || cfg.ProcessMax > 4096 || cfg.FileSizeMax != cfg.DiskBytes || cfg.OpenFileMax < 256 || cfg.OpenFileMax > 1<<20 {
+		return fmt.Errorf("secure session disk, process, file size, and open-file limits are invalid")
 	}
 	if !filepath.IsAbs(cfg.GuestRelayBinary) || len(cfg.ProviderConfig) == 0 || !json.Valid(cfg.ProviderConfig) || cfg.ModelGateway == nil {
 		return fmt.Errorf("secure session requires the guest relay, provider config, and Model Gateway")
@@ -338,10 +363,14 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 	}
 	health, err := opencode.WaitHealth(ctx, s.AttachURL, s.cfg.ServerPassword, 60*time.Second)
 	if err != nil {
-		return err
+		serverLog, _ := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", "tail -n 80 /run/sunaba/server.log 2>/dev/null || true"})
+		return fmt.Errorf("%w; guest server log: %s", err, approval.SanitizeText(serverLog))
 	}
 	if health.Version != dependency.OpenCodeVersion {
 		return fmt.Errorf("resumed OpenCode version %q does not match pinned version", health.Version)
+	}
+	if err := s.verifyGuestResources(ctx); err != nil {
+		return err
 	}
 	if _, err := s.leaseRegistry.Activate(s.SessionID); err != nil {
 		return err
@@ -362,11 +391,12 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 func (s *Session) resumeGuest(ctx context.Context) error {
 	resume := strings.Join([]string{
 		"set -eu",
-		"if ! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/upper,workdir=/var/lib/sunaba/work " + s.WorkspacePath + "; fi",
+		"if ! grep -Fqs ' /var/lib/sunaba/overlay ' /proc/mounts; then mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay; fi",
+		"if ! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/overlay/upper,workdir=/var/lib/sunaba/overlay/work " + s.WorkspacePath + "; fi",
 		"test -d /var/lib/sunaba/repository",
 		"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4141 --unix-target /run/sunaba/model-gateway.sock >/run/sunaba/model-relay.log 2>&1 &",
 		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
-		"nohup /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; ulimit -u 512; ulimit -f 2097152; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &",
+		s.guestServerCommand(),
 	}, "\n")
 	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", resume}); err != nil {
 		return fmt.Errorf("resume secure guest services: %w: %s", err, out)
@@ -400,23 +430,92 @@ func (s *Session) configureGuest(ctx context.Context) error {
 	setup := strings.Join([]string{
 		"set -eu",
 		"chmod 0700 /run/sunaba/guest-relay",
-		"chmod 0600 /run/sunaba/session.env /run/sunaba/opencode.json",
-		"mkdir -p /var/lib/sunaba/upper /var/lib/sunaba/work " + s.WorkspacePath + " /run/sunaba/home /run/sunaba/config /run/sunaba/data",
-		"mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/upper,workdir=/var/lib/sunaba/work " + s.WorkspacePath,
+		"getent group sunaba-agent >/dev/null || groupadd -g 1000 sunaba-agent",
+		"id sunaba-agent >/dev/null 2>&1 || useradd -u 1000 -g sunaba-agent -M -d /run/sunaba/home -s /bin/bash sunaba-agent",
+		"chmod 0400 /run/sunaba/session.env /run/sunaba/opencode.json",
+		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json",
+		"mkdir -p " + s.WorkspacePath + " /run/sunaba/home /run/sunaba/config /run/sunaba/data /var/lib/sunaba/overlay",
+		fmt.Sprintf("truncate -s %d /var/lib/sunaba/overlay.img", s.cfg.DiskBytes),
+		"mkfs.ext4 -q -F -m 0 /var/lib/sunaba/overlay.img",
+		"mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay",
+		"mkdir -p /var/lib/sunaba/overlay/upper /var/lib/sunaba/overlay/work /var/lib/sunaba/overlay/repository",
+		"ln -s overlay/repository /var/lib/sunaba/repository",
+		"chown -R 1000:1000 /var/lib/sunaba/lower /var/lib/sunaba/overlay /run/sunaba/home /run/sunaba/config /run/sunaba/data",
+		"mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/overlay/upper,workdir=/var/lib/sunaba/overlay/work " + s.WorkspacePath,
 		"cd " + s.WorkspacePath,
-		"git init -q --bare /var/lib/sunaba/repository",
-		"git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config user.name sunaba-baseline",
-		"git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config user.email sunaba@localhost",
-		"git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config core.hooksPath /dev/null",
-		"git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " add -A && git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " commit -qm 'sunaba synthetic baseline' --no-verify || true",
+		"runuser -u sunaba-agent -- git init -q --bare /var/lib/sunaba/repository",
+		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config user.name sunaba-baseline",
+		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config user.email sunaba@localhost",
+		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config core.hooksPath /dev/null",
+		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " add -A && runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " commit -qm 'sunaba synthetic baseline' --no-verify || true",
 		"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4141 --unix-target /run/sunaba/model-gateway.sock >/run/sunaba/model-relay.log 2>&1 &",
 		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
-		"nohup /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; ulimit -u 512; ulimit -f 2097152; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &",
+		s.guestServerCommand(),
 	}, "\n")
 	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", setup}); err != nil {
 		return fmt.Errorf("configure secure guest: %w: %s", err, out)
 	}
 	return nil
+}
+
+func (s *Session) guestServerCommand() string {
+	return "nohup runuser -u sunaba-agent -- /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
+}
+
+func (s *Session) verifyGuestResources(ctx context.Context) error {
+	probe := strings.Join([]string{
+		"set -eu",
+		"pid=$(pgrep -u 1000 -f 'opencode serve' | head -n 1)",
+		"test -n \"$pid\"",
+		"echo cpu=$(getconf _NPROCESSORS_ONLN)",
+		"awk '/MemTotal:/{print \"memory_kb=\" $2}' /proc/meminfo",
+		"echo disk=$(df -B1 --output=size /var/lib/sunaba/overlay | tail -n 1 | tr -d ' ')",
+		"awk '/^Uid:/{print \"uid=\" $2}' /proc/$pid/status",
+		"awk '$1==\"Max\" && $2==\"processes\"{print \"nproc=\" $(NF-1)}' /proc/$pid/limits",
+		"awk '$1==\"Max\" && $2==\"file\" && $3==\"size\"{print \"fsize=\" $(NF-2)}' /proc/$pid/limits",
+		"awk '$1==\"Max\" && $2==\"open\" && $3==\"files\"{print \"nofile=\" $(NF-1)}' /proc/$pid/limits",
+	}, "\n")
+	out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", probe})
+	if err != nil {
+		return fmt.Errorf("probe secure guest resources: %w: %s", err, approval.SanitizeText(out))
+	}
+	values := make(map[string]int64)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		key, raw, ok := strings.Cut(line, "=")
+		if !ok {
+			return fmt.Errorf("invalid guest resource probe output")
+		}
+		value, parseErr := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+		if parseErr != nil {
+			return fmt.Errorf("invalid guest resource probe value")
+		}
+		values[key] = value
+	}
+	memoryBytes, err := parseMemoryBytes(s.cfg.Memory)
+	if err != nil {
+		return err
+	}
+	guestMemoryCeiling := memoryBytes + (128 << 20)
+	if values["cpu"] < int64(s.cfg.CPUs) || values["cpu"] > int64(s.cfg.CPUs+1) || values["memory_kb"] <= 0 || values["memory_kb"]<<10 > guestMemoryCeiling || values["disk"] <= 0 || values["disk"] > s.cfg.DiskBytes || values["uid"] != 1000 || values["nproc"] != s.cfg.ProcessMax || values["fsize"] != s.cfg.FileSizeMax || values["nofile"] != s.cfg.OpenFileMax {
+		return fmt.Errorf("secure guest resource limits do not match host policy: %v", values)
+	}
+	return s.emit("resource.probe", fmt.Sprintf("cpu=%d,memory=%d,disk=%d,nproc=%d,fsize=%d,nofile=%d", s.cfg.CPUs, memoryBytes, s.cfg.DiskBytes, s.cfg.ProcessMax, s.cfg.FileSizeMax, s.cfg.OpenFileMax))
+}
+
+func parseMemoryBytes(value string) (int64, error) {
+	match := regexp.MustCompile(`^([1-9][0-9]*)([KMGTP]?)$`).FindStringSubmatch(strings.ToUpper(value))
+	if match == nil {
+		return 0, fmt.Errorf("invalid memory limit %q", value)
+	}
+	amount, _ := strconv.ParseInt(match[1], 10, 64)
+	if match[2] == "" {
+		return amount, nil
+	}
+	powers := map[string]uint{"K": 10, "M": 20, "G": 30, "T": 40, "P": 50}
+	if amount > (1<<62)>>powers[match[2]] {
+		return 0, fmt.Errorf("memory limit overflows")
+	}
+	return amount << powers[match[2]], nil
 }
 
 func (s *Session) startAttachRelay(ctx context.Context) error {
@@ -453,16 +552,6 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	if err := s.stopChannels(ctx); err != nil {
 		return ExportResult{}, err
 	}
-	containerState, err := s.cfg.Runtime.ContainerState(ctx, s.Container)
-	if err != nil {
-		return ExportResult{}, err
-	}
-	if containerState == runtime.StateRunning {
-		if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
-			return ExportResult{}, err
-		}
-	}
-	s.paused = true
 	if s.leaseCreated {
 		if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
 			return ExportResult{}, err
@@ -472,6 +561,24 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 			return ExportResult{}, err
 		}
 	}
+	containerState, err := s.cfg.Runtime.ContainerState(ctx, s.Container)
+	if err != nil {
+		return ExportResult{}, err
+	}
+	if containerState == runtime.StateStopped {
+		if err := s.cfg.Runtime.Start(ctx, s.Container); err != nil {
+			return ExportResult{}, err
+		}
+	} else if containerState != runtime.StateRunning {
+		return ExportResult{}, fmt.Errorf("session VM cannot be frozen from state %s", containerState)
+	}
+	if err := s.prepareGuestExport(ctx); err != nil {
+		return ExportResult{}, err
+	}
+	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
+		return ExportResult{}, err
+	}
+	s.paused = true
 	if stopped, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || stopped != runtime.StateStopped {
 		return ExportResult{}, fmt.Errorf("VM is not frozen: state=%s error=%v", stopped, err)
 	}
@@ -505,6 +612,34 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, err
 	}
 	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: merged.Manifest, ChangeSet: changeSet}, nil
+}
+
+func (s *Session) prepareGuestExport(ctx context.Context) error {
+	script := strings.Join([]string{
+		"set -eu",
+		"pkill -TERM -u 1000 -f '.*' 2>/dev/null || true",
+		"pkill -TERM guest-relay 2>/dev/null || true",
+		"sleep 1",
+		"pkill -KILL -u 1000 -f '.*' 2>/dev/null || true",
+		"pkill -KILL guest-relay 2>/dev/null || true",
+		"rm -f /run/sunaba/session.env",
+		"rm -rf /var/lib/sunaba/merged-export",
+		"mkdir -p /var/lib/sunaba/merged-export",
+		"cp -a --preserve=all " + s.WorkspacePath + "/. /var/lib/sunaba/merged-export/",
+		"if grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then for attempt in $(seq 1 50); do umount " + s.WorkspacePath + " 2>/dev/null && break; sleep 0.1; done; fi",
+		"! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts",
+		"if ! grep -Fqs ' /var/lib/sunaba/overlay ' /proc/mounts; then mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay; fi",
+		"rm -rf /var/lib/sunaba/upper /var/lib/sunaba/work",
+		"mkdir -p /var/lib/sunaba/upper /var/lib/sunaba/work",
+		"cp -a --preserve=all /var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/",
+		"sync",
+		"umount /var/lib/sunaba/overlay",
+		"rm -f /var/lib/sunaba/overlay.img",
+	}, "\n")
+	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", script}); err != nil {
+		return fmt.Errorf("freeze bounded guest overlay for export: %w: %s", err, out)
+	}
+	return s.emit("workspace.frozen", "bounded-overlay")
 }
 
 func (s *Session) Destroy(ctx context.Context) error {

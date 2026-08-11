@@ -1,6 +1,6 @@
 # Phase 2: Projectライフサイクルと成果物境界
 
-状態: 実施中。Trusted Approval、crash-safe host apply、永続session leaseを伴う同一VMのpause/resume、orphan cleanup、host audit統合を実装・検証済み。resource quotaと製品CLI統合は継続中。
+状態: 実施中。Trusted Approval、crash-safe host apply、永続session leaseを伴う同一VMのpause/resume、orphan cleanup、resource limit、host audit統合を実装・検証済み。製品CLI統合は継続中。
 
 ## Trusted Approval
 
@@ -44,6 +44,14 @@ secure sessionはこのrecorderを必須とし、Project/VM/Session identity、s
 
 sessionは永続leaseに加え、Supervisor process寿命中だけOSが保持するsession別file guardを取得する。pause中もguardを保持し、process crashではkernelが自動解放する。orphan cleanupはApple Containerの一覧を読むだけでは削除せず、個別inspectを行い、`sunaba-<ProjectID>-<SessionID>`の完全名、owner/project/session/mode label、永続leaseのProject/VM/Session/用途identityをすべて完全一致させる。live guardがあればactive/paused sessionとして維持する。guardがなく、identityが完全一致する管理VMだけをauditへ事前記録し、leaseをrevokeし、再inspectしてから停止・削除し、結果を追記する。label欠落、名前差し替え、lease欠落・破損・identity不一致、audit障害では削除を拒否し、他resourceへ範囲を広げない。
 
+## resource limits
+
+secure policy digestはCPU、memory、workspace disk bytes、process、file size、open-file hard limitを含む。Apple Container 1.2.2の`--cpus`、`--memory`、`--ulimit nproc/fsize/nofile`をVM作成時に設定し、inspect可能な構成として固定する。OpenCodeはUID 1000の非特権`sunaba-agent`として起動し、Project codeからhard limitを引き上げられない。OverlayFSのupper/workとsynthetic Git repositoryは、host policyのbyte数で作ったext4 loop image内へ置くため、ファイル数を増やしてもworkspace全体が設定量を越えてhost diskを消費できない。pause/resume時は同じimageを再mountする。
+
+session ready前とresume時に、guest vCPU、memory、bounded filesystem size、OpenCode UID、`/proc/<pid>/limits`をhost側からprobeし、policyと一致しなければcapabilityをactiveにしない。Apple Containerは指定vCPUにkernel用1 vCPU、指定memoryに固定VM overheadを加えるため、採用版で測定した上限としてCPUは指定値+1以下、memoryは指定値+128 MiB以下を許容する。workspace disk、nproc、fsize、nofileはpolicy値以下ではなく完全一致を要求し、結果をauditする。
+
+freeze/exportではOpenCodeとguest relayを終了し、session credential fileを削除する。bounded overlayのmerged workspaceを停止VMのrootfs内へcopyし、host safe parserがtrusted baselineとの差からadd/modify/deleteを再計算する。guest提供diffやmanifestは使わない。ext4 imageはunmount後にexport対象から削除する。safe parserはpath traversal、Protected Path、hardlink、special file、xattr、size/entry上限を同じく拒否する。
+
 再現コマンド:
 
 ```sh
@@ -52,10 +60,10 @@ SUNABA_PHASE1_INTEGRATION=1 go test -tags=integration -run TestPhase1SecureSessi
 SUNABA_PHASE2_INTEGRATION=1 go test -tags=integration -run TestPhase2ActualOrphanCleanup -count=1 -v ./test/integration
 ```
 
-実Apple Container試験はstart、pause中のattach到達不能と有効tokenによるModel Gateway requestの`503`拒否、同じVMのresume、再度のOpenCode tool call、停止export、承認済みbaselineからのclean recreation、Trusted Approval、host applyまでを通過した。実OpenCodeが生成したadd/modify/deleteだけが反映され、Protected Pathの`.git`は保持された。host JSONLにsession、Gateway、export、approval、apply、cleanup eventが存在し、3種のsecretが存在しないことも確認した。別の実機試験ではlive guard中のVMを維持し、guard解放後だけ同じVMをorphanとして停止・削除した。いずれの試験後も所有VMは残っていない。
+実Apple Container試験はstart、pause中のattach到達不能と有効tokenによるModel Gateway requestの`503`拒否、同じVMのresume、再度のOpenCode tool call、停止export、承認済みbaselineからのclean recreation、Trusted Approval、host applyまでを通過した。実OpenCodeが生成したadd/modify/deleteだけが反映され、Protected Pathの`.git`は保持された。128 MiB bounded diskへの160 MiB writeとhard process limit引き上げが失敗し、CPU/memory/runtime hard limitのprobeも通過した。frozen archive、host audit、Projectにupstream key、capability、server passwordが存在しないことを確認した。別の実機試験ではlive guard中のVMを維持し、guard解放後だけ同じVMをorphanとして停止・削除した。
 
 ## 残件
 
-- resource quotaとTrusted UIのCLI統合
+- Trusted Approval UIの製品CLI統合
 
 これらを完了するまでPhase 2およびMVPを完了扱いにしない。

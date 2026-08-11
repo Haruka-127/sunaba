@@ -16,6 +16,7 @@ type ContainerSpec struct {
 	Image      string
 	CPUs       int
 	Memory     string
+	Ulimits    map[string]RLimit
 	Networks   []string
 	NoDNS      bool
 	ReadOnly   bool
@@ -29,6 +30,11 @@ type ContainerSpec struct {
 	Labels     map[string]string
 	Entrypoint string
 	Args       []string
+}
+
+type RLimit struct {
+	Soft int64
+	Hard int64
 }
 
 type Mount struct {

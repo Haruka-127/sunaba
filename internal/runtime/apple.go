@@ -81,6 +81,15 @@ func createArgs(spec ContainerSpec) []string {
 	if spec.Memory != "" {
 		args = append(args, "--memory", spec.Memory)
 	}
+	limitKeys := make([]string, 0, len(spec.Ulimits))
+	for name := range spec.Ulimits {
+		limitKeys = append(limitKeys, name)
+	}
+	sort.Strings(limitKeys)
+	for _, name := range limitKeys {
+		limit := spec.Ulimits[name]
+		args = append(args, "--ulimit", fmt.Sprintf("%s=%d:%d", name, limit.Soft, limit.Hard))
+	}
 	for _, network := range spec.Networks {
 		args = append(args, "--network", network)
 	}

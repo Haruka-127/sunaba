@@ -3,6 +3,8 @@
 package integration
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -146,6 +148,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 			Store: &state.Store{Root: filepath.Join(runtimeBase, "state")}, Runtime: sunabaruntime.NewAppleContainer(false),
 			ProjectRoot: projectRoot, RuntimeBase: runtimeBase, SessionID: sessionID,
 			Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", GuestRelayBinary: relay,
+			DiskBytes: 128 << 20, ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
 			ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken, ServerPassword: password,
 			LeaseTTL: 3 * time.Minute, Audit: auditRecorder,
 			OnEvent: func(session.Event) {},
@@ -158,6 +161,13 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer active.Destroy(context.Background())
+	if out, err := first.Runtime.ExecOutput(ctx, active.Container, []string{"/bin/bash", "-lc", "runuser -u sunaba-agent -- /bin/bash -lc 'ulimit -u 513'"}); err == nil {
+		t.Fatalf("agent raised hard process limit: %q", out)
+	}
+	quotaProbe := "set +e; runuser -u sunaba-agent -- dd if=/dev/zero of=" + active.WorkspacePath + "/quota-fill bs=1M count=160 status=none; status=$?; rm -f " + active.WorkspacePath + "/quota-fill; sync; test $status -ne 0"
+	if out, err := first.Runtime.ExecOutput(ctx, active.Container, []string{"/bin/bash", "-lc", quotaProbe}); err != nil {
+		t.Fatalf("bounded workspace disk did not reject over-limit write: %v: %s", err, out)
+	}
 	prePauseURL := active.AttachURL
 	if err := active.Pause(ctx); err != nil {
 		t.Fatal(err)
@@ -219,6 +229,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertArchiveHasNoSecrets(t, result.Archive, upstreamKey, first.ModelToken, first.ServerPassword)
 	want := map[string]workspace.ChangeKind{"model-edit.txt": workspace.ChangeAdd, "modify.txt": workspace.ChangeModify, "delete.txt": workspace.ChangeDelete}
 	if len(result.ChangeSet.Changes) != len(want) {
 		t.Fatalf("Change Set=%+v", result.ChangeSet)
@@ -293,7 +304,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, action := range []string{"capability.issued", "session.paused", "session.resumed", "model.request", "changeset.created", "capability.revoked", "vm.destroyed", "approval.request", "approval.confirm", "approval.consume", "changeset.apply"} {
+	for _, action := range []string{"capability.issued", "resource.probe", "session.paused", "session.resumed", "model.request", "changeset.created", "capability.revoked", "vm.destroyed", "approval.request", "approval.confirm", "approval.consume", "changeset.apply"} {
 		if !strings.Contains(string(auditBytes), `"action":"`+action+`"`) {
 			t.Fatalf("actual host audit missing %q", action)
 		}
@@ -364,5 +375,39 @@ func assertIntegrationFile(t *testing.T, filename, expected string) {
 	}
 	if string(content) != expected {
 		t.Fatalf("%s=%q, want %q", filename, content, expected)
+	}
+}
+
+func assertArchiveHasNoSecrets(t *testing.T, archivePath string, secrets ...string) {
+	t.Helper()
+	file, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	reader := tar.NewReader(file)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimPrefix(header.Name, "./") == "run/sunaba/session.env" {
+			t.Fatal("session credential file remained in frozen export")
+		}
+		if header.Typeflag != tar.TypeReg || header.Size > 1<<20 {
+			continue
+		}
+		content, err := io.ReadAll(io.LimitReader(reader, 1<<20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range secrets {
+			if bytes.Contains(content, []byte(secret)) {
+				t.Fatalf("secret remained in frozen export entry %q", header.Name)
+			}
+		}
 	}
 }

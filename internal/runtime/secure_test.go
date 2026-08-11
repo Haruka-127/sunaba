@@ -36,6 +36,8 @@ func TestValidateSecureSessionSpecFailsClosed(t *testing.T) {
 		}},
 		{name: "env file", mutate: func(spec *ContainerSpec) { spec.EnvFiles = []string{"/tmp/secret.env"} }},
 		{name: "inline env", mutate: func(spec *ContainerSpec) { spec.Env = map[string]string{"TOKEN": "secret"} }},
+		{name: "missing hard limit", mutate: func(spec *ContainerSpec) { delete(spec.Ulimits, "nproc") }},
+		{name: "raised hard limit", mutate: func(spec *ContainerSpec) { spec.Ulimits["fsize"] = RLimit{Soft: 1 << 30, Hard: 1 << 30} }},
 		{name: "extra capability", mutate: func(spec *ContainerSpec) { spec.CapAdd = []string{"SYS_ADMIN", "ALL"} }},
 		{name: "bootstrap", mutate: func(spec *ContainerSpec) { spec.Args = []string{"-lc", "curl example.com"} }},
 		{name: "mode label", mutate: func(spec *ContainerSpec) { spec.Labels["dev.sunaba.mode"] = "dev" }},
@@ -92,7 +94,10 @@ func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 		listener.Close()
 		t.Fatal(err)
 	}
-	policy := SecureSessionPolicy{ProjectID: "project", SessionID: "test", Image: "sunaba-base:test", SessionRoot: canonicalRoot}
+	policy := SecureSessionPolicy{
+		ProjectID: "project", SessionID: "test", Image: "sunaba-base:test", SessionRoot: canonicalRoot,
+		CPUs: 1, Memory: "2G", DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
+	}
 	digest, err := policy.Digest()
 	if err != nil {
 		listener.Close()
@@ -100,6 +105,7 @@ func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 	}
 	spec := ContainerSpec{
 		Name: "sunaba-test", Image: policy.Image, CPUs: 1, Memory: "2G",
+		Ulimits:  map[string]RLimit{"nproc": {Soft: 64, Hard: 64}, "fsize": {Soft: 128 << 20, Hard: 128 << 20}, "nofile": {Soft: 1024, Hard: 1024}},
 		Networks: []string{"none"}, NoDNS: true, CapAdd: []string{"SYS_ADMIN"},
 		Entrypoint: "/bin/bash", Args: []string{"-lc", "exec tail -f /dev/null"},
 		Mounts:  []Mount{{Type: "socket", Source: gatewayPath, Target: SecureGatewayGuestPath}},
@@ -121,6 +127,10 @@ func cloneContainerSpec(spec ContainerSpec) ContainerSpec {
 	clone.Mounts = append([]Mount(nil), spec.Mounts...)
 	clone.Sockets = append([]PublishedSocket(nil), spec.Sockets...)
 	clone.EnvFiles = append([]string(nil), spec.EnvFiles...)
+	clone.Ulimits = make(map[string]RLimit, len(spec.Ulimits))
+	for key, value := range spec.Ulimits {
+		clone.Ulimits[key] = value
+	}
 	clone.Labels = make(map[string]string, len(spec.Labels))
 	for key, value := range spec.Labels {
 		clone.Labels[key] = value

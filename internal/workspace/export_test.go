@@ -61,6 +61,43 @@ func TestParseFrozenRootFSRecognizesObservedWhiteoutHardlinks(t *testing.T) {
 	}
 }
 
+func TestParseFrozenRootFSComputesDeletesFromSafeMergedExport(t *testing.T) {
+	baseline := fixtureBaseline(t)
+	entries := append(baselineTarEntries(t),
+		tarFixtureEntry{header: tar.Header{Name: mergedPrefix, Typeflag: tar.TypeDir, Mode: 0700}},
+		tarFixtureEntry{header: tar.Header{Name: mergedPrefix + "/keep.txt", Typeflag: tar.TypeReg, Mode: 0600, Size: 8}, data: "changed\n"},
+		tarFixtureEntry{header: tar.Header{Name: mergedPrefix + "/rename.txt", Typeflag: tar.TypeReg, Mode: 0600, Size: 7}, data: "rename\n"},
+		tarFixtureEntry{header: tar.Header{Name: mergedPrefix + "/add.txt", Typeflag: tar.TypeReg, Mode: 0600, Size: 6}, data: "added\n"},
+	)
+	archive, quarantine := writeRootFSFixture(t, entries...)
+	parsed, err := ParseFrozenRootFS(archive, quarantine, baseline, DefaultExportPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parsed.Close()
+	whiteout := false
+	for _, entry := range parsed.Upper {
+		if entry.Path == "delete.txt" && entry.Whiteout {
+			whiteout = true
+		}
+	}
+	if !whiteout {
+		t.Fatalf("host did not compute delete from merged absence: %+v", parsed.Upper)
+	}
+	destination := filepath.Join(quarantine, "sunaba-merged-test")
+	merged, err := MaterializeMergedView(baseline.Root, destination, baseline, parsed, DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := BuildChangeSet(baseline, merged.Manifest, DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes.Changes) != 3 {
+		t.Fatalf("changes=%+v", changes)
+	}
+}
+
 func TestParseFrozenRootFSRejectsAttacks(t *testing.T) {
 	baseline := fixtureBaseline(t)
 	tests := []struct {
