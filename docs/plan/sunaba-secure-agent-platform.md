@@ -31,7 +31,7 @@
 - Git Gateway経由ではpushだけをホスト承認対象にする方式
 - OpenCode v1系をserver/TUIで同一バージョンに固定する方式。初期固定バージョンは`v1.18.16`
 
-Web Gatewayの具体的な実装方式は未決である。プロキシ方式、DNSブロックリスト、Web検索・取得API、パッケージ取得の扱いなどは、要件を検証してから別途決定する。未決事項を確定済みのセキュリティ保証として扱ってはならない。
+Web GatewayはPhase 4の実通信計測に基づき、Project専用socketへ接続する明示的forward proxy方式を採用する。具体的な保証と非保証は14章を正とし、TLSを復号しないためHTTPS tunnel内部のmethodやuploadを識別できない点を情報流制御の限界として扱う。
 
 ---
 
@@ -97,7 +97,7 @@ sunabaの目的は、AIエージェントを単に制限することではない
 | SD-14 | 初期Model GatewayはOpenAI Responses互換の最小実装とする | OpenCodeからCodex系モデルを利用する最短経路を作るため |
 | SD-15 | CLIProxyAPIは挙動の参考資料としてのみ使う | 必要範囲を理解しつつ、広い機能面とTCBをそのまま持ち込まないため |
 | SD-16 | Git Gatewayはclone/fetch/pullを許可し、pushだけを都度承認する | 通常の開発効率と外部への書き込み統制を両立するため |
-| SD-17 | Web Gatewayの方式は後で決める | 現時点でブラックリスト、汎用プロキシ、型付きAPIの優劣と保証が確定していないため |
+| SD-17 | Web GatewayはProject専用forward proxyとする | 実OpenCode、curl、wget、aptがproxyを利用でき、TLS MITMなしでclient証明書検証を維持できるため。HTTPS内部の操作はorigin policyとquotaで限定する |
 | SD-18 | VMは停止・再開でき、別操作としてクリーン再生成できる | 利便性と侵害からの復旧を分けて扱うため |
 | SD-19 | OpenCode serverはAgent VM、TUI clientはホストで動かす | エージェント実行を隔離しながら、利用者へ通常のTUI操作を提供するため |
 | SD-20 | OpenCode server/TUIを同じv1系の固定バージョンにする | client/server protocolと設定schemaのずれを防ぎ、再現可能にするため |
@@ -228,7 +228,7 @@ flowchart LR
         Relay["Local Attach Relay<br/>127.0.0.1:random"]
         ModelGW["Model Gateway<br/>upstream credential"]
         GitGW["Git Gateway<br/>host Git credential"]
-        WebGW["Web Gateway<br/>design TBD"]
+        WebGW["Web Gateway<br/>explicit forward proxy"]
         Quarantine["0700 Quarantine<br/>host-generated Change Set"]
         Approval["Trusted Approval UI<br/>nonce + digest / object ID"]
         Apply["Transactional Apply"]
@@ -551,7 +551,7 @@ flowchart TB
 
     Channels --> Model["Model Gateway<br/>Phase 1"]
     Channels --> Git["Git Gateway<br/>Phase 3"]
-    Channels --> Web["Web Gateway<br/>Phase 4 / design TBD"]
+    Channels --> Web["Web Gateway<br/>Project socket forward proxy"]
     Channels --> Attach["Local Attach Relay<br/>hostからguestへの専用経路"]
     Lease --> Internet["Internet"]
 
@@ -575,7 +575,7 @@ flowchart TB
 |---|---|---|---|
 | Model Gateway | OpenCodeからLLMを利用 | 実APIキー、provider/model、利用量 | 最初に実装 |
 | Git Gateway | 標準Git操作をremoteへ中継 | Git token/SSH鍵、push承認 | Model後に実装 |
-| Web Gateway | Web検索・取得・一般HTTPを仲介 | 宛先・操作・流出制御 | 方式は未決 |
+| Web Gateway | Web検索・取得・package readを明示proxyで仲介 | origin、解決後IP、quota、既知危険先 | HTTPS tunnel内部のmethod/uploadは非保証 |
 
 パッケージ取得専用Gatewayは独立した確定コンポーネントにしない。secureモードで将来`apt`、言語package manager、curl等を使えるようにする場合は、Web Gatewayの要件として扱う。
 
@@ -746,26 +746,54 @@ MVPの追加scopeは次とする。
 
 ---
 
-## 14. Web Gateway：未決事項と要求
+## 14. Web Gateway
 
-Web Gatewayの具体方式は本文書では確定しない。特に、公開DNSブロックリストを用いるブラックリスト方式だけで安全性を主張してはならない。DNS回避、直接IP、DoH、許可ドメインの悪用、アップロード、redirect、CDN、同一origin内の異なる操作などを別途評価する必要がある。
+### 14.1 実測結果
 
-今後の設計では、少なくとも次を満たせるか比較する。
+固定OpenCode `v1.18.16`とexact base imageをnetwork-noneの実Agent VMで計測した。
 
-- エージェントが`web_search`、`web_fetch`、curl、標準package managerを自然に利用できる
-- malware配布等の既知危険宛先を外部maintainerのblocklistで補助的に遮断できる
-- DNS以外の迂回経路を扱える
-- private、link-local、metadata、host、LAN、他VMを常に遮断できる
-- redirectと名前解決後のIPを再検証できる
-- downloadとupload、readと外部side effectを必要に応じて区別できる
-- request/response size、bandwidth、concurrency、timeoutを制限できる
-- TLSを終端する場合の秘密情報、証明書、ログ、プライバシー上の影響を説明できる
-- `apt update`のrepository metadata、package blob、署名検証、mirror/CDNを現実的に扱える
-- Gatewayを知らない通常ツールと互換性を保てる
+- curl `7.88.1`とwget `1.21.3`は明示HTTP proxyへabsolute-form GETを送り、redirect先でもproxyを再利用する
+- curlのHTTP uploadはPOSTとbodyとしてproxyから識別できる。HTTPSは`CONNECT host:443`となり、TLS内部のmethod、path、bodyはproxyから見えない
+- apt `2.6.1`は明示proxyへ`InRelease`、`Release`、architecture別`Packages`の圧縮形式候補を順にGETする。package blobの取得先は署名済みmetadataとmirror構成に依存する
+- OpenCode `webfetch`はproxyを利用し、HTTP GET、redirect、Chrome互換User-Agent、最大5 MiB response、最大120秒timeoutで動作する
+- `OPENCODE_ENABLE_EXA=1`の`websearch`は`mcp.exa.ai:443`へCONNECTし、TLS内でJSON-RPC `tools/call` POSTを行う。provider選択によって`search.parallel.ai:443`も対象になり得る
+- coldなOpenCode profileは`registry.npmjs.org:443`へCONNECTを試みる。exact base imageにはapt以外のnpm/pip/go/cargo CLIは入っていない
+- `NO_PROXY`を空にするとModel Gateway loopbackまでproxyへ入る。`127.0.0.1,localhost`だけをproxy除外し、public/private hostnameを除外に追加してはならない
 
-候補には汎用forward proxy、名前解決・IP制御を組み合わせたproxy、Web検索・取得向けの型付きAPI、用途別mirrorなどがある。単一方式に統一すること自体も前提にしない。
+### 14.2 採用方式
 
-Web Gatewayが完成するまで、secureモードで一般Webや`apt update`が使えるとは表明しない。直接インターネットが必要な作業は、リスクを表示したうえでdevモードを利用する。
+MVPはProject/VM/Session専用Unix socketをguest loopbackへ中継する、認証必須の明示的HTTP forward proxyを採用する。VMのnetworkは`none`のままとし、direct DNS、direct IP、DoH、proxy迂回経路を作らない。OpenCode、curl、wget、aptには標準の`HTTP_PROXY` / `HTTPS_PROXY`またはtool固有proxy設定を渡す。Model/Git Gatewayのloopbackだけを`NO_PROXY`に固定する。
+
+TLS MITMとsunaba CAのguest注入は採用しない。HTTPSはend-to-endでclientがserver証明書を検証する。GatewayはCONNECT targetをhostで名前解決し、許可済みpublic IPへ直接dialする。hostnameをもう一度OS resolverへ渡してdialしてはならない。全解決結果を検査し、loopback、private、link-local、ULA、multicast、unspecified、carrier-grade NAT、documentation/benchmark、metadata、host、LAN、他VMに該当する結果が1つでもあれば拒否する。IP literalと443以外のCONNECTはdefault denyとする。
+
+### 14.3 origin policy
+
+allowlistはguest指定の任意upstreamではなく、host Project policyのASCII exact hostnameまたは明示的subdomain ruleと固定portへ束縛する。少なくとも次のcategoryを別ruleにする。
+
+| category | 既定操作 | 例 |
+|---|---|---|
+| general web | 明示allowlistへのHTTPS CONNECT。HTTPはGET/HEADだけ | 利用者が許可したdocumentation origin |
+| OpenCode web search | 固定providerへのHTTPS CONNECT | `mcp.exa.ai:443`、選択時の`search.parallel.ai:443` |
+| package metadata/blob | 固定repository/mirror/CDNへのHTTP GET/HEADまたはHTTPS CONNECT | Debian repository、明示登録したlanguage registry |
+| upload/side effect | default deny。HTTPS originを許可する場合は非識別リスクを明示 | package publish、任意API、form POST |
+
+HTTP absolute-form requestはGET/HEAD、bodyなし、allowlist originだけを許可する。redirectはclientが追跡するたびに新しいproxy requestとしてoriginと解決後IPを再検証する。HTTPS tunnel内redirectのpathは見えないが、別originへのredirectは新しいCONNECTとして再検証する。
+
+公開blocklistはallowlistを置き換えず補助denyとして使う。pinned source、digest、取得時刻、有効期限をpolicyへ記録し、期限切れまたは検証失敗時はblocklist依存ruleをfail closedにする。同一origin内のmalicious path、CDN tenant、許可先自身の侵害はblocklistで防げると主張しない。
+
+### 14.4 capability、quota、監査
+
+proxy capabilityはProject、VM、Session、policy digest、期限、request/concurrency、接続時間、upload/download byte上限へ束縛する。bearer token単独ではなくProject専用socket peer boundaryと併用し、pause/endで失効する。parserはrequest line、header count/size、hostname、port、bodyを上限付きで処理する。
+
+host auditにはProject/VM/Session、category、正規化hostname、port、HTTP methodまたはCONNECT、許可/拒否理由、送受信byte、duration、quota結果を記録する。URL path、query、header、body、proxy capability、cookie、search queryは記録しない。
+
+### 14.5 保証と非保証
+
+保証するのは、proxyを経由しない通信経路がないこと、hostでallowlistと解決後IPを強制すること、HTTP uploadを拒否すること、quota/失効/監査をGatewayで強制すること、private/host/LAN/other VMへdialしないことである。
+
+HTTPS CONNECT内部のmethod、path、upload、cookie、同一origin side effectは識別できず、許可originへの情報流出を防ぐ保証はしない。Web検索queryと取得URL自体も情報を含み得る。利用者にはorigin categoryとこの非保証を表示し、機密Projectではgeneral web/search ruleを無効にできるようにする。完全なread-only意味論が必要なoriginは将来のtyped fetch/mirrorを別途使い、opaque CONNECTを許可しない。
+
+Web Gatewayの実装gateが完成するまで、secureモードで一般Webや`apt update`が使えるとは表明しない。直接インターネットが必要な未対応作業は、リスクを表示したうえでdevモードを利用する。
 
 ---
 
@@ -1130,10 +1158,12 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 
 ### DG-05: Web Gatewayの保証範囲
 
-- 利便性と情報流出対策のどちらをどこまで保証するか
-- blocklistを補助策としてどう更新・検証するか
-- `apt`とpackage managerを汎用Webと同じ経路に載せるか
-- TLS終端、upload、redirect、CDNへの方針
+状態: 解決済み。14章のProject専用forward proxy、origin allowlist、host DNS/IP検査、TLS非終端、quota、明示的非保証を採用する。
+
+- curl、wget、apt、OpenCode Web toolを同じ明示proxyへ載せる
+- blocklistはpinned allowlistを補助し、単独の安全根拠にしない
+- TLSはclientで終端し、CONNECT内部のuploadは非保証としてorigin単位で許可する
+- redirectは新origin requestごとに再検証し、CDNは明示ruleなしに許可しない
 
 ### DG-06: Trusted Approval UIをguest表示から分離できるか
 
@@ -1177,8 +1207,8 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 
 - 確定: 単一Agent VM、Project単位、OverlayFS、Change Set、secure/dev、Model Gatewayの最小構成
 - 固定dependency: OpenCode `v1.18.16`のhost TUI / guest server同一version
-- 次段階: Git Gatewayとpush承認
-- 未決: Web Gateway、`apt update`、一般Web通信の具体方式と情報流出保証
+- 完了段階: Git Gatewayとpush承認
+- 次段階: Phase 4 Web Gatewayの実装gate
 - 別承認: `allowed-host-operations.md`の範囲外となるホスト操作
 
 Phase 0でsecure networkまたはOverlayFS/exportの中核不変条件を実現できないと判明した場合は、見かけ上の実装を続けず、アーキテクチャ判断を更新する。
