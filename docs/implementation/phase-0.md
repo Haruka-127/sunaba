@@ -1,6 +1,6 @@
 # Phase 0: 契約固定と技術probe
 
-状態: 実施中。DG-01とDG-02は通過。DG-03は未通過。
+状態: 実施中。DG-01、DG-02、DG-03は通過。Project lockのprobeが残っている。
 
 ## Dependency contract
 
@@ -17,6 +17,7 @@
 | artifact | SHA-256 |
 |---|---|
 | `opencode-darwin-arm64.zip` | `1e670c94341a374824dc6700b6f38b2cb6634baf3ca20e645084c33ce6639320` |
+| zipから展開したhost `opencode` executable | `a41776bf64c75786d6baf531b840ffb873c090d7c44793ae2dd4b1896de56a1f` |
 | `opencode-linux-arm64.tar.gz` | `4fdce5f9bc877d977304d71c0c90ad6e83efa381fe0edf0a61e6142a625e1c41` |
 
 再現コマンド（`ARTIFACT_DIR`にはOS temp上の新規directoryを指定する）:
@@ -110,8 +111,41 @@ go test -tags=integration -run TestPhase0OverlayFreezeAndExportLayout -v ./test/
 
 attack/unit testはpath traversal、Protected Pathとredirect、任意hardlink、FIFO、未知xattr、重複path、lower改変、fabricated staging path、非canonical tar directory名、曖昧なrename推測を拒否する。これによりDG-02のlower改変検知、Project専用upper/work、rename/delete/whiteout/symlink/opaque、host-enforced freeze、停止後Merged View再現、再現可能なChange Setを満たす。
 
-## 未解決のDecision Gate
+## DG-03 OpenCode + Local Attach Relay + Model Gateway
 
-- DG-03: pinned host artifact、serve/attach、isolated config、terminal境界、Responses contractの実測
+状態: **通過**。2026-08-11にhost/guestとも固定したOpenCode 1.18.16と`sunaba-base:1.18.16-secure.1`で再現した。
 
-これらが再現可能なintegration/attack testで成功するまでPhase 1へ進まない。
+host側OpenCodeは公式`opencode-darwin-arm64.zip`をgitignore済みの`bin/tools/opencode/v1.18.16/`へ取得し、archiveと展開後executableのSHA-256をdependency contractへ固定した。Host TUI起動処理はmanaged directory内のregular executable、実行時digest、`opencode --version`の完全一致を検証する。session専用mode `0700`領域へcwd、HOME、XDG、OpenCode config/data/state/cacheを分離し、host環境はterminal等のallowlistだけを引き継ぐ。`--pure`とProject/default plugin/update/model/LSP download無効化を強制し、API key、proxy、host Project設定を渡さない。guest workspaceはhostに存在しない`/workspace/sunaba-*`だけを受け付け、外部editorは`/usr/bin/false`へ固定する。
+
+Local Attach Relayは次を強制する。
+
+- `127.0.0.1`のrandom portだけでlistenし、固定されたProject/session Unix socketだけへ接続する。
+- session固有のhigh-entropy passwordによるBasic認証、HTTP method/path allowlist、同時接続上限を適用し、OpenCodeの`/tui`、認証、instance、log、doc管理面をguestへ到達させない。
+- JSONとSSEに含まれるESC、OSC構成文字、BEL、C0/C1制御文字、双方向制御文字、不正UTF-8を可視表現へ変換する。
+- `tui.command.execute`は安全側の最小command allowlistとし、`editor.open`等のhost作用を持つeventをTUIへ渡さない。
+
+Model GatewayはProject、VM、session、固定model、期限へ束縛した短命tokenをhashで保持し、guestへはloopback `/v1/responses`のbase URL、短命token、固定provider/model設定だけを渡す。upstream URLと実API keyはhost側Gatewayだけが持ち、redirectと環境proxyを使わない。request回数、並行数、request/response sizeを制限し、本文やcredentialを含めないmetadataを監査callbackへ渡す。Responsesのstream、tool event、upstream error、downstream cancelを保持するunit/race testを通した。
+
+実Apple Container probeでは次を確認した。
+
+- guestのOpenCode 1.18.16をloopback、Basic認証、mDNS無効、auto update/models fetch/LSP download無効で起動した。
+- `/global/health`のguest versionが固定versionと一致し、認証なしのhealth requestを拒否した。
+- 公式macOS artifactのHost TUI 1.18.16がHTTP-aware Local Attach Relay経由で実際に`attach`し、event streamを開始した。
+- guest OpenCode sessionが`@ai-sdk/openai` custom providerから固定Model GatewayへResponses requestを送り、host側mock upstreamのstreaming応答を受け取った。upstreamにはhost側実credentialだけが届いた。
+- guestがOpenCode APIから`editor.open` eventを発生させてもrelayが拒否し、Host TUIは外部editorを起動せず継続した。
+- probe終了後にLocal Attach Relay、Host TUI、guest server、短命capabilityを終了し、所有labelとrun IDを確認したprobe containerだけを削除した。
+
+再現コマンド:
+
+```sh
+SUNABA_PHASE0_INTEGRATION=1 \
+go test -tags=integration -run TestPhase0SecureNetworkAndGatewayTransport -v ./test/integration
+```
+
+attack/unit testは認証なし、管理path、許可外model、別token、並行数超過、悪意あるSSE TUI command、ANSI/OSC/BEL、双方向文字、不正UTF-8、悪意あるdiff/file名を拒否または無害化する。これによりDG-03の固定artifact、serve/attach/health契約、Host TUI分離、terminal境界、Responses subset、stream/tool/error/cancel、短命token、provider/model固定を満たす。
+
+## Phase 0の残件
+
+- canonical Project rootに対するprocess間Project lockの取得、競合拒否、process crash時の解放をprobeする。
+
+これが再現可能なtestで成功するまでPhase 1へ進まない。

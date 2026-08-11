@@ -17,11 +17,12 @@ const (
 var manifestFS embed.FS
 
 type Artifact struct {
-	OS       string `json:"os"`
-	Arch     string `json:"arch"`
-	Artifact string `json:"artifact"`
-	URL      string `json:"url"`
-	SHA256   string `json:"sha256"`
+	OS               string `json:"os"`
+	Arch             string `json:"arch"`
+	Artifact         string `json:"artifact"`
+	URL              string `json:"url"`
+	SHA256           string `json:"sha256"`
+	ExecutableSHA256 string `json:"executable_sha256,omitempty"`
 }
 
 type Manifest struct {
@@ -93,6 +94,9 @@ func (m Manifest) Validate() error {
 	if err := validateArtifact(m.OpenCode.Host, "darwin", "arm64", m.OpenCode.Version); err != nil {
 		return fmt.Errorf("host OpenCode artifact: %w", err)
 	}
+	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(m.OpenCode.Host.ExecutableSHA256) {
+		return fmt.Errorf("host OpenCode executable SHA-256 is required")
+	}
 	if err := validateArtifact(m.OpenCode.Guest, "linux", "arm64", m.OpenCode.Version); err != nil {
 		return fmt.Errorf("guest OpenCode artifact: %w", err)
 	}
@@ -114,6 +118,9 @@ func validateArtifact(a Artifact, wantOS, wantArch, version string) error {
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(a.SHA256) {
 		return fmt.Errorf("invalid SHA-256 %q", a.SHA256)
+	}
+	if a.ExecutableSHA256 != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(a.ExecutableSHA256) {
+		return fmt.Errorf("invalid executable SHA-256 %q", a.ExecutableSHA256)
 	}
 	return nil
 }

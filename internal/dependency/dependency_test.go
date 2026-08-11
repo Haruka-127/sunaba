@@ -16,6 +16,9 @@ func TestPinnedManifest(t *testing.T) {
 	if m.OpenCode.Host.SHA256 == m.OpenCode.Guest.SHA256 {
 		t.Fatal("host and guest artifacts unexpectedly have the same digest")
 	}
+	if m.OpenCode.Host.ExecutableSHA256 == "" {
+		t.Fatal("host executable digest is not pinned")
+	}
 	if m.BaseImage.Reference == "" || m.AgentImage.Tag == "" {
 		t.Fatal("image contract is incomplete")
 	}

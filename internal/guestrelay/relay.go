@@ -15,6 +15,41 @@ type Relay struct {
 	Target     string
 }
 
+type TCPToUnixRelay struct {
+	ListenAddress string
+	SocketPath    string
+}
+
+func (r TCPToUnixRelay) Serve(ctx context.Context) error {
+	host, _, err := net.SplitHostPort(r.ListenAddress)
+	if err != nil || host != "127.0.0.1" || r.SocketPath == "" {
+		return fmt.Errorf("TCP-to-Unix relay requires an explicit guest 127.0.0.1 listener and Unix socket target")
+	}
+	info, err := os.Lstat(r.SocketPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("TCP-to-Unix target is not a Unix socket")
+	}
+	listener, err := net.Listen("tcp4", r.ListenAddress)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		go forwardConnection(connection, "unix", r.SocketPath)
+	}
+}
+
 func (r Relay) Serve(ctx context.Context) error {
 	if r.SocketPath == "" || r.Target == "" {
 		return fmt.Errorf("socket path and target are required")
@@ -48,8 +83,12 @@ func (r Relay) Serve(ctx context.Context) error {
 }
 
 func (r Relay) forward(source net.Conn) {
+	forwardConnection(source, "tcp", r.Target)
+}
+
+func forwardConnection(source net.Conn, network, address string) {
 	defer source.Close()
-	target, err := net.Dial("tcp", r.Target)
+	target, err := net.Dial(network, address)
 	if err != nil {
 		return
 	}
