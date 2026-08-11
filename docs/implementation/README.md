@@ -11,3 +11,4 @@
 - [Phase 0](./phase-0.md)
 - [Phase 1](./phase-1.md)
 - [Phase 2](./phase-2.md)
+- [Phase 3](./phase-3.md)
