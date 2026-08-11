@@ -111,7 +111,22 @@ container kill --signal KILL sunaba-<projectID>-<sessionID>
 
 この復旧操作も、本文書を実装者が更新したこと自体は実行承認とみなさない。
 
-同じ障害で、当該検証が起動した`container stop`または当該exact VMへの`container exec` client processだけが60秒以上応答せず残った場合は、`ps -axo user,pid,ppid,lstart,command`でcurrent user、完全なargv、対応VM名を再確認し、人間の個別承認後にそのclient PIDだけへ`kill -TERM`を送ってよい。Apple Containerのruntime/plugin process、Supervisor、`buildkit`、名前や由来を確認できないprocessへsignalを送らない。TERM後も残るclientへ別signalを送る場合は改めて人間へ確認する。
+上記のexact `container kill --signal KILL`も60秒以上応答せず、別clientの個別`inspect`で対象がなお`running`と確認された場合は、次をすべて満たすorphan test VMの最終復旧に限り、人間の追加個別承認後に下記を1台ずつ実行してよい。
+
+```sh
+container delete --force sunaba-<projectID>-<sessionID>
+```
+
+- force delete直前の個別`inspect`で、完全名とowner/project/session/mode labelが再び完全一致する
+- 対応するSupervisor process、runtime directory、live guardが存在せず、VMに未exportの利用者成果物がないことを確認する
+- 当該検証が作成した一時VMであり、VM overlayを破棄して同じtestをclean recreationできる
+- 1 invocationにexactな1台だけを指定し、`--all`、glob、部分一致、複数指定を使わない
+- 実行後は個別`inspect`がnot foundになることと、全resource listで対象だけが消えたことを確認する
+- `buildkit`、container system、runtime/plugin process、他container、network、volume、imageを変更しない
+
+force deleteは当該一時VMのoverlayを復元不能に破棄する。未承認成果物があるProject VMには使わず、通常のexport/stop/delete経路を使う。この例外も、本文書を実装者が更新したこと自体は実行承認とみなさない。
+
+同じ障害で、当該検証が起動した`container stop`、`container kill`、`container delete --force`、または当該exact VMへの`container exec` client processだけが60秒以上応答せず残った場合は、`ps -axo user,pid,ppid,lstart,command`でcurrent user、完全なargv、対応VM名を再確認し、人間の個別承認後にそのclient PIDだけへ`kill -TERM`を送ってよい。Apple Containerのruntime/plugin process、Supervisor、`buildkit`、名前や由来を確認できないprocessへsignalを送らない。TERM後も残るclientへ別signalを送る場合は改めて人間へ確認する。
 
 ## 許可するRuntime Adapter操作
 
@@ -141,7 +156,7 @@ container rm <sunaba- 以外のコンテナ>
 container delete <sunaba- 以外のコンテナ>
 container kill --all
 container delete --all
-container delete --force ...
+container delete --force <上記の個別復旧条件を満たさない対象>
 container image delete <sunaba-base: 以外のイメージ>
 container network delete <sunaba- 以外のnetwork>
 container volume delete <sunaba- 以外のvolume>
