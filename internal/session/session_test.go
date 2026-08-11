@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
 	"sunaba/internal/runtime"
@@ -256,6 +258,27 @@ func TestStartFailureRemovesOwnedVMAndReleasesProjectLock(t *testing.T) {
 		t.Fatalf("Project lock remained after rollback: %v", err)
 	}
 	defer s.Destroy(context.Background())
+}
+
+func TestStartDiskPressureFailsClosedAndReleasesProject(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	fake.setupError = unix.ENOSPC
+	if _, err := Start(context.Background(), cfg); !errors.Is(err, unix.ENOSPC) {
+		t.Fatalf("disk pressure error=%v", err)
+	}
+	if !fake.removed || fake.state != runtime.StateNotFound {
+		t.Fatalf("disk pressure left owned VM state=%s removed=%v", fake.state, fake.removed)
+	}
+	fake.setupError = nil
+	fake.removed = false
+	cfg.SessionID = "diskretry"
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("disk pressure rollback retained Project lock: %v", err)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestNewSecretProducesDistinctURLSafeValues(t *testing.T) {

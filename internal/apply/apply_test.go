@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"sunaba/internal/approval"
 	"sunaba/internal/audit"
 	"sunaba/internal/state"
@@ -84,6 +86,28 @@ func TestApplyRollsBackInjectedFailure(t *testing.T) {
 	}
 	if recovered := mustManifest(t, cfg.ProjectRoot); recovered.Digest != baseline.Digest {
 		t.Fatalf("rollback digest=%s baseline=%s", recovered.Digest, baseline.Digest)
+	}
+}
+
+func TestApplyRollsBackHostDiskPressure(t *testing.T) {
+	cfg := applyFixture(t)
+	baseline := mustManifest(t, cfg.ProjectRoot)
+	_, err := applyLocked(cfg, func(stage string) error {
+		if strings.HasPrefix(stage, "install:") {
+			return unix.ENOSPC
+		}
+		return nil
+	}, true)
+	if !errors.Is(err, unix.ENOSPC) {
+		t.Fatalf("disk pressure error=%v", err)
+	}
+	if recovered := mustManifest(t, cfg.ProjectRoot); recovered.Digest != baseline.Digest {
+		t.Fatalf("disk pressure rollback digest=%s baseline=%s", recovered.Digest, baseline.Digest)
+	}
+	transactions := filepath.Join(cfg.ProjectRoot, ".sunaba", "transactions")
+	entries, readErr := os.ReadDir(transactions)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("disk pressure transaction remained: entries=%v error=%v", entries, readErr)
 	}
 }
 

@@ -49,6 +49,31 @@ func TestCleanupKeepsLiveSessionAndRemovesGuardlessOrphan(t *testing.T) {
 	}
 }
 
+func TestCleanupRecoversPersistedActiveLeaseAfterSupervisorRestart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "sunaba-project-restarted"
+	registryBeforeRestart := &lease.Registry{Root: filepath.Join(root, "leases")}
+	if _, err := registryBeforeRestart.Register("project", name, "restarted", "model", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// No process guard survives a host reboot. A new Supervisor instance only has
+	// the durable lease and exact ownership labels from before the restart.
+	fake := &cleanupRuntime{resources: map[string]runtime.Info{name: {Name: name, State: runtime.StateRunning, Labels: ownedLabels("project", "restarted")}}}
+	result, err := Run(context.Background(), Config{Store: &state.Store{Root: root}, Runtime: fake, Audit: recorder})
+	if err != nil || len(result.Removed) != 1 || result.Removed[0] != name || fake.stopped != name || fake.removed != name {
+		t.Fatalf("restart recovery result=%+v stopped=%q removed=%q error=%v", result, fake.stopped, fake.removed, err)
+	}
+	registryAfterRestart := &lease.Registry{Root: filepath.Join(root, "leases")}
+	record, err := registryAfterRestart.Load("restarted")
+	if err != nil || record.State != lease.Revoked {
+		t.Fatalf("restart recovery lease=%+v error=%v", record, err)
+	}
+}
+
 func TestCleanupRefusesLabelOrLeaseSubstitution(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))

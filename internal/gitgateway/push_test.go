@@ -115,6 +115,69 @@ func TestPushExecutorRejectsUpstreamRaceWithConsumedGrant(t *testing.T) {
 	}
 }
 
+func TestUpstreamSuccessLocalReceiveFailureRecoversOnNextAdvertisement(t *testing.T) {
+	quarantine, first, second, _ := testBareRepository(t)
+	gitPath, _ := exec.LookPath("git")
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	upstream := filepath.Join(root, "upstream.git")
+	testGit(t, gitPath, "", "clone", "--mirror", quarantine, upstream)
+	testGit(t, gitPath, upstream, "config", "http.receivepack", "true")
+	const authorization = "Bearer host-partial-failure-secret"
+	server := newGitHTTPSServer(t, gitPath, root, authorization)
+	defer server.Close()
+	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewPushApprovalManager(nil, recorder, "vm", "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := RepositoryResolver{
+		GitPath: gitPath, RepositoryPath: quarantine, ProjectID: "project", Repository: "repository",
+		RemoteName: "origin", RemoteURL: server.URL + "/upstream.git",
+	}
+	executor := PushExecutor{
+		Resolver: resolver, Approvals: manager, AuthorizationHeader: authorization,
+		TLSCAInfoPath: writeTestCertificate(t, root, server.Certificate()), Audit: recorder, VMID: "vm", SessionID: "session",
+	}
+	proposed := []ProposedRefUpdate{{Ref: "refs/heads/main", Old: first, New: second}}
+	binding, err := resolver.Resolve(context.Background(), proposed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := manager.NewRequest(binding, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := manager.Confirm(request.Nonce, request.Binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.Execute(context.Background(), grant, proposed); err != nil {
+		t.Fatal(err)
+	}
+	// Omit the local receive-pack ref update to model a crash after the host
+	// upstream push has committed but before the local quarantine ref moves.
+	if actual := strings.TrimSpace(testGit(t, gitPath, upstream, "rev-parse", "refs/heads/main")); actual != second {
+		t.Fatalf("upstream push did not commit before local failure: %s", actual)
+	}
+	if actual := strings.TrimSpace(testGit(t, gitPath, quarantine, "rev-parse", "refs/heads/main")); actual != first {
+		t.Fatalf("local failure simulation unexpectedly updated quarantine: %s", actual)
+	}
+	if err := executor.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if actual := strings.TrimSpace(testGit(t, gitPath, quarantine, "rev-parse", "refs/heads/main")); actual != second {
+		t.Fatalf("next advertisement sync did not recover local ref: %s", actual)
+	}
+	auditFiles, _ := filepath.Glob(filepath.Join(root, "audit", "project", "audit-*.jsonl"))
+	encoded, _ := os.ReadFile(auditFiles[0])
+	if !strings.Contains(string(encoded), `"action":"git.push.upstream","outcome":"success"`) || !strings.Contains(string(encoded), `"action":"git.fetch.sync","outcome":"success"`) {
+		t.Fatalf("partial failure recovery audit is incomplete: %s", encoded)
+	}
+}
+
 func newGitHTTPSServer(t *testing.T, gitPath, projectRoot, authorization string) *httptest.Server {
 	t.Helper()
 	backend := &cgi.Handler{Path: gitPath, Args: []string{"http-backend"}, Env: []string{"GIT_PROJECT_ROOT=" + projectRoot, "GIT_HTTP_EXPORT_ALL=1"}, InheritEnv: []string{"PATH"}}
