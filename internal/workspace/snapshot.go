@@ -106,18 +106,22 @@ func BuildSnapshotManifest(root string, policy SnapshotPolicy) (SnapshotManifest
 	if err := walker.walkDirectory(rootFD, "", 0); err != nil {
 		return SnapshotManifest{}, err
 	}
-	sort.Slice(walker.result.Entries, func(i, j int) bool {
-		return walker.result.Entries[i].Path < walker.result.Entries[j].Path
-	})
+	return finalizeSnapshotManifest(walker.result.Root, walker.result.Entries, walker.result.TotalSize)
+}
+
+func finalizeSnapshotManifest(root string, entries []SnapshotEntry, totalSize int64) (SnapshotManifest, error) {
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	digestInput, err := json.Marshal(manifestDigestInput{
-		Version: manifestVersion, Entries: walker.result.Entries, TotalSize: walker.result.TotalSize,
+		Version: manifestVersion, Entries: entries, TotalSize: totalSize,
 	})
 	if err != nil {
 		return SnapshotManifest{}, err
 	}
 	digest := sha256.Sum256(digestInput)
-	walker.result.Digest = hex.EncodeToString(digest[:])
-	return walker.result, nil
+	return SnapshotManifest{
+		Version: manifestVersion, Root: root, Entries: entries, TotalSize: totalSize,
+		Digest: hex.EncodeToString(digest[:]),
+	}, nil
 }
 
 func (p SnapshotPolicy) validate() error {
@@ -190,7 +194,7 @@ func (w *snapshotWalker) walkDirectory(parentFD int, relative string, depth int)
 				return fmt.Errorf("read symlink %q: %w", entryPath, err)
 			}
 			w.result.Entries = append(w.result.Entries, SnapshotEntry{
-				Path: entryPath, Type: TypeSymlink, Mode: uint32(before.Mode) & 0777, LinkTarget: target,
+				Path: entryPath, Type: TypeSymlink, Mode: 0777, LinkTarget: target,
 			})
 		default:
 			return fmt.Errorf("snapshot rejects special file %q (mode %#o)", entryPath, before.Mode)

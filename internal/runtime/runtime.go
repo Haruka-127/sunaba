@@ -64,6 +64,7 @@ type Runtime interface {
 	Exec(ctx context.Context, name string, interactive bool, cmd []string) error
 	ExecOutput(ctx context.Context, name string, cmd []string) (string, error)
 	CopyTo(ctx context.Context, name, source, target string) error
+	Export(ctx context.Context, name, output string) error
 	IPAddress(ctx context.Context, name string) (string, error)
 	Inspect(ctx context.Context, name string) (Info, error)
 	List(ctx context.Context) ([]Info, error)

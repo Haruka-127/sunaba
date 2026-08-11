@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -59,5 +62,30 @@ func TestParseInspectLabels(t *testing.T) {
 	}
 	if info.Labels["dev.sunaba.test"] != "run-1" {
 		t.Fatalf("labels=%v", info.Labels)
+	}
+}
+
+func TestExportRejectsUnsafeOutputBeforeRuntimeAccess(t *testing.T) {
+	rt := NewAppleContainer(false)
+	if err := rt.Export(context.Background(), "other-container", "/private/tmp/sunaba-test/rootfs.tar"); err == nil {
+		t.Fatal("non-sunaba container was accepted")
+	}
+	if err := rt.Export(context.Background(), "sunaba-test", "relative.tar"); err == nil {
+		t.Fatal("relative export path was accepted")
+	}
+}
+
+func TestExportRejectsSymlinkQuarantineBeforeRuntimeAccess(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	quarantine := filepath.Join(root, "sunaba-link")
+	if err := os.Symlink(target, quarantine); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewAppleContainer(false).Export(context.Background(), "sunaba-test", filepath.Join(quarantine, "rootfs.tar")); err == nil {
+		t.Fatal("symlink quarantine was accepted")
 	}
 }

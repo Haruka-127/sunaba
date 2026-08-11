@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -193,6 +194,46 @@ func (r *AppleContainer) CopyTo(ctx context.Context, name, source, target string
 	ctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
 	return r.run(ctx, "container", "cp", source, name+":"+target)
+}
+
+func (r *AppleContainer) Export(ctx context.Context, name, output string) error {
+	if !strings.HasPrefix(name, "sunaba-") {
+		return fmt.Errorf("refusing to export non-sunaba container %q", name)
+	}
+	if !filepath.IsAbs(output) {
+		return fmt.Errorf("container export output must be absolute: %q", output)
+	}
+	parent := filepath.Dir(output)
+	if !strings.HasPrefix(filepath.Base(parent), "sunaba-") {
+		return fmt.Errorf("container export parent must have sunaba- prefix: %q", parent)
+	}
+	info, err := os.Lstat(parent)
+	if err != nil {
+		return fmt.Errorf("inspect export quarantine: %w", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0700 {
+		return fmt.Errorf("export quarantine must be a mode 0700 directory: %q", parent)
+	}
+	canonicalParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return fmt.Errorf("resolve export quarantine: %w", err)
+	}
+	output = filepath.Join(canonicalParent, filepath.Base(output))
+	if _, err := os.Lstat(output); err == nil {
+		return fmt.Errorf("container export output already exists: %q", output)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	state, err := r.ContainerState(ctx, name)
+	if err != nil {
+		return err
+	}
+	if state != StateStopped {
+		return fmt.Errorf("container %s must be stopped before export; state=%s", name, state)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	return r.run(ctx, "container", "export", "--output", output, name)
 }
 
 func (r *AppleContainer) IPAddress(ctx context.Context, name string) (string, error) {

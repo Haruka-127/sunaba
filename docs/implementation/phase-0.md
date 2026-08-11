@@ -1,6 +1,6 @@
 # Phase 0: 契約固定と技術probe
 
-状態: 実施中。DG-01〜DG-03は未通過。
+状態: 実施中。DG-02は通過。DG-01とDG-03は未通過。
 
 ## Dependency contract
 
@@ -68,26 +68,46 @@ go test -tags=integration -run TestPhase0SecureNetworkAndGatewayTransport -v ./t
 
 この結果はDG-01のsecure egress、guest-to-host Gateway transport、host-to-guest reverse attach transportの中核証拠である。DG-01通過には、別Project socket非共有、構成検証失敗時のsession fail-closed、dev session egress leaseも追加で実測する。
 
-## DG-02 host Snapshot
+## DG-02 Snapshot + OverlayFS + export
 
-host Projectから固定Snapshotを作る前半を実装した。
+状態: **通過**。2026-08-11に固定版Apple Container 1.2.2と`sunaba-base:1.18.16-secure.1`で再現した。
+
+host Projectから固定Snapshotを作る処理は次の性質を持つ。
 
 - canonical Project rootをdirectory descriptorで開き、`openat` / `fstatat` / `O_NOFOLLOW`で相対walkする。
 - symlinkはtarget文字列だけを記録し、Project root内外を問わずリンク先を読まない。
 - `.git`と`.sunaba`をcase-insensitiveなProtected PathとしてSnapshot対象外にする。
 - socket、FIFO、device等の特殊file、depth、entry数、個別size、総size超過を拒否する。
-- path、type、mode、size、content SHA-256、symlink targetを整列したcanonical manifestからdigestを作る。
+- path、type、mode、size、content SHA-256、symlink targetを整列したcanonical manifestからdigestを作る。macOS/Linuxで意味が一致しないsymlinkのmodeは`0777`へ正規化する。
 - 新規Snapshot directoryへfd-relative/no-followでcopyし、copy後のmanifest digestがsourceと一致しなければ失敗して、そのtransactionが作成したdestinationだけを削除する。
 - xattrとhost hardlink関係はSnapshotへ継承しない。
 
 unit testは外部symlink targetの内容変更がdigestへ影響しないこと、Protected Path除外、特殊fileと上限の拒否、host編集から独立した固定copy、既存またはProject内destinationの拒否を検証する。
 
-DG-02通過には、Project Snapshotをbind mountせずguestへcopyすること、OverlayFSのrename/delete/whiteout/symlink、host境界freeze、停止後rootfs export、safe OCI extractionとmerged view再現を実Apple Containerで検証する必要がある。
+実Apple Container probeでは次を確認した。
+
+- Project Snapshotをhost bind mountせずguest rootfsへcopyし、Projectの`.git`と外部symlink先の内容をguestへcopyしない。
+- Snapshotをlower、Project専用のupper/workを使うOverlayFSでadd、modify、delete、rename、symlink、opaque directoryを作る。host Projectのmanifestは変化しない。
+- guest協調ではなくApple Containerの停止をfreeze境界とし、停止状態を再確認してからmode `0700`の一意な`sunaba-*` quarantineへ`container export`する。
+- Apple Container 1.2.2のexportはOCI layoutではなくflat rootfs tarである。通常directoryの末尾`/`、whiteoutのwork/index hardlink表現、opaque/redirect/metacopyの`trusted.overlay.*` PAX keyを実測した。
+- safe parserは通常のarchive extractorを使わずentry streamを検証する。絶対/非正規/重複/Protected Path、未知xattr、任意hardlink、特殊file、size/entry上限を拒否し、lower全体のcanonical digestをhost baselineと照合する。PAXのbinary valueは記録・表示せず、許可したkeyの必要な値だけを解釈する。
+- renameの`metacopy` upper本文は実測上NUL bytesであり、内容として信頼しない。redirect元のtrusted lower entryについて型、size、SHA-256が一致する場合だけlower内容を参照する。
+- 検証済みlower/upperからhost側でMerged Viewを新規quarantine directoryへno-follow materializeし、同じexportから2回生成したmanifest digestが一致する。
+- baselineとMerged Viewだけからadd/modify/delete/rename/symlink/opaque directoryを含むChange Setを生成し、同じ入力のChange Set digestが一致する。
+- guest rootでlowerを直接書き換えた二度目の停止exportはbaseline digest不一致として拒否する。
+
+再現コマンド:
+
+```sh
+SUNABA_PHASE0_INTEGRATION=1 \
+go test -tags=integration -run TestPhase0OverlayFreezeAndExportLayout -v ./test/integration
+```
+
+attack/unit testはpath traversal、Protected Pathとredirect、任意hardlink、FIFO、未知xattr、重複path、lower改変、fabricated staging path、非canonical tar directory名、曖昧なrename推測を拒否する。これによりDG-02のlower改変検知、Project専用upper/work、rename/delete/whiteout/symlink/opaque、host-enforced freeze、停止後Merged View再現、再現可能なChange Setを満たす。
 
 ## 未解決のDecision Gate
 
 - DG-01: Project間socket分離、fail-closed、dev egress leaseの実測
-- DG-02: guest copy、OverlayFS、freeze、safe OCI export、merged semanticsの実測
 - DG-03: pinned host artifact、serve/attach、isolated config、terminal境界、Responses contractの実測
 
 これらが再現可能なintegration/attack testで成功するまでPhase 1へ進まない。
