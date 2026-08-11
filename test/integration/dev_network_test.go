@@ -165,6 +165,21 @@ func TestDevSessionNetworkBoundary(t *testing.T) {
 		t.Fatal("unsolicited host-to-dev-VM inbound connection succeeded")
 	}
 
+	quiesce := exec.CommandContext(ctx, "sudo", "-n", sunabaBinary, "firewall", "quiesce", "--subnet", dev.IPv4Subnet, "--gateway", dev.IPv4Gateway, "--ipv6-subnet", dev.IPv6Subnet)
+	if output, err := quiesce.CombinedOutput(); err != nil {
+		t.Fatalf("quiesce verified dev firewall (authorize sudo first): %v: %s", err, output)
+	}
+	quiescedProbe := strings.Join([]string{
+		"set -eu",
+		"! curl --fail --silent --max-time 3 https://example.com/",
+		"! curl --fail --silent --max-time 3 http://1.1.1.1/cdn-cgi/trace",
+		fmt.Sprintf("! curl --fail --silent --max-time 2 http://%s:%d/", dev.IPv4Gateway, hostPort),
+		fmt.Sprintf("! curl --fail --silent --max-time 2 http://%s:38642/", peerIP),
+	}, "\n")
+	if output, err := rt.ExecOutput(ctx, name, []string{"/bin/bash", "-lc", quiescedProbe}); err != nil {
+		t.Fatalf("running dev VM retained egress after quiesce: %v: %s", err, output)
+	}
+
 	if err := rt.Stop(ctx, name); err != nil {
 		t.Fatal(err)
 	}

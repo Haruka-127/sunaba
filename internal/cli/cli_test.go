@@ -59,6 +59,27 @@ func TestGuestRelayRequiresLinuxAArch64ELF(t *testing.T) {
 	}
 }
 
+func TestHostGitAuthorizationUsesOnlyNonInteractiveCredentialHelper(t *testing.T) {
+	bin := t.TempDir()
+	git := filepath.Join(bin, "git")
+	script := "#!/bin/sh\n" +
+		"test \"$GIT_TERMINAL_PROMPT\" = 0 || exit 7\n" +
+		"test \"$1 $2\" = \"credential fill\" || exit 8\n" +
+		"cat >/dev/null\n" +
+		"printf 'username=agent\\npassword=secret\\n'\n"
+	if err := os.WriteFile(git, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	authorization, err := hostGitAuthorization(context.Background(), "https://git.example/repository.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorization != "Basic YWdlbnQ6c2VjcmV0" {
+		t.Fatalf("unexpected authorization: %q", authorization)
+	}
+}
+
 func TestGitPolicyAcceptsOneFixedHTTPSRemoteAndRejectsCredentialURLs(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

@@ -230,14 +230,39 @@ func (a *app) up(ctx context.Context, args []string) error {
 	}
 	if projectPolicy.Mode == "dev" {
 		fmt.Fprintln(a.errors, "WARNING: dev mode permits direct Internet egress during the active Agent Session and does not provide exfiltration prevention.")
+		if err := opencode.CheckPrerequisites(ctx); err != nil {
+			return err
+		}
+		if _, err := image.Ensure(ctx, a.runtime, a.store, dependency.OpenCodeVersion); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.output, "Project %s is prepared in dev mode. No VM or direct-egress session is active; run 'sunaba agent' in the foreground.\n", projectPolicy.ProjectID)
+		return nil
 	}
-	if err := opencode.CheckPrerequisites(ctx); err != nil {
+	client, info, err := a.ensureSupervisor(ctx, projectPolicy.ProjectRoot, projectState)
+	if err != nil {
 		return err
 	}
-	if _, err := image.Ensure(ctx, a.runtime, a.store, dependency.OpenCodeVersion); err != nil {
-		return err
+	defer client.close()
+	if info.ProjectID != projectPolicy.ProjectID {
+		return fmt.Errorf("active supervisor Project identity does not match policy")
 	}
-	fmt.Fprintf(a.output, "Project %s is prepared in %s mode. No session network is active; run 'sunaba agent'.\n", projectPolicy.ProjectID, projectPolicy.Mode)
+	if info.State == "running" {
+		pauseContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err = client.operation(pauseContext, "pause")
+		cancel()
+		if err != nil {
+			return err
+		}
+		info, err = client.info(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	if info.State != "paused" {
+		return fmt.Errorf("Project VM preparation ended in unexpected state %s", info.State)
+	}
+	fmt.Fprintf(a.output, "Project VM %s is prepared and paused in secure mode. No Agent Session channel is active; run 'sunaba agent' or 'sunaba shell'.\n", info.Container)
 	return nil
 }
 

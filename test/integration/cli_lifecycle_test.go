@@ -49,53 +49,21 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	if output, err := runSunaba("", "project", "init", project, "--mode", "secure"); err != nil {
 		t.Fatalf("project init: %v: %s", err, output)
 	}
-	logPath := filepath.Join(runtimeBase, "supervisor-process.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		t.Fatal(err)
+	up, err := runSunaba("", "up", "--dir", project)
+	if err != nil || !strings.Contains(up, "prepared and paused in secure mode") {
+		t.Fatalf("up error=%v output=%s", err, up)
 	}
-	supervisor := exec.Command(sunaba, "_supervisor", "--dir", project)
-	supervisor.Env = environment
-	supervisor.Stdin = nil
-	supervisor.Stdout = logFile
-	supervisor.Stderr = logFile
-	if err := supervisor.Start(); err != nil {
-		logFile.Close()
-		t.Fatal(err)
-	}
-	_ = logFile.Close()
-	supervisorDone := make(chan error, 1)
-	go func() { supervisorDone <- supervisor.Wait() }()
 	projectState := filepath.Join(xdg, "sunaba", "projects", state.ProjectID(project))
 	locator := filepath.Join(projectState, "active-approval-control.json")
-	deadline := time.Now().Add(3 * time.Minute)
-	for {
-		if _, err := os.Lstat(locator); err == nil {
-			break
-		}
-		select {
-		case err := <-supervisorDone:
-			logData, _ := os.ReadFile(logPath)
-			t.Fatalf("supervisor startup: %v: %s", err, logData)
-		default:
-		}
-		if time.Now().After(deadline) {
-			_ = supervisor.Process.Signal(os.Interrupt)
-			logData, _ := os.ReadFile(logPath)
-			t.Fatalf("supervisor locator timeout: %s", logData)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 	cleaned := false
 	defer func() {
 		if !cleaned {
 			_, _ = runSunaba("", "destroy", "--dir", project, "--yes", "--discard-pending")
-			_ = supervisor.Process.Signal(os.Interrupt)
 		}
 	}()
 	status, err := runSunaba("", "status", "--dir", project)
-	if err != nil || !strings.Contains(status, "=running/secure") {
-		t.Fatalf("running status error=%v output=%s", err, status)
+	if err != nil || !strings.Contains(status, "=paused/secure") {
+		t.Fatalf("paused status after up error=%v output=%s", err, status)
 	}
 	firstShell := "printf persistent > persistent.txt\nprintf '\\033]52;c;evil\\a\\n'\n"
 	first, err := runSunaba(firstShell, "shell", "--dir", project)
@@ -117,13 +85,15 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	if err != nil || !strings.Contains(exported, "persistent.txt") || !strings.Contains(exported, "Change Set:") {
 		t.Fatalf("CLI export error=%v output=%s", err, exported)
 	}
-	select {
-	case err := <-supervisorDone:
-		if err != nil {
-			t.Fatalf("supervisor exit after export: %v", err)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Lstat(locator); errors.Is(err, os.ErrNotExist) {
+			break
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("supervisor did not exit after export")
+		if time.Now().After(deadline) {
+			t.Fatal("supervisor locator remained after export")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	if output, err := runSunaba("", "destroy", "--dir", project, "--yes", "--discard-pending"); err != nil {
 		t.Fatalf("destroy: %v: %s", err, output)

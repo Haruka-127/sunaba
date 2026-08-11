@@ -179,7 +179,7 @@ func hostGitAuthorization(ctx context.Context, remote string) (string, error) {
 		return "", fmt.Errorf("host Git is required to obtain the configured upstream credential")
 	}
 	command := exec.CommandContext(ctx, gitPath, "credential", "fill")
-	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=1")
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	command.Stdin = strings.NewReader("protocol=https\nhost=" + parsed.Host + "\npath=" + strings.TrimPrefix(parsed.Path, "/") + "\n\n")
 	var output strings.Builder
 	command.Stdout = &boundedStringWriter{builder: &output, remaining: 64 << 10}
