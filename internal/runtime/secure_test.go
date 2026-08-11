@@ -15,6 +15,36 @@ func TestValidateSecureSessionSpec(t *testing.T) {
 	}
 }
 
+func TestValidateDevSessionSpecUsesExactDedicatedNetwork(t *testing.T) {
+	policy, spec, closeSocket := secureFixture(t)
+	defer closeSocket()
+	policy.Mode = "dev"
+	policy.NetworkName = "sunaba-project-test-net"
+	spec.Networks = []string{policy.NetworkName}
+	spec.NoDNS = false
+	spec.Labels["dev.sunaba.mode"] = "dev"
+	digest, err := policy.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.Labels["dev.sunaba.policy-digest"] = digest
+	if err := ValidateSecureSessionSpec(spec, policy); err != nil {
+		t.Fatal(err)
+	}
+	for _, network := range []string{"default", "sunaba-other-test-net", "none"} {
+		mutated := cloneContainerSpec(spec)
+		mutated.Networks = []string{network}
+		if err := ValidateSecureSessionSpec(mutated, policy); err == nil {
+			t.Fatalf("dev network %q was accepted", network)
+		}
+	}
+	mutated := cloneContainerSpec(spec)
+	mutated.NoDNS = true
+	if err := ValidateSecureSessionSpec(mutated, policy); err == nil {
+		t.Fatal("dev network with DNS disabled was accepted")
+	}
+}
+
 func TestValidateSecureSessionSpecFailsClosed(t *testing.T) {
 	policy, valid, closeSocket := secureFixture(t)
 	defer closeSocket()

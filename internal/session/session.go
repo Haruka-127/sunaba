@@ -46,6 +46,10 @@ type Config struct {
 	ProjectRoot      string
 	RuntimeBase      string
 	SessionID        string
+	Mode             string
+	DevNetworkName   string
+	DevNetworkVerify func(context.Context) error
+	DevNetworkClose  func(context.Context) error
 	Image            string
 	CPUs             int
 	Memory           string
@@ -99,6 +103,7 @@ type Session struct {
 	closeOnce        sync.Once
 	gitCloseOnce     sync.Once
 	webCloseOnce     sync.Once
+	devCloseOnce     sync.Once
 	closeErr         error
 }
 
@@ -110,6 +115,9 @@ type ExportResult struct {
 }
 
 func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
+	if cfg.Mode == "" {
+		cfg.Mode = "secure"
+	}
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -163,7 +171,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, err
 	}
 	policy := runtime.SecureSessionPolicy{
-		ProjectID: s.ProjectID, SessionID: s.SessionID, Image: cfg.Image, SessionRoot: s.Root,
+		ProjectID: s.ProjectID, SessionID: s.SessionID, Mode: cfg.Mode, NetworkName: cfg.DevNetworkName, Image: cfg.Image, SessionRoot: s.Root,
 		CPUs: cfg.CPUs, Memory: cfg.Memory, DiskBytes: cfg.DiskBytes,
 		ProcessMax: cfg.ProcessMax, FileSizeMax: cfg.FileSizeMax, OpenFileMax: cfg.OpenFileMax,
 		GitGateway: cfg.GitGateway != nil, WebGateway: cfg.WebGateway != nil,
@@ -179,6 +187,13 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	if cfg.WebGateway != nil {
 		mounts = append(mounts, runtime.Mount{Type: "socket", Source: filepath.Join(s.Root, "web-gateway.sock"), Target: runtime.SecureWebGatewayGuestPath})
 	}
+	networks, noDNS := []string{"none"}, true
+	if cfg.Mode == "dev" {
+		if err := cfg.DevNetworkVerify(ctx); err != nil {
+			return nil, fmt.Errorf("dev network boundary verification failed: %w", err)
+		}
+		networks, noDNS = []string{cfg.DevNetworkName}, false
+	}
 	spec := runtime.ContainerSpec{
 		Name: s.Container, Image: cfg.Image, CPUs: cfg.CPUs, Memory: cfg.Memory,
 		Ulimits: map[string]runtime.RLimit{
@@ -186,13 +201,13 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 			"fsize":  {Soft: cfg.FileSizeMax, Hard: cfg.FileSizeMax},
 			"nofile": {Soft: cfg.OpenFileMax, Hard: cfg.OpenFileMax},
 		},
-		Networks: []string{"none"}, NoDNS: true, CapAdd: []string{"SYS_ADMIN"},
+		Networks: networks, NoDNS: noDNS, CapAdd: []string{"SYS_ADMIN"},
 		Entrypoint: "/bin/bash", Args: []string{"-lc", "exec tail -f /dev/null"},
 		Mounts:  mounts,
 		Sockets: []runtime.PublishedSocket{{HostPath: filepath.Join(s.Root, "attach.sock"), GuestPath: runtime.SecureAttachGuestPath}},
 		Labels: map[string]string{
 			"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": s.ProjectID,
-			"dev.sunaba.session": s.SessionID, "dev.sunaba.mode": "secure",
+			"dev.sunaba.session": s.SessionID, "dev.sunaba.mode": cfg.Mode,
 			"dev.sunaba.policy-digest": policyDigest,
 		},
 	}
@@ -256,6 +271,17 @@ func validateConfig(cfg Config) error {
 	}
 	if !sessionIDPattern.MatchString(cfg.SessionID) || cfg.Image != dependency.MustPinned().AgentImage.Tag || cfg.CPUs <= 0 || cfg.Memory == "" {
 		return fmt.Errorf("secure session identity, pinned image, and resources are required")
+	}
+	if cfg.Mode != "secure" && cfg.Mode != "dev" {
+		return fmt.Errorf("session mode must be secure or dev")
+	}
+	if cfg.Mode == "secure" && (cfg.DevNetworkName != "" || cfg.DevNetworkVerify != nil || cfg.DevNetworkClose != nil) {
+		return fmt.Errorf("secure session must not accept a direct-egress network")
+	}
+	if cfg.Mode == "dev" {
+		if cfg.DevNetworkName == "" || cfg.DevNetworkVerify == nil || cfg.DevNetworkClose == nil {
+			return fmt.Errorf("dev session requires an owned, verified, revocable network boundary")
+		}
 	}
 	if _, err := parseMemoryBytes(cfg.Memory); err != nil {
 		return err
@@ -423,6 +449,11 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 	current, stateErr := s.cfg.Runtime.ContainerState(ctx, s.Container)
 	if stateErr != nil {
 		return stateErr
+	}
+	if s.cfg.Mode == "dev" {
+		if err := s.cfg.DevNetworkVerify(ctx); err != nil {
+			return fmt.Errorf("dev network boundary verification failed before resume: %w", err)
+		}
 	}
 	if current == runtime.StateStopped {
 		if err := s.cfg.Runtime.Start(ctx, s.Container); err != nil {
@@ -813,7 +844,24 @@ func (s *Session) Destroy(ctx context.Context) error {
 	if err := s.emit("vm.destroyed", s.Container); err != nil {
 		destroyErr = errors.Join(destroyErr, err)
 	}
+	if err := s.closeDevNetwork(ctx); err != nil {
+		destroyErr = errors.Join(destroyErr, err)
+	}
 	return errors.Join(destroyErr, s.Close())
+}
+
+func (s *Session) closeDevNetwork(ctx context.Context) error {
+	if s.cfg.Mode != "dev" || s.cfg.DevNetworkClose == nil {
+		return nil
+	}
+	var closeErr error
+	s.devCloseOnce.Do(func() {
+		closeErr = s.cfg.DevNetworkClose(ctx)
+		if closeErr == nil {
+			closeErr = s.emit("dev_network.revoked", s.cfg.DevNetworkName)
+		}
+	})
+	return closeErr
 }
 
 func (s *Session) stopChannels(ctx context.Context) error {
@@ -874,6 +922,9 @@ func (s *Session) Close() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.stopChannels(ctx); err != nil {
+			s.closeErr = err
+		}
+		if err := s.closeDevNetwork(ctx); err != nil && s.closeErr == nil {
 			s.closeErr = err
 		}
 		for _, secret := range []string{"session.env", "apt-proxy.conf"} {

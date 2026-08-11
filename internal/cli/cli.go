@@ -431,16 +431,17 @@ func (a *app) firewall(ctx context.Context, args []string) error {
 		iface := fs.String("interface", "", "detected container network interface")
 		subnet := fs.String("subnet", "", "detected container subnet")
 		gateway := fs.String("gateway", "", "detected container gateway")
+		ipv6Subnet := fs.String("ipv6-subnet", "", "detected container IPv6 subnet")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
 		var n firewall.Network
 		var err error
-		if *iface != "" || *subnet != "" || *gateway != "" {
-			if *iface == "" || *subnet == "" || *gateway == "" {
-				return fmt.Errorf("--interface, --subnet, and --gateway must be specified together")
+		if *iface != "" || *subnet != "" || *gateway != "" || *ipv6Subnet != "" {
+			if *subnet == "" || *gateway == "" || *ipv6Subnet == "" {
+				return fmt.Errorf("--subnet, --gateway, and --ipv6-subnet must be specified together")
 			}
-			n = firewall.Network{Interface: *iface, Subnet: *subnet, Gateway: *gateway}
+			n = firewall.Network{Interface: *iface, Subnet: *subnet, Gateway: *gateway, IPv6Subnet: *ipv6Subnet}
 		} else {
 			n, err = firewall.Detect(ctx, a.store.Root, "")
 			if err != nil {

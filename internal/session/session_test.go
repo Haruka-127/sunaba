@@ -92,6 +92,64 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	}
 }
 
+func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	cfg.Mode = "dev"
+	canonical, err := state.ResolveProjectPath(cfg.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	verified, closed := 0, 0
+	cfg.DevNetworkVerify = func(context.Context) error { verified++; return nil }
+	cfg.DevNetworkClose = func(context.Context) error { closed++; return nil }
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified != 1 || fake.spec.NoDNS || len(fake.spec.Networks) != 1 || fake.spec.Networks[0] != cfg.DevNetworkName || fake.spec.Labels["dev.sunaba.mode"] != "dev" {
+		t.Fatalf("dev boundary was not bound: verified=%d spec=%+v", verified, fake.spec)
+	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if verified != 2 {
+		t.Fatalf("resume verification count=%d", verified)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if closed != 1 {
+		t.Fatalf("dev boundary close count=%d", closed)
+	}
+	if err := s.Close(); err != nil || closed != 1 {
+		t.Fatalf("close was not idempotent: count=%d error=%v", closed, err)
+	}
+}
+
+func TestDevSessionFailsClosedWhenBoundaryVerificationFails(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	cfg.Mode = "dev"
+	canonical, err := state.ResolveProjectPath(cfg.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	closed := 0
+	cfg.DevNetworkVerify = func(context.Context) error { return errors.New("injected firewall mismatch") }
+	cfg.DevNetworkClose = func(context.Context) error { closed++; return nil }
+	if _, err := Start(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "boundary verification") {
+		t.Fatalf("verification error=%v", err)
+	}
+	current, _ := fake.ContainerState(context.Background(), "")
+	if current != runtime.StateNotFound || closed != 1 {
+		t.Fatalf("failed dev start created VM or retained network: state=%s closed=%d", current, closed)
+	}
+}
+
 func TestPauseFailsClosedWhenAuditCannotAppend(t *testing.T) {
 	cfg, fake := sessionFixture(t)
 	s, err := Start(context.Background(), cfg)

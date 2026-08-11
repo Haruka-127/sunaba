@@ -24,6 +24,8 @@ var secureIdentityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127
 type SecureSessionPolicy struct {
 	ProjectID   string `json:"project_id"`
 	SessionID   string `json:"session_id"`
+	Mode        string `json:"mode"`
+	NetworkName string `json:"network_name,omitempty"`
 	Image       string `json:"image"`
 	SessionRoot string `json:"session_root"`
 	CPUs        int    `json:"cpus"`
@@ -55,6 +57,19 @@ func (p SecureSessionPolicy) canonical() (SecureSessionPolicy, error) {
 	}
 	if p.Image == "" {
 		return SecureSessionPolicy{}, fmt.Errorf("secure session image is required")
+	}
+	if p.Mode == "" {
+		p.Mode = "secure"
+	}
+	if p.Mode != "secure" && p.Mode != "dev" {
+		return SecureSessionPolicy{}, fmt.Errorf("session mode must be secure or dev")
+	}
+	wantNetwork := ""
+	if p.Mode == "dev" {
+		wantNetwork = "sunaba-" + p.ProjectID + "-" + p.SessionID + "-net"
+	}
+	if p.NetworkName != wantNetwork {
+		return SecureSessionPolicy{}, fmt.Errorf("session network does not match mode and identity")
 	}
 	if p.CPUs <= 0 || p.Memory == "" || p.DiskBytes < 64<<20 || p.ProcessMax <= 0 || p.FileSizeMax != p.DiskBytes || p.OpenFileMax <= 0 {
 		return SecureSessionPolicy{}, fmt.Errorf("secure session resource policy is invalid")
@@ -105,8 +120,11 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 			return fmt.Errorf("secure session limit %q does not match host policy", name)
 		}
 	}
-	if len(spec.Networks) != 1 || spec.Networks[0] != "none" || !spec.NoDNS {
+	if canonical.Mode == "secure" && (len(spec.Networks) != 1 || spec.Networks[0] != "none" || !spec.NoDNS) {
 		return fmt.Errorf("secure session requires exactly --network none and --no-dns")
+	}
+	if canonical.Mode == "dev" && (len(spec.Networks) != 1 || spec.Networks[0] != canonical.NetworkName || spec.NoDNS) {
+		return fmt.Errorf("dev session requires its exact dedicated network with DNS enabled")
 	}
 	if len(spec.EnvFiles) != 0 {
 		return fmt.Errorf("secure session does not accept environment files")
@@ -174,7 +192,7 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 		"dev.sunaba.owner":         "sunaba-supervisor",
 		"dev.sunaba.project":       canonical.ProjectID,
 		"dev.sunaba.session":       canonical.SessionID,
-		"dev.sunaba.mode":          "secure",
+		"dev.sunaba.mode":          canonical.Mode,
 		"dev.sunaba.policy-digest": digest,
 	}
 	for key, expected := range requiredLabels {

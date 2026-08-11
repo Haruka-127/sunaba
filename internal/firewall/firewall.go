@@ -24,9 +24,10 @@ const (
 )
 
 type Network struct {
-	Interface string `json:"interface"`
-	Subnet    string `json:"subnet"`
-	Gateway   string `json:"gateway"`
+	Interface  string `json:"interface,omitempty"`
+	Subnet     string `json:"subnet"`
+	Gateway    string `json:"gateway"`
+	IPv6Subnet string `json:"ipv6_subnet"`
 }
 
 type livePFState struct {
@@ -47,17 +48,29 @@ type fileSnapshot struct {
 }
 
 func GenerateRules(n Network) string {
-	return fmt.Sprintf(`# Managed by sunaba. Do not edit.
-pass in quick on %s inet proto udp from any port 68 to any port 67
-pass in quick on %s inet proto { tcp udp } from %s to %s port 53
-pass in quick on %s inet proto tcp from %s to self flags A/A
-block drop in quick on %s inet from %s to self
-block drop in quick on %s inet6 from any to self
-`, n.Interface, n.Interface, n.Subnet, n.Gateway, n.Interface, n.Subnet, n.Interface, n.Subnet, n.Interface)
+	private4 := []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4"}
+	private6 := []string{"::/128", "::1/128", "64:ff9b:1::/48", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8"}
+	var rules strings.Builder
+	rules.WriteString("# Managed by sunaba. Do not edit.\n")
+	fmt.Fprintf(&rules, "pass in quick inet proto udp from %s port 68 to any port 67 keep state\n", n.Subnet)
+	fmt.Fprintf(&rules, "pass in quick inet proto { tcp udp } from %s to %s port 53 keep state\n", n.Subnet, n.Gateway)
+	fmt.Fprintf(&rules, "block drop in quick inet from %s to self\n", n.Subnet)
+	for _, destination := range private4 {
+		fmt.Fprintf(&rules, "block drop in quick inet from %s to %s\n", n.Subnet, destination)
+	}
+	fmt.Fprintf(&rules, "pass in quick inet from %s to any keep state\n", n.Subnet)
+	fmt.Fprintf(&rules, "block drop out quick inet from any to %s\n", n.Subnet)
+	fmt.Fprintf(&rules, "block drop in quick inet6 from %s to self\n", n.IPv6Subnet)
+	for _, destination := range private6 {
+		fmt.Fprintf(&rules, "block drop in quick inet6 from %s to %s\n", n.IPv6Subnet, destination)
+	}
+	fmt.Fprintf(&rules, "pass in quick inet6 from %s to any keep state\n", n.IPv6Subnet)
+	fmt.Fprintf(&rules, "block drop out quick inet6 from any to %s\n", n.IPv6Subnet)
+	return rules.String()
 }
 
 func ValidateNetwork(n Network) error {
-	if !regexp.MustCompile(`^[a-zA-Z0-9]+$`).MatchString(n.Interface) {
+	if n.Interface != "" && !regexp.MustCompile(`^[a-zA-Z0-9]+$`).MatchString(n.Interface) {
 		return fmt.Errorf("invalid network interface %q", n.Interface)
 	}
 	subnetIP, _, err := net.ParseCIDR(n.Subnet)
@@ -69,6 +82,10 @@ func ValidateNetwork(n Network) error {
 	}
 	if ip := net.ParseIP(n.Gateway); ip == nil || ip.To4() == nil {
 		return fmt.Errorf("invalid network gateway %q", n.Gateway)
+	}
+	ipv6, parsed6, err := net.ParseCIDR(n.IPv6Subnet)
+	if err != nil || ipv6.To4() != nil || parsed6.String() != n.IPv6Subnet {
+		return fmt.Errorf("invalid network IPv6 subnet %q", n.IPv6Subnet)
 	}
 	return nil
 }
@@ -284,8 +301,8 @@ func parseLivePFState(info, mainRules, childRules, configuredRules string, n Net
 		MainAnchor: strings.Contains(mainRules, `anchor "sunaba"`),
 		IPv4Block: hasConfiguredBlockRule(configuredRules, n.Interface, "inet", n.Subnet) &&
 			hasLiveBlockRule(childRules, n.Interface, "inet", n.Subnet),
-		IPv6Block: hasConfiguredBlockRule(configuredRules, n.Interface, "inet6", "any") &&
-			hasLiveBlockRule(childRules, n.Interface, "inet6", "any"),
+		IPv6Block: hasConfiguredBlockRule(configuredRules, n.Interface, "inet6", n.IPv6Subnet) &&
+			hasLiveBlockRule(childRules, n.Interface, "inet6", n.IPv6Subnet),
 	}
 }
 
@@ -300,11 +317,13 @@ func hasLiveBlockRule(rules, iface, family, source string) bool {
 func findBlockRule(rules, iface, family, source string, requireSelf bool) bool {
 	for _, line := range strings.Split(rules, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 10 || fields[0] != "block" || fields[1] != "drop" {
+		if len(fields) < 7 || fields[0] != "block" || fields[1] != "drop" {
 			continue
 		}
-		matches := containsFieldSequence(fields, "on", iface) &&
-			containsFieldSequence(fields, family, "from", source)
+		matches := containsFieldSequence(fields, family, "from", source)
+		if iface != "" {
+			matches = matches && containsFieldSequence(fields, "on", iface)
+		}
 		if requireSelf {
 			matches = matches && (containsFieldSequence(fields, "to", "self") || containsFieldSequence(fields, "to", "(self)"))
 		}
@@ -352,7 +371,10 @@ func rerunEnableWithSudo(n Network) error {
 	if err != nil {
 		return err
 	}
-	args := []string{exe, "firewall", "enable", "--interface", n.Interface, "--subnet", n.Subnet, "--gateway", n.Gateway}
+	args := []string{exe, "firewall", "enable", "--subnet", n.Subnet, "--gateway", n.Gateway, "--ipv6-subnet", n.IPv6Subnet}
+	if n.Interface != "" {
+		args = append(args, "--interface", n.Interface)
+	}
 	cmd := exec.Command("sudo", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -460,7 +482,7 @@ func networkInspect(ctx context.Context) (Network, bool) {
 	if err := json.Unmarshal(out, &arr); err != nil || len(arr) == 0 {
 		return Network{}, false
 	}
-	var subnet, gw string
+	var subnet, gw, ipv6Subnet string
 	walk(arr[0], func(k string, v any) {
 		if s, ok := v.(string); ok {
 			switch strings.ToLower(k) {
@@ -468,17 +490,19 @@ func networkInspect(ctx context.Context) (Network, bool) {
 				subnet = strings.ReplaceAll(s, "\\/", "/")
 			case "ipv4gateway":
 				gw = s
+			case "ipv6subnet":
+				ipv6Subnet = strings.ReplaceAll(s, "\\/", "/")
 			}
 		}
 	})
-	if subnet == "" || gw == "" {
+	if subnet == "" || gw == "" || ipv6Subnet == "" {
 		return Network{}, false
 	}
 	iface := interfaceForGateway(ctx, gw)
 	if iface == "" {
 		iface = "bridge100"
 	}
-	return Network{Interface: iface, Subnet: subnet, Gateway: gw}, true
+	return Network{Interface: iface, Subnet: subnet, Gateway: gw, IPv6Subnet: ipv6Subnet}, true
 }
 
 func fromIPAndIfconfig(ctx context.Context, ip string) (Network, bool) {
