@@ -5,7 +5,7 @@ sunaba は、opencode server をプロジェクト専用の apple/container Linu
 ## 前提
 
 - macOS / Apple silicon
-- apple/container 1.0 以上
+- [apple/container 1.2.2](https://github.com/apple/container/releases/tag/1.2.2) 以上
 - `container system start` 済み
 - ホスト側に opencode CLI がインストール済み
 - Go 1.22 以上
@@ -123,7 +123,7 @@ sunaba logs [--dir PATH] [-f]
 
 ## 既知の制限
 
-- apple/container 1.0.0 の `container run` にディスク上限フラグが見当たらないため、ディスクサイズはランタイム既定に従います
+- ディスクサイズは apple/container のランタイム既定に従います
 - LAN 宛て通信は本版では許可のままです
 - ホスト側編集のファイルウォッチイベントがコンテナ内へ即時伝播しない場合があります
 - `sunaba update` は GitHub API のレート制限を受ける場合があります。その場合は `--opencode-version` を指定してください
@@ -140,7 +140,7 @@ scripts/verify.sh
 
 ```sh
 SUNABA_FULL_VERIFY=1 \
-SUNABA_PREVIOUS_OPENCODE_VERSION=1.17.12 \
+SUNABA_PREVIOUS_OPENCODE_VERSION=1.18.15 \
 scripts/verify.sh
 ```
 

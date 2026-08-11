@@ -17,6 +17,8 @@ type Health struct {
 	Version string `json:"version"`
 }
 
+const minimumAppleContainerVersion = "1.2.2"
+
 func CheckPrerequisites(ctx context.Context) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("sunaba requires macOS with apple/container; current OS is %s", runtime.GOOS)
@@ -41,18 +43,25 @@ func CheckPrerequisites(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("cannot determine apple/container version: %w", err)
 	}
-	containerVersion := firstSemanticVersion(containerVersionOutput)
-	if containerVersion == "" {
-		return fmt.Errorf("cannot parse apple/container version from %q", containerVersionOutput)
-	}
-	if CompareVersion(containerVersion, "1.0.0") < 0 {
-		return fmt.Errorf("sunaba requires apple/container 1.0 or later; current version is %s", containerVersion)
+	if err := validateAppleContainerVersion(containerVersionOutput); err != nil {
+		return err
 	}
 	c, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(c, "container", "system", "status").CombinedOutput()
 	if err != nil || !strings.Contains(strings.ToLower(string(out)), "running") {
 		return fmt.Errorf("container system is not running. Run 'container system start'")
+	}
+	return nil
+}
+
+func validateAppleContainerVersion(output string) error {
+	containerVersion := firstSemanticVersion(output)
+	if containerVersion == "" {
+		return fmt.Errorf("cannot parse apple/container version from %q", output)
+	}
+	if CompareVersion(containerVersion, minimumAppleContainerVersion) < 0 {
+		return fmt.Errorf("sunaba requires apple/container %s or later; current version is %s. Upgrade apple/container, then run 'container system start'", minimumAppleContainerVersion, containerVersion)
 	}
 	return nil
 }

@@ -24,7 +24,7 @@
 実行(検証)に必要な環境:
 
 - macOS 26 以降 / Apple silicon
-- [apple/container](https://github.com/apple/container) 1.0 以上がインストール済みで、`container system start` 済み
+- [apple/container](https://github.com/apple/container) 1.2.2 以上がインストール済みで、`container system start` 済み
 - ホストに opencode CLI/TUI がインストール済み(`opencode` コマンドが PATH にある。デスクトップ版は使用しない)
 - Go 1.22 以上
 
@@ -94,7 +94,7 @@
 {
   "path": "/Users/alice/work/myapp",
   "container": "sunaba-a1b2c3d4e5f6",
-  "image_version": "1.17.13",
+  "image_version": "1.18.16",
   "cpus": 4,
   "memory": "8g",
   "proxy": "",
@@ -168,7 +168,7 @@ serverを**非rootで実行する**こと(設計文書の脅威モデルとの�
 }
 ```
 
-- opencode 1.17.13 時点では `permission: "allow"` で全権限を一括許可できる。目的は「隔離環境内では許可プロンプトが一切出ない」状態(設計文書: 常時自動承認)
+- opencode 1.18.16 時点では `permission: "allow"` で全権限を一括許可できる。目的は「隔離環境内では許可プロンプトが一切出ない」状態(設計文書: 常時自動承認)
 - 補助手段として環境変数 `OPENCODE_PERMISSION`(インラインJSON)も利用可。設定ファイルで不足する場合に併用する
 - 検証方法: attach したTUIでファイル編集・bash実行を指示し、許可プロンプトが出ないこと
 

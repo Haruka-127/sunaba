@@ -12,10 +12,10 @@ func TestCompareVersion(t *testing.T) {
 		a, b string
 		want int
 	}{
-		{"1.17.13", "1.17.13", 0},
-		{"v1.17.14", "1.17.13", 1},
-		{"1.18.0", "1.17.99", 1},
-		{"1.17.12", "1.17.13", -1},
+		{"1.18.16", "1.18.16", 0},
+		{"v1.18.17", "1.18.16", 1},
+		{"1.19.0", "1.18.99", 1},
+		{"1.18.15", "1.18.16", -1},
 	}
 	for _, tc := range cases {
 		if got := CompareVersion(tc.a, tc.b); got != tc.want {
@@ -26,13 +26,33 @@ func TestCompareVersion(t *testing.T) {
 
 func TestFirstSemanticVersion(t *testing.T) {
 	for input, want := range map[string]string{
-		"container CLI version 1.0.0 (build: release)": "1.0.0",
+		"container CLI version 1.2.2 (build: release)": "1.2.2",
 		"v2.3":    "2.3",
 		"unknown": "",
 	} {
 		if got := firstSemanticVersion(input); got != want {
 			t.Fatalf("firstSemanticVersion(%q)=%q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestValidateAppleContainerVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{name: "minimum", output: "container CLI version 1.2.2 (build: release)"},
+		{name: "newer", output: "container CLI version 1.3.0 (build: release)"},
+		{name: "too old", output: "container CLI version 1.2.1 (build: release)", wantErr: true},
+		{name: "invalid", output: "container CLI version unknown", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAppleContainerVersion(tc.output)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateAppleContainerVersion(%q) error = %v, wantErr %v", tc.output, err, tc.wantErr)
+			}
+		})
 	}
 }
 
