@@ -166,6 +166,72 @@ func TestSessionBindsOptionalGitGatewayToLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionBindsOptionalWebGatewayAndProxyEnvironmentToLifecycle(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	closed := false
+	cfg.WebToken = strings.Repeat("w", 43)
+	cfg.WebGateway = http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(response, "web-gateway")
+	})
+	cfg.WebGatewayClose = func() error { closed = true; return nil }
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.spec.Mounts) != 2 || fake.spec.Mounts[1].Target != runtime.SecureWebGatewayGuestPath {
+		t.Fatalf("Web Gateway mount=%+v", fake.spec.Mounts)
+	}
+	for _, expected := range []string{"127.0.0.1:4343", "HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343", "NO_PROXY=127.0.0.1,localhost", "APT_CONFIG=/run/sunaba/apt-proxy.conf"} {
+		if !strings.Contains(fake.setup, expected) {
+			t.Fatalf("Web guest setup missing %q: %s", expected, fake.setup)
+		}
+	}
+	if strings.Contains(fake.setup, cfg.WebToken) {
+		t.Fatal("guest setup command leaked Web capability")
+	}
+	aptConfig, err := os.ReadFile(filepath.Join(s.Root, "apt-proxy.conf"))
+	if err != nil || !strings.Contains(string(aptConfig), cfg.WebToken) {
+		t.Fatalf("bounded apt config was not created: error=%v data=%q", err, aptConfig)
+	}
+	client := sessionUnixHTTPClient(filepath.Join(s.Root, "web-gateway.sock"))
+	request, _ := http.NewRequest(http.MethodGet, "http://sunaba/test", nil)
+	response, err := client.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("active Web Gateway response=%v error=%v", response, err)
+	}
+	_ = response.Body.Close()
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response, err = client.Do(request.Clone(context.Background()))
+	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("paused Web Gateway response=%v error=%v", response, err)
+	}
+	_ = response.Body.Close()
+	if err := s.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !closed {
+		t.Fatal("session end did not revoke the Web Gateway")
+	}
+	if _, err := os.Lstat(filepath.Join(s.Root, "apt-proxy.conf")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("host apt capability file remained: %v", err)
+	}
+}
+
+func TestSessionRejectsReusedWebCapability(t *testing.T) {
+	cfg, _ := sessionFixture(t)
+	cfg.WebGateway = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	cfg.WebGatewayClose = func() error { return nil }
+	cfg.WebToken = cfg.ModelToken
+	if _, err := Start(context.Background(), cfg); err == nil {
+		t.Fatal("reused Model/Web capability was accepted")
+	}
+}
+
 func sessionUnixHTTPClient(socketPath string) *http.Client {
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)

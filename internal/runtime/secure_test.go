@@ -70,6 +70,34 @@ func TestSecureSessionPolicyRejectsSymlinkRoot(t *testing.T) {
 	}
 }
 
+func TestValidateSecureSessionSpecBindsOptionalWebGateway(t *testing.T) {
+	policy, spec, closeModel := secureFixture(t)
+	defer closeModel()
+	webPath := filepath.Join(policy.SessionRoot, "web-gateway.sock")
+	webListener, err := net.Listen("unix", webPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer webListener.Close()
+	if err := os.Chmod(webPath, 0600); err != nil {
+		t.Fatal(err)
+	}
+	policy.WebGateway = true
+	spec.Mounts = append(spec.Mounts, Mount{Type: "socket", Source: webPath, Target: SecureWebGatewayGuestPath})
+	digest, err := policy.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.Labels["dev.sunaba.policy-digest"] = digest
+	if err := ValidateSecureSessionSpec(spec, policy); err != nil {
+		t.Fatal(err)
+	}
+	spec.Mounts[1].Source = filepath.Join(policy.SessionRoot, "other.sock")
+	if err := ValidateSecureSessionSpec(spec, policy); err == nil {
+		t.Fatal("unbound Web Gateway socket was accepted")
+	}
+}
+
 func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 	t.Helper()
 	parent, err := os.MkdirTemp("/private/tmp", "sunaba-secure-test-")

@@ -60,6 +60,9 @@ type Config struct {
 	GitGateway       http.Handler
 	GitToken         string
 	GitGatewayClose  func() error
+	WebGateway       http.Handler
+	WebToken         string
+	WebGatewayClose  func() error
 	ServerPassword   string
 	LeaseTTL         time.Duration
 	Audit            *audit.Recorder
@@ -86,6 +89,8 @@ type Session struct {
 	gatewayDone      chan error
 	gitGatewayServer *http.Server
 	gitGatewayDone   chan error
+	webGatewayServer *http.Server
+	webGatewayDone   chan error
 	gatewayActive    atomic.Bool
 	attachCancel     context.CancelFunc
 	attachDone       <-chan error
@@ -93,6 +98,7 @@ type Session struct {
 	paused           bool
 	closeOnce        sync.Once
 	gitCloseOnce     sync.Once
+	webCloseOnce     sync.Once
 	closeErr         error
 }
 
@@ -159,7 +165,8 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	policy := runtime.SecureSessionPolicy{
 		ProjectID: s.ProjectID, SessionID: s.SessionID, Image: cfg.Image, SessionRoot: s.Root,
 		CPUs: cfg.CPUs, Memory: cfg.Memory, DiskBytes: cfg.DiskBytes,
-		ProcessMax: cfg.ProcessMax, FileSizeMax: cfg.FileSizeMax, OpenFileMax: cfg.OpenFileMax, GitGateway: cfg.GitGateway != nil,
+		ProcessMax: cfg.ProcessMax, FileSizeMax: cfg.FileSizeMax, OpenFileMax: cfg.OpenFileMax,
+		GitGateway: cfg.GitGateway != nil, WebGateway: cfg.WebGateway != nil,
 	}
 	policyDigest, err := policy.Digest()
 	if err != nil {
@@ -168,6 +175,9 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	mounts := []runtime.Mount{{Type: "socket", Source: filepath.Join(s.Root, "model-gateway.sock"), Target: runtime.SecureGatewayGuestPath}}
 	if cfg.GitGateway != nil {
 		mounts = append(mounts, runtime.Mount{Type: "socket", Source: filepath.Join(s.Root, "git-gateway.sock"), Target: runtime.SecureGitGatewayGuestPath})
+	}
+	if cfg.WebGateway != nil {
+		mounts = append(mounts, runtime.Mount{Type: "socket", Source: filepath.Join(s.Root, "web-gateway.sock"), Target: runtime.SecureWebGatewayGuestPath})
 	}
 	spec := runtime.ContainerSpec{
 		Name: s.Container, Image: cfg.Image, CPUs: cfg.CPUs, Memory: cfg.Memory,
@@ -221,6 +231,11 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 			return nil, err
 		}
 	}
+	if cfg.WebGateway != nil {
+		if err := s.emit("capability.activated", "web"); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.emit("session.ready", health.Version); err != nil {
 		return nil, err
 	}
@@ -261,6 +276,9 @@ func validateConfig(cfg Config) error {
 	if (cfg.GitGateway == nil) != (cfg.GitToken == "") || (cfg.GitGateway == nil) != (cfg.GitGatewayClose == nil) || (cfg.GitGateway != nil && (!secretPattern.MatchString(cfg.GitToken) || cfg.GitToken == cfg.ModelToken || cfg.GitToken == cfg.ServerPassword)) {
 		return fmt.Errorf("optional Git Gateway requires a distinct high-entropy capability")
 	}
+	if (cfg.WebGateway == nil) != (cfg.WebToken == "") || (cfg.WebGateway == nil) != (cfg.WebGatewayClose == nil) || (cfg.WebGateway != nil && (!secretPattern.MatchString(cfg.WebToken) || cfg.WebToken == cfg.ModelToken || cfg.WebToken == cfg.ServerPassword || cfg.WebToken == cfg.GitToken)) {
+		return fmt.Errorf("optional Web Gateway requires a distinct high-entropy capability")
+	}
 	if cfg.Audit == nil || filepath.Clean(cfg.Audit.Root) != filepath.Join(filepath.Clean(cfg.Store.Root), "audit") {
 		return fmt.Errorf("secure session requires its host audit recorder under the state store")
 	}
@@ -294,6 +312,16 @@ func (s *Session) startGateway() error {
 		}
 		s.gitGatewayServer, s.gitGatewayDone = server, done
 		if err := s.emit("git_gateway.started", ""); err != nil {
+			return err
+		}
+	}
+	if s.cfg.WebGateway != nil {
+		server, done, err = s.startUnixGateway("web-gateway.sock", s.cfg.WebGateway)
+		if err != nil {
+			return err
+		}
+		s.webGatewayServer, s.webGatewayDone = server, done
+		if err := s.emit("web_gateway.started", ""); err != nil {
 			return err
 		}
 	}
@@ -357,6 +385,11 @@ func (s *Session) Pause(ctx context.Context) error {
 	}
 	if s.cfg.GitGateway != nil {
 		if err := s.emit("capability.paused", "git"); err != nil {
+			pauseErr = errors.Join(pauseErr, err)
+		}
+	}
+	if s.cfg.WebGateway != nil {
+		if err := s.emit("capability.paused", "web"); err != nil {
 			pauseErr = errors.Join(pauseErr, err)
 		}
 	}
@@ -427,6 +460,11 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 			return err
 		}
 	}
+	if s.cfg.WebGateway != nil {
+		if err := s.emit("capability.activated", "web"); err != nil {
+			return err
+		}
+	}
 	if err := s.emit("session.resumed", health.Version); err != nil {
 		return err
 	}
@@ -446,6 +484,9 @@ func (s *Session) resumeGuest(ctx context.Context) error {
 	}
 	if s.cfg.GitGateway != nil {
 		commands = append(commands, "nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4242 --unix-target /run/sunaba/git-gateway.sock >/run/sunaba/git-relay.log 2>&1 &")
+	}
+	if s.cfg.WebGateway != nil {
+		commands = append(commands, "nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4343 --unix-target /run/sunaba/web-gateway.sock >/run/sunaba/web-relay.log 2>&1 &")
 	}
 	commands = append(commands,
 		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
@@ -471,15 +512,28 @@ func (s *Session) configureGuest(ctx context.Context) error {
 	if s.cfg.GitGateway != nil {
 		environment += "SUNABA_GIT_GATEWAY_TOKEN=" + s.cfg.GitToken + "\n"
 	}
+	if s.cfg.WebGateway != nil {
+		environment += "SUNABA_WEB_GATEWAY_TOKEN=" + s.cfg.WebToken + "\n"
+	}
 	if err := os.WriteFile(envPath, []byte(environment), 0600); err != nil {
 		return err
 	}
-	for _, copy := range [][2]string{
+	copies := [][2]string{
 		{s.SnapshotRoot, "/var/lib/sunaba/lower"},
 		{s.cfg.GuestRelayBinary, "/run/sunaba/guest-relay"},
 		{providerPath, "/run/sunaba/opencode.json"},
 		{envPath, "/run/sunaba/session.env"},
-	} {
+	}
+	if s.cfg.WebGateway != nil {
+		aptConfigPath := filepath.Join(s.Root, "apt-proxy.conf")
+		proxyURL := "http://sunaba:" + s.cfg.WebToken + "@127.0.0.1:4343"
+		aptConfig := "Acquire::http::Proxy \"" + proxyURL + "\";\nAcquire::https::Proxy \"" + proxyURL + "\";\nAcquire::Retries \"0\";\n"
+		if err := os.WriteFile(aptConfigPath, []byte(aptConfig), 0600); err != nil {
+			return err
+		}
+		copies = append(copies, [2]string{aptConfigPath, "/run/sunaba/apt-proxy.conf"})
+	}
+	for _, copy := range copies {
 		if err := s.cfg.Runtime.CopyTo(ctx, s.Container, copy[0], copy[1]); err != nil {
 			return err
 		}
@@ -513,6 +567,13 @@ func (s *Session) configureGuest(ctx context.Context) error {
 			"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4242 --unix-target /run/sunaba/git-gateway.sock >/run/sunaba/git-relay.log 2>&1 &",
 		)
 	}
+	if s.cfg.WebGateway != nil {
+		commands = append(commands,
+			"chmod 0400 /run/sunaba/apt-proxy.conf",
+			"chown 1000:1000 /run/sunaba/apt-proxy.conf",
+			"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4343 --unix-target /run/sunaba/web-gateway.sock >/run/sunaba/web-relay.log 2>&1 &",
+		)
+	}
 	commands = append(commands,
 		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
 		s.guestServerCommand(),
@@ -529,7 +590,11 @@ func (s *Session) guestServerCommand() string {
 	if s.cfg.GitGateway != nil {
 		gitEnvironment = " GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.http://127.0.0.1:4242/.extraHeader GIT_CONFIG_VALUE_0=\"Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN\""
 	}
-	return "nohup runuser -u sunaba-agent -- /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
+	webEnvironment := ""
+	if s.cfg.WebGateway != nil {
+		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
+	}
+	return "nohup runuser -u sunaba-agent -- /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
 }
 
 func (s *Session) verifyGuestResources(ctx context.Context) error {
@@ -692,7 +757,7 @@ func (s *Session) prepareGuestExport(ctx context.Context) error {
 		"sleep 1",
 		"pkill -KILL -u 1000 -f '.*' 2>/dev/null || true",
 		"pkill -KILL guest-relay 2>/dev/null || true",
-		"rm -f /run/sunaba/session.env",
+		"rm -f /run/sunaba/session.env /run/sunaba/apt-proxy.conf",
 		"rm -rf /var/lib/sunaba/merged-export",
 		"mkdir -p /var/lib/sunaba/merged-export",
 		"cp -a --preserve=all " + s.WorkspacePath + "/. /var/lib/sunaba/merged-export/",
@@ -755,6 +820,10 @@ func (s *Session) stopChannels(ctx context.Context) error {
 	var stopErr error
 	stopErr = errors.Join(stopErr, s.stopAttach(ctx))
 	s.gatewayActive.Store(false)
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.webGatewayServer, &s.webGatewayDone, "web_gateway.stopped"))
+	if s.cfg.WebGatewayClose != nil {
+		s.webCloseOnce.Do(func() { stopErr = errors.Join(stopErr, s.cfg.WebGatewayClose()) })
+	}
 	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.gitGatewayServer, &s.gitGatewayDone, "git_gateway.stopped"))
 	if s.cfg.GitGatewayClose != nil {
 		s.gitCloseOnce.Do(func() { stopErr = errors.Join(stopErr, s.cfg.GitGatewayClose()) })
@@ -807,7 +876,7 @@ func (s *Session) Close() error {
 		if err := s.stopChannels(ctx); err != nil {
 			s.closeErr = err
 		}
-		for _, secret := range []string{"session.env"} {
+		for _, secret := range []string{"session.env", "apt-proxy.conf"} {
 			if err := os.Remove(filepath.Join(s.Root, secret)); err != nil && !errors.Is(err, os.ErrNotExist) && s.closeErr == nil {
 				s.closeErr = err
 			}

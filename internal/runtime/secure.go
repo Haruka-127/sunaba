@@ -15,6 +15,7 @@ import (
 const (
 	SecureGatewayGuestPath    = "/run/sunaba/model-gateway.sock"
 	SecureGitGatewayGuestPath = "/run/sunaba/git-gateway.sock"
+	SecureWebGatewayGuestPath = "/run/sunaba/web-gateway.sock"
 	SecureAttachGuestPath     = "/run/sunaba/attach.sock"
 )
 
@@ -32,6 +33,7 @@ type SecureSessionPolicy struct {
 	FileSizeMax int64  `json:"file_size_max"`
 	OpenFileMax int64  `json:"open_file_max"`
 	GitGateway  bool   `json:"git_gateway"`
+	WebGateway  bool   `json:"web_gateway"`
 }
 
 func (p SecureSessionPolicy) Digest() (string, error) {
@@ -122,6 +124,9 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	if canonical.GitGateway {
 		wantMounts = 2
 	}
+	if canonical.WebGateway {
+		wantMounts++
+	}
 	if len(spec.Mounts) != wantMounts {
 		return fmt.Errorf("secure session Gateway socket mount count does not match policy")
 	}
@@ -140,6 +145,16 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 			return fmt.Errorf("secure session Git Gateway mount does not match Project/session policy")
 		}
 		if err := validateHostUnixSocket(gitGatewayPath); err != nil {
+			return err
+		}
+	}
+	if canonical.WebGateway {
+		webGatewayPath := filepath.Join(canonical.SessionRoot, "web-gateway.sock")
+		webMount := spec.Mounts[wantMounts-1]
+		if webMount.Type != "socket" || webMount.Source != webGatewayPath || webMount.Target != SecureWebGatewayGuestPath || webMount.ReadOnly {
+			return fmt.Errorf("secure session Web Gateway mount does not match Project/session policy")
+		}
+		if err := validateHostUnixSocket(webGatewayPath); err != nil {
 			return err
 		}
 	}
