@@ -43,7 +43,7 @@ func TestValidateAppleContainerVersion(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "minimum", output: "container CLI version 1.2.2 (build: release)"},
-		{name: "newer", output: "container CLI version 1.3.0 (build: release)"},
+		{name: "newer", output: "container CLI version 1.3.0 (build: release)", wantErr: true},
 		{name: "too old", output: "container CLI version 1.2.1 (build: release)", wantErr: true},
 		{name: "invalid", output: "container CLI version unknown", wantErr: true},
 	} {
@@ -53,6 +53,22 @@ func TestValidateAppleContainerVersion(t *testing.T) {
 				t.Fatalf("validateAppleContainerVersion(%q) error = %v, wantErr %v", tc.output, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateOpenCodeVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		wantErr bool
+	}{
+		{version: "1.18.16"},
+		{version: "v1.18.16"},
+		{version: "1.18.15", wantErr: true},
+		{version: "2.0.0", wantErr: true},
+	} {
+		if err := validateOpenCodeVersion(tc.version); (err != nil) != tc.wantErr {
+			t.Fatalf("validateOpenCodeVersion(%q) error=%v, wantErr=%t", tc.version, err, tc.wantErr)
+		}
 	}
 }
 

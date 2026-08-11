@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "apple_container": {
+    "version": "1.2.2",
+    "commit": "0190097d06df0b9065f4c2d2c7873c649d81d493"
+  },
+  "opencode": {
+    "version": "1.18.16",
+    "host": {
+      "os": "darwin",
+      "arch": "arm64",
+      "artifact": "opencode-darwin-arm64.zip",
+      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.16/opencode-darwin-arm64.zip",
+      "sha256": "1e670c94341a374824dc6700b6f38b2cb6634baf3ca20e645084c33ce6639320"
+    },
+    "guest": {
+      "os": "linux",
+      "arch": "arm64",
+      "artifact": "opencode-linux-arm64.tar.gz",
+      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.16/opencode-linux-arm64.tar.gz",
+      "sha256": "4fdce5f9bc877d977304d71c0c90ad6e83efa381fe0edf0a61e6142a625e1c41"
+    }
+  }
+}

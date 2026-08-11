@@ -11,13 +11,13 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"sunaba/internal/dependency"
 )
 
 type Health struct {
 	Version string `json:"version"`
 }
-
-const minimumAppleContainerVersion = "1.2.2"
 
 func CheckPrerequisites(ctx context.Context) error {
 	if runtime.GOOS != "darwin" {
@@ -37,7 +37,14 @@ func CheckPrerequisites(ctx context.Context) error {
 		return fmt.Errorf("container CLI not found. Install apple/container, then run 'container system start'")
 	}
 	if _, err := exec.LookPath("opencode"); err != nil {
-		return fmt.Errorf("opencode CLI not found. Install OpenCode CLI; desktop app is not sufficient")
+		return fmt.Errorf("opencode CLI %s not found", dependency.OpenCodeVersion)
+	}
+	hostVersion, err := HostVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot determine host OpenCode version: %w", err)
+	}
+	if err := validateOpenCodeVersion(hostVersion); err != nil {
+		return err
 	}
 	containerVersionOutput, err := commandOutput(ctx, 10*time.Second, "container", "--version")
 	if err != nil {
@@ -60,8 +67,16 @@ func validateAppleContainerVersion(output string) error {
 	if containerVersion == "" {
 		return fmt.Errorf("cannot parse apple/container version from %q", output)
 	}
-	if CompareVersion(containerVersion, minimumAppleContainerVersion) < 0 {
-		return fmt.Errorf("sunaba requires apple/container %s or later; current version is %s. Upgrade apple/container, then run 'container system start'", minimumAppleContainerVersion, containerVersion)
+	if CompareVersion(containerVersion, dependency.AppleContainerVersion) != 0 {
+		return fmt.Errorf("sunaba requires exact apple/container %s; current version is %s", dependency.AppleContainerVersion, containerVersion)
+	}
+	return nil
+}
+
+func validateOpenCodeVersion(output string) error {
+	version := strings.TrimPrefix(strings.TrimSpace(output), "v")
+	if version != dependency.OpenCodeVersion {
+		return fmt.Errorf("sunaba requires exact OpenCode %s for host TUI and guest server; current host version is %s", dependency.OpenCodeVersion, version)
 	}
 	return nil
 }

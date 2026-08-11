@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"sunaba/internal/audit"
+	"sunaba/internal/dependency"
 	"sunaba/internal/firewall"
 	"sunaba/internal/image"
 	"sunaba/internal/opencode"
@@ -187,13 +188,9 @@ func (a *app) update(ctx context.Context, args []string) error {
 	if err := a.store.Init(); err != nil {
 		return err
 	}
-	v := *version
-	var err error
-	if v == "" {
-		v, err = image.LatestVersion(ctx)
-		if err != nil {
-			return err
-		}
+	v := dependency.OpenCodeVersion
+	if *version != "" && *version != v {
+		return fmt.Errorf("OpenCode version %q is not permitted; dependency contract pins %s", *version, v)
 	}
 	if err := image.Build(ctx, a.rt, v); err != nil {
 		return err
