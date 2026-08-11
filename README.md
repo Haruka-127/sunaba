@@ -27,7 +27,7 @@ dev modeは明示選択です。activeなAgent Session中だけ専用Apple Conta
 ```sh
 mkdir -p bin
 go build -trimpath -o bin/sunaba ./cmd/sunaba
-go build -trimpath -o bin/sunaba-guest-relay ./cmd/sunaba-guest-relay
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o bin/sunaba-guest-relay ./cmd/sunaba-guest-relay
 go build -trimpath -o bin/sunaba-git-hook ./cmd/sunaba-git-hook
 ```
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -33,6 +34,28 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		if strings.Contains(text, obsolete) {
 			t.Fatalf("help retained obsolete prototype behavior %q", obsolete)
 		}
+	}
+}
+
+func TestGuestRelayRequiresLinuxAArch64ELF(t *testing.T) {
+	header := make([]byte, 64)
+	copy(header, []byte{0x7f, 'E', 'L', 'F'})
+	header[4], header[5], header[6] = 2, 1, 1
+	binary.LittleEndian.PutUint16(header[16:18], 2)
+	binary.LittleEndian.PutUint16(header[18:20], 183)
+	binary.LittleEndian.PutUint32(header[20:24], 1)
+	binary.LittleEndian.PutUint16(header[52:54], 64)
+	binary.LittleEndian.PutUint16(header[54:56], 56)
+	binary.LittleEndian.PutUint16(header[58:60], 64)
+	path := filepath.Join(t.TempDir(), "guest-relay")
+	if err := os.WriteFile(path, header, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGuestRelay(path); err != nil {
+		t.Fatalf("valid ELF/AArch64 header rejected: %v", err)
+	}
+	if err := validateGuestRelay("/bin/sh"); err == nil {
+		t.Fatal("host shell was accepted as the Linux/AArch64 guest relay")
 	}
 }
 

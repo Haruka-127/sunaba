@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"debug/elf"
 	"errors"
 	"flag"
 	"fmt"
@@ -108,6 +109,9 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if err != nil {
 		return nil, err
 	}
+	if err := validateGuestRelay(guestRelay); err != nil {
+		return nil, err
+	}
 	gateways, err := a.configureGateways(ctx, projectPolicy, projectState, runtimeBase, vmID, sessionID, expiresAt, recorder)
 	if err != nil {
 		return nil, err
@@ -157,6 +161,18 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		active: active, projectPolicy: projectPolicy, projectState: projectState, runtimeBase: runtimeBase,
 		serverPassword: serverPassword, expiresAt: expiresAt, gitBroker: gateways.gitBroker,
 	}, nil
+}
+
+func validateGuestRelay(path string) error {
+	file, err := elf.Open(path)
+	if err != nil {
+		return fmt.Errorf("guest relay must be a Linux ELF/AArch64 executable: %w", err)
+	}
+	defer file.Close()
+	if file.Class != elf.ELFCLASS64 || file.Data != elf.ELFDATA2LSB || file.Machine != elf.EM_AARCH64 || (file.Type != elf.ET_EXEC && file.Type != elf.ET_DYN) {
+		return fmt.Errorf("guest relay must be a 64-bit little-endian Linux ELF/AArch64 executable")
+	}
+	return nil
 }
 
 func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {

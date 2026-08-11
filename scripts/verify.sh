@@ -9,7 +9,7 @@ export GOCACHE="$VERIFY_TMP/gocache"
 
 cleanup() {
 	chmod -R u+w "$VERIFY_TMP" 2>/dev/null || true
-  rm -rf "$VERIFY_TMP"
+	rm -rf "$VERIFY_TMP"
 }
 trap cleanup EXIT
 
@@ -27,8 +27,11 @@ go test -race ./...
 go vet ./...
 mkdir -p bin
 go build -trimpath -o bin/sunaba ./cmd/sunaba
-go build -trimpath -o bin/sunaba-guest-relay ./cmd/sunaba-guest-relay
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o bin/sunaba-guest-relay ./cmd/sunaba-guest-relay
 go build -trimpath -o bin/sunaba-git-hook ./cmd/sunaba-git-hook
+GUEST_RELAY_FILE="$(file bin/sunaba-guest-relay)"
+grep -Fq 'ELF 64-bit' <<<"$GUEST_RELAY_FILE" || fail guest-relay 'not a Linux ELF binary'
+grep -Eq 'ARM aarch64|ARM64' <<<"$GUEST_RELAY_FILE" || fail guest-relay 'not an AArch64 binary'
 pass "unit/race/vet/build"
 
 HELP="$(./bin/sunaba help)"
@@ -67,6 +70,7 @@ command -v opencode >/dev/null || fail integration 'opencode CLI not found'
 SUNABA_PHASE0_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase0' -count=1 -v
 SUNABA_PHASE1_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase1' -count=1 -v
 SUNABA_PHASE2_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase2' -count=1 -v
+SUNABA_CLI_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPublicCLI' -count=1 -v
 SUNABA_PHASE3_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase3' -count=1 -v
 SUNABA_PHASE4_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase4WebGatewayInAgentVM' -count=1 -v
 pass "Phase 0-4 isolated integration"
