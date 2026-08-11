@@ -52,18 +52,38 @@ func TestGenerateRules(t *testing.T) {
 	}
 }
 
+func TestGenerateQuiescedRulesDeniesAllDevSourceTraffic(t *testing.T) {
+	n := Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
+	rules := GenerateQuiescedRules(n)
+	for _, item := range []struct{ family, source string }{{"inet", n.Subnet}, {"inet6", n.IPv6Subnet}} {
+		if !hasBlockToAny(rules, item.family, item.source) {
+			t.Fatalf("missing deny-all %s rule: %s", item.family, rules)
+		}
+	}
+	if strings.Contains(rules, "pass ") || strings.Contains(rules, "keep state") {
+		t.Fatalf("quiesced rules retained an egress pass: %s", rules)
+	}
+	if hasBlockToAny(rules, "inet", "192.168.66.0/24") {
+		t.Fatal("quiesced parser accepted a different source subnet")
+	}
+}
+
 func TestGeneratedRulesAcceptedByPF(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("pfctl is only available on macOS")
 	}
-	path := filepath.Join(t.TempDir(), "sunaba.rules")
-	rules := GenerateRules(Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"})
-	if err := os.WriteFile(path, []byte(rules), 0600); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command("/sbin/pfctl", "-a", "sunaba", "-nf", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("pfctl rejected generated rules: %v: %s", err, out)
+	n := Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
+	for name, rules := range map[string]string{"active": GenerateRules(n), "quiesced": GenerateQuiescedRules(n)} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "sunaba.rules")
+			if err := os.WriteFile(path, []byte(rules), 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("/sbin/pfctl", "-a", "sunaba", "-nf", path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("pfctl rejected generated rules: %v: %s", err, out)
+			}
+		})
 	}
 }
 

@@ -69,6 +69,10 @@ func GenerateRules(n Network) string {
 	return rules.String()
 }
 
+func GenerateQuiescedRules(n Network) string {
+	return fmt.Sprintf("# Managed by sunaba. Dev export is quiesced. Do not edit.\nblock drop in quick inet from %s to any\nblock drop out quick inet from any to %s\nblock drop in quick inet6 from %s to any\nblock drop out quick inet6 from any to %s\n", n.Subnet, n.Subnet, n.IPv6Subnet, n.IPv6Subnet)
+}
+
 func ValidateNetwork(n Network) error {
 	if n.Interface != "" && !regexp.MustCompile(`^[a-zA-Z0-9]+$`).MatchString(n.Interface) {
 		return fmt.Errorf("invalid network interface %q", n.Interface)
@@ -251,6 +255,80 @@ func Disable(ctx context.Context) error {
 	return nil
 }
 
+// Quiesce atomically replaces an already-installed sunaba anchor with a
+// deny-all policy for the exact dev source subnets. It intentionally refuses
+// to create or repair the main pf anchor; Enable must have established and
+// verified that boundary first.
+func Quiesce(ctx context.Context, n Network) error {
+	if err := ValidateNetwork(n); err != nil {
+		return err
+	}
+	if os.Geteuid() != 0 {
+		return rerunQuiesceWithSudo(n)
+	}
+	conf, err := os.ReadFile(pfConfPath)
+	if err != nil || !HasAnchorBlock(string(conf)) {
+		return fmt.Errorf("refusing to quiesce without the verified sunaba main anchor")
+	}
+	oldAnchor, err := snapshotFile(anchorPath)
+	if err != nil || !oldAnchor.exists {
+		return fmt.Errorf("refusing to quiesce without the active sunaba child anchor")
+	}
+	rollback := func() {
+		_ = restoreFile(anchorPath, oldAnchor)
+		_ = pfctl(context.Background(), "-a", "sunaba", "-f", anchorPath)
+	}
+	if err := writeValidatedFile(anchorPath, []byte(GenerateQuiescedRules(n)), 0644, func(path string) error {
+		return pfctl(ctx, "-a", "sunaba", "-nf", path)
+	}); err != nil {
+		return err
+	}
+	if err := pfctl(ctx, "-a", "sunaba", "-f", anchorPath); err != nil {
+		rollback()
+		return err
+	}
+	if err := verifyQuiesced(ctx, n); err != nil {
+		rollback()
+		return err
+	}
+	return nil
+}
+
+func verifyQuiesced(ctx context.Context, n Network) error {
+	info, err := pfctlOutput(ctx, "-s", "info")
+	if err != nil || !strings.Contains(strings.ToLower(info), "status: enabled") {
+		return fmt.Errorf("cannot verify quiesced firewall status")
+	}
+	mainRules, err := pfctlOutput(ctx, "-sr")
+	if err != nil || !strings.Contains(mainRules, `anchor "sunaba"`) {
+		return fmt.Errorf("cannot verify quiesced main anchor")
+	}
+	childRules, err := pfctlOutput(ctx, "-a", "sunaba", "-sr")
+	if err != nil {
+		return err
+	}
+	configured, err := os.ReadFile(anchorPath)
+	if err != nil {
+		return err
+	}
+	for _, item := range []struct{ family, source string }{{"inet", n.Subnet}, {"inet6", n.IPv6Subnet}} {
+		if !hasBlockToAny(string(configured), item.family, item.source) || !hasBlockToAny(childRules, item.family, item.source) {
+			return fmt.Errorf("cannot verify quiesced %s source policy", item.family)
+		}
+	}
+	return nil
+}
+
+func hasBlockToAny(rules, family, source string) bool {
+	for _, line := range strings.Split(rules, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 8 && fields[0] == "block" && fields[1] == "drop" && containsFieldSequence(fields, family, "from", source, "to", "any") {
+			return true
+		}
+	}
+	return false
+}
+
 func Status(ctx context.Context) (string, error) {
 	n, ok := networkInspect(ctx)
 	if !ok {
@@ -375,6 +453,19 @@ func rerunEnableWithSudo(n Network) error {
 	if n.Interface != "" {
 		args = append(args, "--interface", n.Interface)
 	}
+	cmd := exec.Command("sudo", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func rerunQuiesceWithSudo(n Network) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	args := []string{exe, "firewall", "quiesce", "--subnet", n.Subnet, "--gateway", n.Gateway, "--ipv6-subnet", n.IPv6Subnet}
 	cmd := exec.Command("sudo", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

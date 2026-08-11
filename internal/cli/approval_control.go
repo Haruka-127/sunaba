@@ -11,11 +11,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	"sunaba/internal/gitgateway"
+	"sunaba/internal/session"
 	"sunaba/internal/trustedui"
 )
 
@@ -45,8 +48,179 @@ type pushConfirmRequest struct {
 	Binding gitgateway.PushBinding `json:"binding"`
 }
 
-func startApprovalControl(projectState, runtimeBase string, broker pushApprovalBroker) (*approvalControl, error) {
-	if broker == nil {
+type supervisorInfo struct {
+	Version        int       `json:"version"`
+	ProjectID      string    `json:"project_id"`
+	SessionID      string    `json:"session_id"`
+	Container      string    `json:"container"`
+	RuntimeRoot    string    `json:"runtime_root"`
+	WorkspacePath  string    `json:"workspace_path"`
+	AttachURL      string    `json:"attach_url"`
+	ServerPassword string    `json:"server_password"`
+	State          string    `json:"state"`
+	ExpiresAt      time.Time `json:"expires_at"`
+}
+
+type shellRequest struct {
+	Command string `json:"command"`
+}
+
+type shellResponse struct {
+	Output string `json:"output"`
+}
+
+type sessionControlTarget interface {
+	Pause(context.Context) error
+	Resume(context.Context) error
+	StopAndExport(context.Context) (session.ExportResult, error)
+	Destroy(context.Context) error
+	ExecOutput(context.Context, []string) (string, error)
+}
+
+type controlledSession struct {
+	active         sessionControlTarget
+	persistent     *session.Session
+	projectID      string
+	sessionID      string
+	container      string
+	runtimeRoot    string
+	workspacePath  string
+	attachURL      string
+	projectState   string
+	serverPassword string
+	expiresAt      time.Time
+	mu             sync.Mutex
+	state          string
+	exit           chan struct{}
+	exitOnce       sync.Once
+}
+
+func newControlledSession(active *session.Session, projectState, serverPassword string, expiresAt time.Time) (*controlledSession, error) {
+	if active == nil || projectState == "" || len(serverPassword) < 32 || expiresAt.IsZero() {
+		return nil, fmt.Errorf("supervisor session control is incomplete")
+	}
+	return &controlledSession{
+		active: active, persistent: active, projectID: active.ProjectID, sessionID: active.SessionID, container: active.Container,
+		runtimeRoot: active.Root, workspacePath: active.WorkspacePath, attachURL: active.AttachURL,
+		projectState: projectState, serverPassword: serverPassword, expiresAt: expiresAt, state: "running", exit: make(chan struct{}),
+	}, nil
+}
+
+func (s *controlledSession) info() supervisorInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return supervisorInfo{
+		Version: 1, ProjectID: s.projectID, SessionID: s.sessionID, Container: s.container,
+		RuntimeRoot: s.runtimeRoot, WorkspacePath: s.workspacePath, AttachURL: s.attachURL, ServerPassword: s.serverPassword,
+		State: s.state, ExpiresAt: s.expiresAt,
+	}
+}
+
+func (s *controlledSession) pause(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == "paused" {
+		return nil
+	}
+	if s.state != "running" {
+		return fmt.Errorf("supervisor session is not running")
+	}
+	if err := s.active.Pause(ctx); err != nil {
+		s.state = "failed"
+		return err
+	}
+	s.state = "paused"
+	return nil
+}
+
+func (s *controlledSession) resume(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !time.Now().Before(s.expiresAt) {
+		return fmt.Errorf("Agent Session capability expired; export or recreate the stopped VM")
+	}
+	if s.state == "running" {
+		return nil
+	}
+	if s.state != "paused" {
+		return fmt.Errorf("supervisor session is not resumable")
+	}
+	if err := s.active.Resume(ctx); err != nil {
+		s.state = "failed"
+		return err
+	}
+	if s.persistent != nil {
+		s.attachURL = s.persistent.AttachURL
+	}
+	s.state = "running"
+	return nil
+}
+
+func (s *controlledSession) exportAndDestroy(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == "destroyed" || s.state == "exported" {
+		return fmt.Errorf("supervisor session is already closed")
+	}
+	result, err := s.active.StopAndExport(ctx)
+	if err != nil {
+		s.state = "failed"
+		return err
+	}
+	if len(result.ChangeSet.Changes) > 0 {
+		if s.persistent == nil {
+			return fmt.Errorf("supervisor cannot persist an unbound Change Set")
+		}
+		if _, err := persistPending(s.projectState, s.persistent, result); err != nil {
+			s.state = "failed"
+			return err
+		}
+	}
+	if err := s.active.Destroy(ctx); err != nil {
+		s.state = "failed"
+		return err
+	}
+	s.state = "exported"
+	s.signalExit()
+	return nil
+}
+
+func (s *controlledSession) destroy(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == "destroyed" || s.state == "exported" {
+		return nil
+	}
+	if err := s.active.Destroy(ctx); err != nil {
+		s.state = "failed"
+		return err
+	}
+	s.state = "destroyed"
+	s.signalExit()
+	return nil
+}
+
+func (s *controlledSession) shell(ctx context.Context, command string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !time.Now().Before(s.expiresAt) {
+		return "", fmt.Errorf("Agent Session capability expired")
+	}
+	if s.state != "running" {
+		return "", fmt.Errorf("guest shell requires a running Agent Session")
+	}
+	if command == "" || len(command) > 16<<10 || strings.IndexByte(command, 0) >= 0 {
+		return "", fmt.Errorf("guest shell command is invalid")
+	}
+	outer := "runuser -u sunaba-agent -- /run/sunaba/shell-wrapper \"$1\" 2>&1 | head -c 1048576; status=${PIPESTATUS[0]}; printf '\\n[SUNABA_EXIT=%d]\\n' \"$status\"; exit 0"
+	output, err := s.active.ExecOutput(ctx, []string{"/bin/bash", "-lc", outer, "sunaba-shell", command})
+	return trustedui.SanitizeTerminal(output), err
+}
+
+func (s *controlledSession) signalExit() { s.exitOnce.Do(func() { close(s.exit) }) }
+
+func startApprovalControl(projectState, runtimeBase string, broker pushApprovalBroker, controlled *controlledSession) (*approvalControl, error) {
+	if broker == nil && controlled == nil {
 		return nil, nil
 	}
 	if err := verifyPrivateDirectory(projectState); err != nil {
@@ -78,9 +252,17 @@ func startApprovalControl(projectState, runtimeBase string, broker pushApprovalB
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/push/pending", func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
+		if broker == nil {
+			_, _ = response.Write([]byte("[]\n"))
+			return
+		}
 		_ = json.NewEncoder(response).Encode(broker.Pending())
 	})
 	mux.HandleFunc("POST /v1/push/confirm", func(response http.ResponseWriter, request *http.Request) {
+		if broker == nil {
+			http.NotFound(response, request)
+			return
+		}
 		decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
 		decoder.DisallowUnknownFields()
 		var confirmation pushConfirmRequest
@@ -94,6 +276,41 @@ func startApprovalControl(projectState, runtimeBase string, broker pushApprovalB
 		}
 		response.WriteHeader(http.StatusNoContent)
 	})
+	if controlled != nil {
+		mux.HandleFunc("GET /v1/session", func(response http.ResponseWriter, _ *http.Request) {
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(controlled.info())
+		})
+		for path, operation := range map[string]func(context.Context) error{
+			"/v1/session/pause": controlled.pause, "/v1/session/resume": controlled.resume,
+			"/v1/session/export": controlled.exportAndDestroy, "/v1/session/destroy": controlled.destroy,
+		} {
+			operation := operation
+			mux.HandleFunc("POST "+path, func(response http.ResponseWriter, request *http.Request) {
+				if err := operation(request.Context()); err != nil {
+					http.Error(response, err.Error(), http.StatusConflict)
+					return
+				}
+				response.WriteHeader(http.StatusNoContent)
+			})
+		}
+		mux.HandleFunc("POST /v1/session/shell", func(response http.ResponseWriter, request *http.Request) {
+			decoder := json.NewDecoder(io.LimitReader(request.Body, 32<<10))
+			decoder.DisallowUnknownFields()
+			var shell shellRequest
+			if decoder.Decode(&shell) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+				http.Error(response, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+				return
+			}
+			output, err := controlled.shell(request.Context(), shell.Command)
+			if err != nil {
+				http.Error(response, err.Error(), http.StatusConflict)
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(shellResponse{Output: output})
+		})
+	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 5 * time.Second}
 	locator := filepath.Join(projectState, approvalControlLocator)
 	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: path}); err != nil {

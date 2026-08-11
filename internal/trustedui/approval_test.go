@@ -37,6 +37,17 @@ func TestConfirmApplyRendersStructuredSanitizedHostUI(t *testing.T) {
 	}
 }
 
+func TestSanitizeTerminalPreservesLinesAndEscapesHostActions(t *testing.T) {
+	input := "line one\n\x1b]52;c;clipboard\a\u202Eevil\xff\n"
+	got := SanitizeTerminal(input)
+	if !strings.Contains(got, "line one\n") || !strings.Contains(got, "<U+001B>]52;c;clipboard<U+0007>") || !strings.Contains(got, "<U+202E>evil<INVALID-UTF8>") {
+		t.Fatalf("sanitized terminal output=%q", got)
+	}
+	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\a') || strings.ContainsRune(got, '\u202e') {
+		t.Fatal("terminal action survived sanitization")
+	}
+}
+
 func TestConfirmPushDisplaysObjectForceAndDeleteBinding(t *testing.T) {
 	request := gitgateway.PushRequest{
 		Nonce: strings.Repeat("n", 43), Digest: "",

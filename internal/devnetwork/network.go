@@ -75,6 +75,16 @@ func (b *Boundary) Verify(ctx context.Context) error {
 	return firewall.Enable(ctx, firewall.Network{Subnet: b.Network.IPv4Subnet, Gateway: b.Network.IPv4Gateway, IPv6Subnet: b.Network.IPv6Subnet})
 }
 
+func (b *Boundary) Quiesce(ctx context.Context) error {
+	if b == nil || b.closed || b.lock == nil {
+		return fmt.Errorf("dev network boundary is not active")
+	}
+	if err := b.manager.Verify(ctx, b.Network); err != nil {
+		return err
+	}
+	return firewall.Quiesce(ctx, firewall.Network{Subnet: b.Network.IPv4Subnet, Gateway: b.Network.IPv4Gateway, IPv6Subnet: b.Network.IPv6Subnet})
+}
+
 func (b *Boundary) Close(ctx context.Context) error {
 	if b == nil || b.closed {
 		return nil

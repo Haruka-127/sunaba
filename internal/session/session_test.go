@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -40,6 +41,21 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 		if !strings.Contains(fake.setup, expected) {
 			t.Fatalf("guest setup missing %q: %s", expected, fake.setup)
 		}
+	}
+	shellWrapper, err := os.ReadFile(filepath.Join(s.Root, "shell-wrapper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"/run/sunaba/session.env", "cd " + s.WorkspacePath, "GIT_DIR=/var/lib/sunaba/repository", `/bin/bash -lc "$1"`} {
+		if !strings.Contains(string(shellWrapper), expected) {
+			t.Fatalf("guest shell wrapper missing %q: %s", expected, shellWrapper)
+		}
+	}
+	if strings.Contains(string(shellWrapper), cfg.ModelToken) || strings.Contains(string(shellWrapper), cfg.ServerPassword) {
+		t.Fatal("guest shell wrapper contained a concrete capability")
+	}
+	if output, err := exec.Command("/bin/bash", "-n", filepath.Join(s.Root, "shell-wrapper")).CombinedOutput(); err != nil {
+		t.Fatalf("guest shell wrapper syntax: %v: %s", err, output)
 	}
 	if err := s.Close(); err == nil {
 		t.Fatal("Close released a live session without owned VM cleanup")
@@ -102,6 +118,8 @@ func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testin
 	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
 	verified, closed := 0, 0
 	cfg.DevNetworkVerify = func(context.Context) error { verified++; return nil }
+	quiesced := 0
+	cfg.DevNetworkQuiesce = func(context.Context) error { quiesced++; return nil }
 	cfg.DevNetworkClose = func(context.Context) error { closed++; return nil }
 	s, err := Start(context.Background(), cfg)
 	if err != nil {
@@ -125,6 +143,9 @@ func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testin
 	if closed != 1 {
 		t.Fatalf("dev boundary close count=%d", closed)
 	}
+	if quiesced != 0 {
+		t.Fatalf("pause/resume unexpectedly quiesced export boundary: %d", quiesced)
+	}
 	if err := s.Close(); err != nil || closed != 1 {
 		t.Fatalf("close was not idempotent: count=%d error=%v", closed, err)
 	}
@@ -140,6 +161,7 @@ func TestDevSessionFailsClosedWhenBoundaryVerificationFails(t *testing.T) {
 	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
 	closed := 0
 	cfg.DevNetworkVerify = func(context.Context) error { return errors.New("injected firewall mismatch") }
+	cfg.DevNetworkQuiesce = func(context.Context) error { return nil }
 	cfg.DevNetworkClose = func(context.Context) error { closed++; return nil }
 	if _, err := Start(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "boundary verification") {
 		t.Fatalf("verification error=%v", err)
@@ -147,6 +169,32 @@ func TestDevSessionFailsClosedWhenBoundaryVerificationFails(t *testing.T) {
 	current, _ := fake.ContainerState(context.Background(), "")
 	if current != runtime.StateNotFound || closed != 1 {
 		t.Fatalf("failed dev start created VM or retained network: state=%s closed=%d", current, closed)
+	}
+}
+
+func TestDevExportQuiesceFailureStopsVMAndCapabilities(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	cfg.Mode = "dev"
+	canonical, err := state.ResolveProjectPath(cfg.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	cfg.DevNetworkVerify = func(context.Context) error { return nil }
+	cfg.DevNetworkQuiesce = func(context.Context) error { return errors.New("injected quiesce failure") }
+	cfg.DevNetworkClose = func(context.Context) error { return nil }
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StopAndExport(context.Background()); err == nil || !strings.Contains(err.Error(), "quiesce") {
+		t.Fatalf("quiesce error=%v", err)
+	}
+	if fake.state != runtime.StateStopped || s.gatewayActive.Load() {
+		t.Fatalf("failed quiesce left dev VM active: state=%s gateway=%t", fake.state, s.gatewayActive.Load())
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

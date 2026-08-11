@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -22,14 +23,11 @@ import (
 	"sunaba/internal/audit"
 	"sunaba/internal/cleanup"
 	"sunaba/internal/dependency"
-	"sunaba/internal/devnetwork"
 	"sunaba/internal/firewall"
 	"sunaba/internal/image"
-	"sunaba/internal/modelgateway"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
 	"sunaba/internal/runtime"
-	"sunaba/internal/session"
 	"sunaba/internal/state"
 	"sunaba/internal/trustedui"
 	"sunaba/internal/workspace"
@@ -70,12 +68,14 @@ func Run(ctx context.Context, args []string) error {
 		return a.up(ctx, filtered[1:])
 	case "agent":
 		return a.agent(ctx, filtered[1:])
+	case "_supervisor":
+		return a.supervisor(ctx, filtered[1:])
 	case "git":
-		return a.gitPolicy(filtered[1:])
+		return a.gitPolicy(ctx, filtered[1:])
 	case "web":
 		return a.webPolicy(ctx, filtered[1:])
 	case "shell":
-		return a.shell(filtered[1:])
+		return a.shell(ctx, filtered[1:])
 	case "status":
 		return a.status(ctx, filtered[1:])
 	case "changes":
@@ -200,7 +200,7 @@ func (a *app) up(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	projectPolicy, path, _, err := a.loadPolicy(*dir)
+	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
 	if err != nil {
 		return err
 	}
@@ -209,6 +209,18 @@ func (a *app) up(ctx context.Context, args []string) error {
 			return fmt.Errorf("mode must be secure or dev")
 		}
 		if projectPolicy.Mode != *mode {
+			if err := refuseActivePolicyChange(projectState); err != nil {
+				return err
+			}
+			items, err := a.runtime.List(ctx)
+			if err != nil {
+				return err
+			}
+			for _, item := range items {
+				if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == projectPolicy.ProjectID {
+					return fmt.Errorf("mode change requires export/recreate of existing Project VM %s", item.Name)
+				}
+			}
 			projectPolicy.Mode = *mode
 			projectPolicy.UpdatedAt = time.Now().UTC()
 			if err := policy.Save(path, projectPolicy); err != nil {
@@ -240,182 +252,117 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil {
-		return fmt.Errorf("a pending Change Set exists; apply or discard it before starting another Agent Session")
+	if projectPolicy.Mode == "dev" {
+		return a.runForegroundDevAgent(ctx, projectPolicy, projectState)
 	}
-	if err := opencode.CheckPrerequisites(ctx); err != nil {
-		return err
-	}
-	if _, err := image.Ensure(ctx, a.runtime, a.store, dependency.OpenCodeVersion); err != nil {
-		return err
-	}
-	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
+	client, info, err := a.ensureSupervisor(ctx, projectPolicy.ProjectRoot, projectState)
 	if err != nil {
 		return err
 	}
-	cleanupResult, err := cleanup.Run(ctx, cleanup.Config{Store: a.store, Runtime: a.runtime, Audit: recorder})
-	if err != nil {
-		return err
+	defer client.close()
+	if info.ProjectID != projectPolicy.ProjectID {
+		return fmt.Errorf("active supervisor Project identity does not match policy")
 	}
-	if len(cleanupResult.Refused) > 0 {
-		fmt.Fprintf(a.errors, "WARNING: cleanup refused resources without matching current ownership/lease: %s\n", strings.Join(cleanupResult.Refused, ", "))
+	if !time.Now().Before(info.ExpiresAt) {
+		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		return errors.Join(fmt.Errorf("Agent Session capability expired; export or recreate the stopped VM"), client.operation(pauseContext, "pause"))
 	}
-	upstreamKey := os.Getenv("OPENAI_API_KEY")
-	if upstreamKey == "" {
-		return fmt.Errorf("OPENAI_API_KEY is required by the host Model Gateway; it is never copied into the VM, Host TUI, Project, or audit log")
+	if info.State == "paused" {
+		resumeContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err = client.operation(resumeContext, "resume")
+		cancel()
+		if err != nil {
+			return err
+		}
+		info, err = client.info(ctx)
+		if err != nil {
+			return err
+		}
 	}
-	sessionID, err := newSessionID()
-	if err != nil {
-		return err
-	}
-	vmID := "sunaba-" + projectPolicy.ProjectID + "-" + sessionID
-	modelToken, err := session.NewSecret()
-	if err != nil {
-		return err
-	}
-	serverPassword, err := session.NewSecret()
-	if err != nil {
-		return err
-	}
-	expiresAt := time.Now().Add(time.Duration(projectPolicy.Session.TTLSeconds) * time.Second)
-	modelID := projectPolicy.Model.AllowedModels[0]
-	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, vmID, sessionID, modelID, expiresAt)
-	if err != nil {
-		return err
-	}
-	capability.MaxRequests = projectPolicy.Model.MaxRequests
-	capability.MaxConcurrent = projectPolicy.Model.MaxConcurrent
-	capability.MaxRequestBytes = projectPolicy.Model.MaxRequestBytes
-	capability.MaxResponseBytes = projectPolicy.Model.MaxResponseBytes
-	gateway, err := modelgateway.New(modelgateway.Config{
-		UpstreamBaseURL: "https://api.openai.com", UpstreamAPIKey: upstreamKey, Capability: capability,
-		Audit: func(event modelgateway.AuditEvent) {
-			_ = recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
-				"model": event.Model, "status": fmt.Sprint(event.Status), "request_bytes": fmt.Sprint(event.RequestBytes), "response_bytes": fmt.Sprint(event.ResponseBytes), "reason": event.Reason,
-			}})
-		},
-	})
-	if err != nil {
-		return err
-	}
-	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{BaseURL: "http://127.0.0.1:4141/v1", Model: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", ContextLimit: 200_000, OutputLimit: 32_000})
-	if err != nil {
-		return err
-	}
-	runtimeBase, err := makeRuntimeBase()
-	if err != nil {
-		return err
-	}
-	if err := os.Chmod(runtimeBase, 0700); err != nil {
-		return err
-	}
-	defer os.RemoveAll(runtimeBase)
-	guestRelay, err := siblingExecutable("sunaba-guest-relay")
-	if err != nil {
-		return err
+	if info.State != "running" {
+		return fmt.Errorf("active supervisor is in non-runnable state %s; export or recreate it", info.State)
 	}
 	managedDir, hostOpenCode, err := a.prepareManagedOpenCode(ctx)
 	if err != nil {
-		return err
+		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		return errors.Join(err, client.operation(pauseContext, "pause"))
 	}
-	gateways, err := a.configureGateways(ctx, projectPolicy, projectState, runtimeBase, vmID, sessionID, expiresAt, recorder)
-	if err != nil {
-		return err
-	}
-	gatewaysHandedOff := false
-	defer func() {
-		if !gatewaysHandedOff {
-			if gateways.webClose != nil {
-				_ = gateways.webClose()
-			}
-			if gateways.gitClose != nil {
-				_ = gateways.gitClose()
-			}
-		}
-	}()
-	config := session.Config{
-		Store: a.store, Runtime: a.runtime, ProjectRoot: projectPolicy.ProjectRoot, RuntimeBase: runtimeBase,
-		SessionID: sessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
-		CPUs: projectPolicy.Resources.CPUs, Memory: projectPolicy.Resources.Memory, DiskBytes: projectPolicy.Resources.DiskBytes,
-		ProcessMax: projectPolicy.Resources.ProcessMax, FileSizeMax: projectPolicy.Resources.FileSizeMax, OpenFileMax: projectPolicy.Resources.OpenFileMax,
-		GuestRelayBinary: guestRelay, ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken,
-		GitGateway: gateways.gitHandler, GitToken: gateways.gitToken, GitGatewayClose: gateways.gitClose,
-		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
-		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second, Audit: recorder,
-	}
-	var devBoundary *devnetwork.Boundary
-	if projectPolicy.Mode == "dev" {
-		fmt.Fprintln(a.errors, "WARNING: starting dev direct egress; exfiltration prevention is not provided.")
-		devBoundary, err = devnetwork.Activate(ctx, a.store.Root, projectPolicy.ProjectID, sessionID)
-		if err != nil {
-			return err
-		}
-		config.DevNetworkName = devBoundary.Network.Name
-		config.DevNetworkVerify = devBoundary.Verify
-		config.DevNetworkClose = devBoundary.Close
-	}
-	active, err := session.Start(ctx, config)
-	if err != nil {
-		if devBoundary != nil {
-			_ = devBoundary.Close(context.Background())
-		}
-		return err
-	}
-	gatewaysHandedOff = true
-	var approvalServer *approvalControl
-	if gateways.gitBroker != nil {
-		approvalServer, err = startApprovalControl(projectState, runtimeBase, gateways.gitBroker)
-		if err != nil {
-			return err
-		}
-	}
-	defer func() { returnErr = errors.Join(returnErr, approvalServer.Close()) }()
-	destroyed := false
-	defer func() {
-		if !destroyed {
-			cleanupContext, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			defer cancel()
-			returnErr = errors.Join(returnErr, active.Destroy(cleanupContext))
-		}
-	}()
 	tui, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
-		Binary: hostOpenCode, ManagedToolDir: managedDir, SessionRoot: active.Root, ServerURL: active.AttachURL,
-		GuestWorkspace: active.WorkspacePath, Password: serverPassword,
+		Binary: hostOpenCode, ManagedToolDir: managedDir, SessionRoot: info.RuntimeRoot, ServerURL: info.AttachURL,
+		GuestWorkspace: info.WorkspacePath, Password: info.ServerPassword,
 		ExpectedExecutableSHA256: dependency.MustPinned().OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
 	if err != nil {
-		return err
+		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		return errors.Join(err, client.operation(pauseContext, "pause"))
 	}
 	tui.Stdin, tui.Stdout, tui.Stderr = a.input, a.output, a.errors
 	tuiErr := tui.Run()
-	exportContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	result, exportErr := active.StopAndExport(exportContext)
+	pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	pauseErr := client.operation(pauseContext, "pause")
 	cancel()
-	if exportErr == nil && len(result.ChangeSet.Changes) > 0 {
-		pending, persistErr := persistPending(projectState, active, result)
-		if persistErr != nil {
-			exportErr = persistErr
-		} else {
-			fmt.Fprintf(a.output, "Exported pending Change Set %s (%d changes). Review with 'sunaba changes export'.\n", pending.ChangeSet.Digest, len(pending.ChangeSet.Changes))
-		}
-	} else if exportErr == nil {
-		fmt.Fprintln(a.output, "Agent Session ended with no Project changes.")
+	if pauseErr == nil {
+		fmt.Fprintf(a.output, "Agent Session paused in persistent VM %s. Resume with 'sunaba agent' or export with 'sunaba changes export'.\n", info.Container)
 	}
-	destroyContext, destroyCancel := context.WithTimeout(context.Background(), 90*time.Second)
-	destroyErr := active.Destroy(destroyContext)
-	destroyCancel()
-	destroyed = destroyErr == nil
-	return errors.Join(tuiErr, exportErr, destroyErr)
+	return errors.Join(tuiErr, pauseErr)
 }
 
-func (a *app) shell(args []string) error {
+func (a *app) shell(ctx context.Context, args []string) (returnErr error) {
 	fs := flag.NewFlagSet("shell", flag.ContinueOnError)
 	fs.SetOutput(a.errors)
-	_ = fs.String("dir", ".", "Project directory")
+	dir := fs.String("dir", ".", "Project directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return fmt.Errorf("guest shell is unavailable until an interactive terminal relay can enforce the tested sanitizer; direct 'container exec' is intentionally not exposed")
+	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+	if err != nil {
+		return err
+	}
+	if projectPolicy.Mode == "dev" {
+		return a.runForegroundDevShell(ctx, projectPolicy, projectState)
+	}
+	client, info, err := a.ensureSupervisor(ctx, projectPolicy.ProjectRoot, projectState)
+	if err != nil {
+		return err
+	}
+	defer client.close()
+	if info.State == "paused" {
+		if err := client.operation(ctx, "resume"); err != nil {
+			return err
+		}
+	}
+	defer func() {
+		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		returnErr = errors.Join(returnErr, client.operation(pauseContext, "pause"))
+	}()
+	return a.runSanitizedShell(ctx, client.shell)
+}
+
+func (a *app) runSanitizedShell(ctx context.Context, execute func(context.Context, string) (string, error)) error {
+	fmt.Fprintln(a.output, "sunaba sanitized line shell; each line runs in the guest workspace. Ctrl-D exits. Interactive TTY programs are not supported.")
+	scanner := bufio.NewScanner(a.input)
+	scanner.Buffer(make([]byte, 4096), 16<<10)
+	for {
+		fmt.Fprint(a.output, "sunaba$ ")
+		if !scanner.Scan() {
+			break
+		}
+		if scanner.Text() == "" {
+			continue
+		}
+		commandContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		output, err := execute(commandContext, scanner.Text())
+		cancel()
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(a.output, output)
+	}
+	return scanner.Err()
 }
 
 func (a *app) status(ctx context.Context, args []string) error {
@@ -429,14 +376,27 @@ func (a *app) status(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	containers, listErr := a.runtime.List(ctx)
 	states := make([]string, 0)
-	if listErr == nil {
+	listErr := error(nil)
+	if client, clientErr := openSupervisorClient(projectState); clientErr == nil {
+		if info, infoErr := client.info(ctx); infoErr == nil && info.ProjectID == projectPolicy.ProjectID {
+			states = append(states, info.Container+"="+info.State+"/"+projectPolicy.Mode)
+		} else if infoErr != nil {
+			listErr = infoErr
+		} else {
+			listErr = fmt.Errorf("active supervisor Project identity does not match policy")
+		}
+		client.close()
+	} else if errors.Is(clientErr, errNoSupervisor) {
+		containers, runtimeErr := a.runtime.List(ctx)
+		listErr = runtimeErr
 		for _, item := range containers {
 			if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == projectPolicy.ProjectID {
 				states = append(states, item.Name+"="+string(item.State)+"/"+item.Labels["dev.sunaba.mode"])
 			}
 		}
+	} else {
+		listErr = clientErr
 	}
 	sort.Strings(states)
 	pending := "none"
@@ -464,12 +424,39 @@ func (a *app) changes(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	pending, err := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
-	if err != nil {
-		return err
-	}
 	switch args[0] {
 	case "export":
+		pending, pendingErr := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+		if pendingErr != nil {
+			pendingPath := filepath.Join(projectState, "pending", "change.json")
+			if _, err := os.Lstat(pendingPath); err == nil {
+				return pendingErr
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			client, err := openSupervisorClient(projectState)
+			if err != nil {
+				if errors.Is(err, errNoSupervisor) {
+					return fmt.Errorf("no persistent Agent VM or pending Change Set to export")
+				}
+				return err
+			}
+			exportContext, cancel := context.WithTimeout(ctx, 12*time.Minute)
+			err = client.operation(exportContext, "export")
+			cancel()
+			client.close()
+			if err != nil {
+				return err
+			}
+			pending, pendingErr = loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+			if pendingErr != nil {
+				if _, err := os.Lstat(pendingPath); errors.Is(err, os.ErrNotExist) {
+					fmt.Fprintln(a.output, "Export completed with no Project changes; the persistent VM was removed.")
+					return nil
+				}
+				return pendingErr
+			}
+		}
 		fmt.Fprintf(a.output, "Change Set: %s\nBaseline: %s\nMerged: %s\nCreated: %s\n", pending.ChangeSet.Digest, pending.Baseline.Digest, pending.Merged.Digest, pending.CreatedAt.Format(time.RFC3339))
 		for _, change := range pending.ChangeSet.Changes {
 			if change.Kind == workspace.ChangeRename {
@@ -480,6 +467,10 @@ func (a *app) changes(ctx context.Context, args []string) error {
 		}
 		return nil
 	case "apply":
+		pending, err := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+		if err != nil {
+			return err
+		}
 		recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
 		if err != nil {
 			return err
@@ -566,24 +557,68 @@ func (a *app) recreate(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	if err := a.cleanupOrphans(ctx); err != nil {
+	if client, err := openSupervisorClient(projectState); err == nil {
+		operation := "export"
+		if *discard {
+			operation = "destroy"
+		}
+		operationContext, cancel := context.WithTimeout(ctx, 12*time.Minute)
+		err = client.operation(operationContext, operation)
+		cancel()
+		client.close()
+		if err != nil {
+			return err
+		}
+		waitContext, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+		err = waitSupervisorGone(waitContext, projectState)
+		waitCancel()
+		if err != nil {
+			return err
+		}
+	} else if errors.Is(err, errStaleSupervisor) {
+		if err := a.recoverStaleSupervisor(ctx, projectState); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, errNoSupervisor) {
+		return err
+	} else if err := a.cleanupOrphans(ctx); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Project %s will start its next Agent Session from a clean host snapshot.\n", projectPolicy.ProjectID)
+	fmt.Fprintf(a.output, "Project %s will start its next Agent Session from a clean host snapshot after any pending Change Set is applied or discarded.\n", projectPolicy.ProjectID)
 	return nil
 }
 
 func (a *app) down(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("down", flag.ContinueOnError)
 	fs.SetOutput(a.errors)
-	_ = fs.String("dir", ".", "Project directory")
+	dir := fs.String("dir", ".", "Project directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := a.cleanupOrphans(ctx); err != nil {
+	_, _, projectState, err := a.loadPolicy(*dir)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintln(a.output, "Recovered guardless Agent VMs. A live foreground Agent Session must be exited from its Host TUI.")
+	if client, err := openSupervisorClient(projectState); err == nil {
+		pauseContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err = client.operation(pauseContext, "pause")
+		cancel()
+		client.close()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(a.output, "Persistent Agent VM is stopped with its isolated upper state retained.")
+		return nil
+	} else if errors.Is(err, errStaleSupervisor) {
+		if err := a.recoverStaleSupervisor(ctx, projectState); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, errNoSupervisor) {
+		return err
+	} else if err := a.cleanupOrphans(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(a.output, "No managed persistent Agent VM was active; guardless owned resources were recovered.")
 	return nil
 }
 
@@ -605,6 +640,31 @@ func (a *app) destroy(ctx context.Context, args []string) error {
 	}
 	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil && !*discard {
 		return fmt.Errorf("pending Change Set exists; pass --discard-pending explicitly to destroy it")
+	}
+	if client, err := openSupervisorClient(projectState); err == nil {
+		if !*discard {
+			client.close()
+			return fmt.Errorf("a persistent Agent VM may contain unexported changes; run 'sunaba changes export' or pass --discard-pending")
+		}
+		destroyContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err = client.operation(destroyContext, "destroy")
+		cancel()
+		client.close()
+		if err != nil {
+			return err
+		}
+		waitContext, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+		err = waitSupervisorGone(waitContext, projectState)
+		waitCancel()
+		if err != nil {
+			return err
+		}
+	} else if errors.Is(err, errStaleSupervisor) {
+		if err := a.recoverStaleSupervisor(ctx, projectState); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, errNoSupervisor) {
+		return err
 	}
 	if err := a.cleanupOrphans(ctx); err != nil {
 		return err
@@ -636,7 +696,7 @@ func (a *app) destroy(ctx context.Context, args []string) error {
 
 func (a *app) firewall(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sunaba firewall enable|disable|status")
+		return fmt.Errorf("usage: sunaba firewall enable|quiesce|disable|status")
 	}
 	switch args[0] {
 	case "disable":
@@ -654,6 +714,19 @@ func (a *app) firewall(ctx context.Context, args []string) error {
 			return fmt.Errorf("firewall enable requires --subnet, --gateway, and --ipv6-subnet")
 		}
 		return firewall.Enable(ctx, firewall.Network{Subnet: *subnet, Gateway: *gateway, IPv6Subnet: *ipv6})
+	case "quiesce":
+		fs := flag.NewFlagSet("firewall quiesce", flag.ContinueOnError)
+		fs.SetOutput(a.errors)
+		subnet := fs.String("subnet", "", "owned dev IPv4 subnet")
+		gateway := fs.String("gateway", "", "owned dev IPv4 gateway")
+		ipv6 := fs.String("ipv6-subnet", "", "owned dev IPv6 subnet")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *subnet == "" || *gateway == "" || *ipv6 == "" {
+			return fmt.Errorf("firewall quiesce requires --subnet, --gateway, and --ipv6-subnet")
+		}
+		return firewall.Quiesce(ctx, firewall.Network{Subnet: *subnet, Gateway: *gateway, IPv6Subnet: *ipv6})
 	case "status":
 		status, err := firewall.Status(ctx)
 		fmt.Fprintln(a.output, status)

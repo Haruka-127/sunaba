@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,12 +51,22 @@ func TestGitPolicyAcceptsOneFixedHTTPSRemoteAndRejectsCredentialURLs(t *testing.
 	if err := a.project(context.Background(), []string{"init", project}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.gitPolicy([]string{"set", "--dir", project, "--remote", "https://git.example/team/repository.git"}); err != nil {
+	if err := a.gitPolicy(context.Background(), []string{"set", "--dir", project, "--remote", "https://git.example/team/repository.git"}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
 	if err != nil || len(loaded.Git.Remotes) != 1 || loaded.Git.Remotes[0] != "https://git.example/team/repository.git" {
 		t.Fatalf("policy=%+v error=%v", loaded.Git, err)
+	}
+	locator := filepath.Join(store.Root, "projects", state.ProjectID(project), approvalControlLocator)
+	if err := os.WriteFile(locator, []byte(`{"version":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.gitPolicy(context.Background(), []string{"disable", "--dir", project}); err == nil || !strings.Contains(err.Error(), "cannot change") {
+		t.Fatalf("active policy mutation error=%v", err)
+	}
+	if err := os.Remove(locator); err != nil {
+		t.Fatal(err)
 	}
 	for _, unsafe := range []string{
 		"http://git.example/repository.git",
@@ -63,7 +75,7 @@ func TestGitPolicyAcceptsOneFixedHTTPSRemoteAndRejectsCredentialURLs(t *testing.
 		"https://git.example/repository",
 		"https://git.example:8443/repository.git",
 	} {
-		if err := a.gitPolicy([]string{"set", "--dir", project, "--remote", unsafe}); err == nil {
+		if err := a.gitPolicy(context.Background(), []string{"set", "--dir", project, "--remote", unsafe}); err == nil {
 			t.Fatalf("unsafe Git remote accepted: %s", unsafe)
 		}
 	}
@@ -142,6 +154,94 @@ type fakePushBroker struct {
 	confirmed []string
 }
 
+type fakeSessionControlTarget struct {
+	paused    int
+	resumed   int
+	destroyed int
+	exported  int
+	commands  [][]string
+	output    string
+}
+
+func (f *fakeSessionControlTarget) Pause(context.Context) error  { f.paused++; return nil }
+func (f *fakeSessionControlTarget) Resume(context.Context) error { f.resumed++; return nil }
+func (f *fakeSessionControlTarget) StopAndExport(context.Context) (session.ExportResult, error) {
+	f.exported++
+	return session.ExportResult{}, nil
+}
+
+func TestSupervisorExpiryRejectsResumeAndShell(t *testing.T) {
+	target := &fakeSessionControlTarget{}
+	controlled := &controlledSession{
+		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
+		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-session-session", workspacePath: "/workspace/sunaba-session",
+		attachURL: "http://127.0.0.1:12345", projectState: "/private/tmp/project", serverPassword: strings.Repeat("s", 32),
+		expiresAt: time.Now().Add(-time.Second), state: "paused", exit: make(chan struct{}),
+	}
+	if err := controlled.resume(context.Background()); err == nil || target.resumed != 0 {
+		t.Fatalf("expired resume error=%v resumed=%d", err, target.resumed)
+	}
+	controlled.state = "running"
+	if _, err := controlled.shell(context.Background(), "true"); err == nil || len(target.commands) != 0 {
+		t.Fatalf("expired shell error=%v commands=%v", err, target.commands)
+	}
+}
+
+func TestSupervisorExportWithoutChangesDestroysPersistentVM(t *testing.T) {
+	target := &fakeSessionControlTarget{}
+	controlled := &controlledSession{
+		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
+		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-session-session", workspacePath: "/workspace/sunaba-session",
+		attachURL: "http://127.0.0.1:12345", projectState: "/private/tmp/project", serverPassword: strings.Repeat("s", 32),
+		expiresAt: time.Now().Add(time.Hour), state: "paused", exit: make(chan struct{}),
+	}
+	if err := controlled.exportAndDestroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if target.exported != 1 || target.destroyed != 1 || controlled.state != "exported" {
+		t.Fatalf("export lifecycle target=%+v state=%s", target, controlled.state)
+	}
+	select {
+	case <-controlled.exit:
+	default:
+		t.Fatal("export did not signal supervisor exit")
+	}
+}
+
+func TestStaleSupervisorRecoveryRemovesOnlyBoundPrivateRuntime(t *testing.T) {
+	projectState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-runtime-stale-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runtimeBase, 0700); err != nil {
+		t.Fatal(err)
+	}
+	locator := filepath.Join(projectState, approvalControlLocator)
+	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStaleSupervisor(projectState); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{locator, runtimeBase} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale path remained %s: %v", path, err)
+		}
+	}
+}
+func (f *fakeSessionControlTarget) Destroy(context.Context) error { f.destroyed++; return nil }
+func (f *fakeSessionControlTarget) ExecOutput(_ context.Context, command []string) (string, error) {
+	f.commands = append(f.commands, append([]string(nil), command...))
+	return f.output, nil
+}
+
 func (b *fakePushBroker) Pending() []gitgateway.PushRequest {
 	return append([]gitgateway.PushRequest(nil), b.pending...)
 }
@@ -186,7 +286,7 @@ func TestApprovalsUseSeparatePrivateHostControlChannel(t *testing.T) {
 	if err := os.Chmod(runtimeBase, 0700); err != nil {
 		t.Fatal(err)
 	}
-	control, err := startApprovalControl(root, runtimeBase, broker)
+	control, err := startApprovalControl(root, runtimeBase, broker, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,6 +299,73 @@ func TestApprovalsUseSeparatePrivateHostControlChannel(t *testing.T) {
 	}
 	if info, err := os.Lstat(filepath.Join(runtimeBase, approvalControlSocket)); err != nil || info.Mode().Perm() != 0600 || info.Mode()&os.ModeSocket == 0 {
 		t.Fatalf("control socket info=%v error=%v", info, err)
+	}
+}
+
+func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
+	projectState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-supervisor-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(runtimeBase)
+	if err := os.Chmod(runtimeBase, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := &fakeSessionControlTarget{output: "safe\n\x1b]52;c;evil\a\u202Ename\n"}
+	controlled := &controlledSession{
+		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
+		runtimeRoot: filepath.Join(runtimeBase, "sunaba-session-session"), workspacePath: "/workspace/sunaba-session",
+		attachURL: "http://127.0.0.1:12345", projectState: projectState, serverPassword: strings.Repeat("s", 32),
+		expiresAt: time.Now().Add(time.Hour), state: "running", exit: make(chan struct{}),
+	}
+	control, err := startApprovalControl(projectState, runtimeBase, nil, controlled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	client, err := openSupervisorClient(projectState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+	approvalApp := &app{input: strings.NewReader(""), output: io.Discard, errors: io.Discard}
+	if count, err := approvalApp.approveActivePushes(context.Background(), projectState); err != nil || count != 0 {
+		t.Fatalf("Git-disabled supervisor approvals count=%d error=%v", count, err)
+	}
+	info, err := client.info(context.Background())
+	if err != nil || info.State != "running" || info.Container != "sunaba-project-session" {
+		t.Fatalf("info=%+v error=%v", info, err)
+	}
+	if err := client.operation(context.Background(), "pause"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.operation(context.Background(), "resume"); err != nil {
+		t.Fatal(err)
+	}
+	output, err := client.shell(context.Background(), "printf test")
+	if err != nil || !strings.Contains(output, "safe\n") || strings.ContainsAny(output, "\x1b\a\u202E") || !strings.Contains(output, "<U+001B>") {
+		t.Fatalf("shell output=%q error=%v", output, err)
+	}
+	if len(target.commands) != 1 || target.commands[0][len(target.commands[0])-1] != "printf test" {
+		t.Fatalf("shell command=%v", target.commands)
+	}
+	if err := client.operation(context.Background(), "destroy"); err != nil {
+		t.Fatal(err)
+	}
+	if target.paused != 1 || target.resumed != 1 || target.destroyed != 1 {
+		t.Fatalf("target lifecycle=%+v", target)
+	}
+	select {
+	case <-controlled.exit:
+	default:
+		t.Fatal("destroy did not signal supervisor exit")
 	}
 }
 

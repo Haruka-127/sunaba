@@ -41,36 +41,37 @@ type Event struct {
 }
 
 type Config struct {
-	Store            *state.Store
-	Runtime          runtime.Runtime
-	ProjectRoot      string
-	RuntimeBase      string
-	SessionID        string
-	Mode             string
-	DevNetworkName   string
-	DevNetworkVerify func(context.Context) error
-	DevNetworkClose  func(context.Context) error
-	Image            string
-	CPUs             int
-	Memory           string
-	DiskBytes        int64
-	ProcessMax       int64
-	FileSizeMax      int64
-	OpenFileMax      int64
-	GuestRelayBinary string
-	ProviderConfig   []byte
-	ModelGateway     http.Handler
-	ModelToken       string
-	GitGateway       http.Handler
-	GitToken         string
-	GitGatewayClose  func() error
-	WebGateway       http.Handler
-	WebToken         string
-	WebGatewayClose  func() error
-	ServerPassword   string
-	LeaseTTL         time.Duration
-	Audit            *audit.Recorder
-	OnEvent          func(Event)
+	Store             *state.Store
+	Runtime           runtime.Runtime
+	ProjectRoot       string
+	RuntimeBase       string
+	SessionID         string
+	Mode              string
+	DevNetworkName    string
+	DevNetworkVerify  func(context.Context) error
+	DevNetworkQuiesce func(context.Context) error
+	DevNetworkClose   func(context.Context) error
+	Image             string
+	CPUs              int
+	Memory            string
+	DiskBytes         int64
+	ProcessMax        int64
+	FileSizeMax       int64
+	OpenFileMax       int64
+	GuestRelayBinary  string
+	ProviderConfig    []byte
+	ModelGateway      http.Handler
+	ModelToken        string
+	GitGateway        http.Handler
+	GitToken          string
+	GitGatewayClose   func() error
+	WebGateway        http.Handler
+	WebToken          string
+	WebGatewayClose   func() error
+	ServerPassword    string
+	LeaseTTL          time.Duration
+	Audit             *audit.Recorder
+	OnEvent           func(Event)
 }
 
 type Session struct {
@@ -275,11 +276,11 @@ func validateConfig(cfg Config) error {
 	if cfg.Mode != "secure" && cfg.Mode != "dev" {
 		return fmt.Errorf("session mode must be secure or dev")
 	}
-	if cfg.Mode == "secure" && (cfg.DevNetworkName != "" || cfg.DevNetworkVerify != nil || cfg.DevNetworkClose != nil) {
+	if cfg.Mode == "secure" && (cfg.DevNetworkName != "" || cfg.DevNetworkVerify != nil || cfg.DevNetworkQuiesce != nil || cfg.DevNetworkClose != nil) {
 		return fmt.Errorf("secure session must not accept a direct-egress network")
 	}
 	if cfg.Mode == "dev" {
-		if cfg.DevNetworkName == "" || cfg.DevNetworkVerify == nil || cfg.DevNetworkClose == nil {
+		if cfg.DevNetworkName == "" || cfg.DevNetworkVerify == nil || cfg.DevNetworkQuiesce == nil || cfg.DevNetworkClose == nil {
 			return fmt.Errorf("dev session requires an owned, verified, revocable network boundary")
 		}
 	}
@@ -320,6 +321,15 @@ func NewSecret() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// ExecOutput runs a supervisor-selected command in an existing session VM. The
+// caller must still treat all returned bytes as untrusted terminal data.
+func (s *Session) ExecOutput(ctx context.Context, command []string) (string, error) {
+	if !s.vmCreated || len(command) == 0 {
+		return "", fmt.Errorf("session VM is not available")
+	}
+	return s.cfg.Runtime.ExecOutput(ctx, s.Container, command)
 }
 
 func (s *Session) startGateway() error {
@@ -549,11 +559,16 @@ func (s *Session) configureGuest(ctx context.Context) error {
 	if err := os.WriteFile(envPath, []byte(environment), 0600); err != nil {
 		return err
 	}
+	shellWrapperPath := filepath.Join(s.Root, "shell-wrapper")
+	if err := os.WriteFile(shellWrapperPath, []byte(s.guestShellWrapper()), 0600); err != nil {
+		return err
+	}
 	copies := [][2]string{
 		{s.SnapshotRoot, "/var/lib/sunaba/lower"},
 		{s.cfg.GuestRelayBinary, "/run/sunaba/guest-relay"},
 		{providerPath, "/run/sunaba/opencode.json"},
 		{envPath, "/run/sunaba/session.env"},
+		{shellWrapperPath, "/run/sunaba/shell-wrapper"},
 	}
 	if s.cfg.WebGateway != nil {
 		aptConfigPath := filepath.Join(s.Root, "apt-proxy.conf")
@@ -575,7 +590,8 @@ func (s *Session) configureGuest(ctx context.Context) error {
 		"getent group sunaba-agent >/dev/null || groupadd -g 1000 sunaba-agent",
 		"id sunaba-agent >/dev/null 2>&1 || useradd -u 1000 -g sunaba-agent -M -d /run/sunaba/home -s /bin/bash sunaba-agent",
 		"chmod 0400 /run/sunaba/session.env /run/sunaba/opencode.json",
-		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json",
+		"chmod 0500 /run/sunaba/shell-wrapper",
+		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper",
 		"mkdir -p " + s.WorkspacePath + " /run/sunaba/home /run/sunaba/config /run/sunaba/data /var/lib/sunaba/overlay",
 		fmt.Sprintf("truncate -s %d /var/lib/sunaba/overlay.img", s.cfg.DiskBytes),
 		"mkfs.ext4 -q -F -m 0 /var/lib/sunaba/overlay.img",
@@ -626,6 +642,18 @@ func (s *Session) guestServerCommand() string {
 		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
 	}
 	return "nohup runuser -u sunaba-agent -- /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
+}
+
+func (s *Session) guestShellWrapper() string {
+	gitEnvironment := ""
+	if s.cfg.GitGateway != nil {
+		gitEnvironment = " GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.http://127.0.0.1:4242/.extraHeader GIT_CONFIG_VALUE_0=\"Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN\""
+	}
+	webEnvironment := ""
+	if s.cfg.WebGateway != nil {
+		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
+	}
+	return "#!/bin/bash\nset -eu\nset -a\n. /run/sunaba/session.env\nset +a\ncd " + s.WorkspacePath + "\nexec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " /bin/bash -lc \"$1\"\n"
 }
 
 func (s *Session) verifyGuestResources(ctx context.Context) error {
@@ -715,6 +743,19 @@ func (s *Session) startAttachRelay(ctx context.Context) error {
 }
 
 func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
+	if s.cfg.Mode == "dev" {
+		if err := s.cfg.DevNetworkQuiesce(ctx); err != nil {
+			s.gatewayActive.Store(false)
+			pauseErr := error(nil)
+			if !s.paused {
+				pauseErr = s.Pause(ctx)
+			}
+			return ExportResult{}, errors.Join(fmt.Errorf("quiesce dev egress before export: %w", err), pauseErr)
+		}
+		if err := s.emit("dev_network.quiesced", s.cfg.DevNetworkName); err != nil {
+			return ExportResult{}, err
+		}
+	}
 	if err := s.stopChannels(ctx); err != nil {
 		return ExportResult{}, err
 	}

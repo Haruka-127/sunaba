@@ -25,7 +25,7 @@ func (f *stringFlags) Set(value string) error {
 	return nil
 }
 
-func (a *app) gitPolicy(args []string) error {
+func (a *app) gitPolicy(_ context.Context, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: sunaba git set --remote <https-url> [--dir <path>] | sunaba git disable [--dir <path>]")
 	}
@@ -39,8 +39,11 @@ func (a *app) gitPolicy(args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected Git policy arguments")
 	}
-	projectPolicy, path, _, err := a.loadPolicy(*dir)
+	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
 	if err != nil {
+		return err
+	}
+	if err := refuseActivePolicyChange(projectState); err != nil {
 		return err
 	}
 	switch args[0] {
@@ -101,6 +104,9 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 	}
 	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
 	if err != nil {
+		return err
+	}
+	if err := refuseActivePolicyChange(projectState); err != nil {
 		return err
 	}
 	switch args[0] {
@@ -240,4 +246,14 @@ func writePrivateBytes(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(temporaryPath, path)
+}
+
+func refuseActivePolicyChange(projectState string) error {
+	path := filepath.Join(projectState, approvalControlLocator)
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("Project policy cannot change while a persistent or foreground Agent Session exists; export or recreate it first")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
