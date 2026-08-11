@@ -70,6 +70,7 @@ container run --detach --name sunaba-<projectID> ... sunaba-base:<version>
 container start sunaba-<projectID>
 container stop sunaba-<projectID>
 container rm sunaba-<projectID>
+container delete sunaba-<projectID>
 container exec ... sunaba-<projectID> ...
 container inspect sunaba-<projectID>
 container ls ...
@@ -93,7 +94,24 @@ container image delete sunaba-base:<version>
 
 `container export`と`container cp`のホスト側書き込み先は、OSのtempまたはリポジトリ内のgitignore済み領域に作った`sunaba-`プレフィックスのmode `0700`のquarantine directoryだけに限定する。host worktreeへ直接書き込まない。`container export --output`は既存fileを置換するため、Supervisorが当該transaction用に新規作成したquarantine内の未使用pathだけを指定する。
 
-`container rm`、`network delete`、`volume delete`、`image delete`は上記の命名規則を満たし、当該検証またはProjectが作成したことを確認できるresourceだけに限定する。ユーザーが作成した他のcontainer、network、image、volumeは削除しない。
+Apple Container 1.2.2の`container rm`は`container delete`のaliasである。`container rm` / `container delete`、`network delete`、`volume delete`、`image delete`は上記の命名規則を満たし、当該検証またはProjectが作成したことを確認できるresourceだけに限定する。ユーザーが作成した他のcontainer、network、image、volumeは削除しない。
+
+通常の`container stop`が60秒待っても応答せず、個別`inspect`で次をすべて再確認できる障害復旧に限り、下記のexact signal操作を人間の個別承認後に使ってよい。
+
+```sh
+container kill --signal KILL sunaba-<projectID>-<sessionID>
+```
+
+- 完全名がlabelのProject ID / Session IDと一致する
+- `dev.sunaba.owner=sunaba-supervisor`であり、当該検証が作成したVMである
+- 対応するSupervisor process、runtime directory、live guardが存在しない
+- `container kill --all`、部分一致、glob、別containerとの同時指定を使わない
+- signal後に個別`inspect`し、stoppedを確認できたVMだけを`container delete`する
+- `buildkit`を含むuser-owned resource、container system、他のVMを停止・再起動しない
+
+この復旧操作も、本文書を実装者が更新したこと自体は実行承認とみなさない。
+
+同じ障害で、当該検証が起動した`container stop`または当該exact VMへの`container exec` client processだけが60秒以上応答せず残った場合は、`ps -axo user,pid,ppid,lstart,command`でcurrent user、完全なargv、対応VM名を再確認し、人間の個別承認後にそのclient PIDだけへ`kill -TERM`を送ってよい。Apple Containerのruntime/plugin process、Supervisor、`buildkit`、名前や由来を確認できないprocessへsignalを送らない。TERM後も残るclientへ別signalを送る場合は改めて人間へ確認する。
 
 ## 許可するRuntime Adapter操作
 
@@ -120,6 +138,10 @@ sudo nvram ...
 sudo defaults write ...
 sudo networksetup ...
 container rm <sunaba- 以外のコンテナ>
+container delete <sunaba- 以外のコンテナ>
+container kill --all
+container delete --all
+container delete --force ...
 container image delete <sunaba-base: 以外のイメージ>
 container network delete <sunaba- 以外のnetwork>
 container volume delete <sunaba- 以外のvolume>
