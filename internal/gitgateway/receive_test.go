@@ -78,7 +78,7 @@ func TestStandardGitPushRequiresPendingApprovalAndExactRetry(t *testing.T) {
 	capability, _ := NewReadCapability(capabilityToken, "project", "vm", "session", time.Now().Add(5*time.Minute))
 	readGateway, err := NewReadGateway(ReadConfig{
 		UpstreamURL: upstreamServer.URL + "/upstream.git", GuestRepositoryPath: "/repository.git",
-		AuthorizationHeader: upstreamAuthorization, Capability: capability, HTTPClient: upstreamServer.Client(),
+		AuthorizationHeader: upstreamAuthorization, Capability: capability, HTTPClient: upstreamServer.Client(), Audit: func(ReadAuditEvent) {},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +95,8 @@ func TestStandardGitPushRequiresPendingApprovalAndExactRetry(t *testing.T) {
 		GitPath: gitPath, RepositoryPath: quarantine, GuestRepositoryPath: "/repository.git",
 		HookHelperPath: testExecutable, HookSocketPath: hookSocket, HookToken: hookToken,
 		Capability: capability, MaxRequestBytes: 64 << 20, MaxResponseBytes: 4 << 20, MaxConcurrent: 1,
+		BeforeAdvertise: executor.Sync,
+		Audit:           func(ReadAuditEvent) {},
 	})
 	if err != nil {
 		t.Fatal(err)

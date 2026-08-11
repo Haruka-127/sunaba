@@ -31,6 +31,7 @@ type ReceiveConfig struct {
 	MaxConcurrent       int
 	Audit               func(ReadAuditEvent)
 	Now                 func() time.Time
+	BeforeAdvertise     func(context.Context) error
 }
 
 type ReceiveGateway struct {
@@ -42,6 +43,7 @@ type ReceiveGateway struct {
 	semaphore        chan struct{}
 	audit            func(ReadAuditEvent)
 	now              func() time.Time
+	beforeAdvertise  func(context.Context) error
 	mu               sync.Mutex
 	requests         int
 }
@@ -54,7 +56,7 @@ func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
 	if config.GuestRepositoryPath != "/"+filepath.Base(repository) || !strings.HasSuffix(config.GuestRepositoryPath, ".git") {
 		return nil, fmt.Errorf("Git receive guest path must exactly identify the host quarantine")
 	}
-	if len(config.HookToken) < 32 || !filepathIsPrivateSocketParent(config.HookSocketPath) || config.MaxRequestBytes <= 0 || config.MaxResponseBytes <= 0 || config.MaxConcurrent <= 0 {
+	if len(config.HookToken) < 32 || !filepathIsPrivateSocketParent(config.HookSocketPath) || config.MaxRequestBytes <= 0 || config.MaxResponseBytes <= 0 || config.MaxConcurrent <= 0 || config.BeforeAdvertise == nil || config.Audit == nil {
 		return nil, fmt.Errorf("Git receive gateway limits and hook channel are invalid")
 	}
 	capability := config.Capability
@@ -90,7 +92,7 @@ func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
 	return &ReceiveGateway{
 		backend: backend, guestPath: config.GuestRepositoryPath, capability: capability,
 		maxRequestBytes: config.MaxRequestBytes, maxResponseBytes: config.MaxResponseBytes,
-		semaphore: make(chan struct{}, config.MaxConcurrent), audit: config.Audit, now: now,
+		semaphore: make(chan struct{}, config.MaxConcurrent), audit: config.Audit, now: now, beforeAdvertise: config.BeforeAdvertise,
 	}, nil
 }
 
@@ -131,6 +133,12 @@ func (g *ReceiveGateway) ServeHTTP(response http.ResponseWriter, request *http.R
 	default:
 		reject(http.StatusTooManyRequests, "concurrency_exceeded")
 		return
+	}
+	if request.Method == http.MethodGet {
+		if err := g.beforeAdvertise(request.Context()); err != nil {
+			reject(http.StatusBadGateway, "upstream_sync_failed")
+			return
+		}
 	}
 	request.Body = http.MaxBytesReader(response, request.Body, g.maxRequestBytes)
 	limited := &limitedResponseWriter{ResponseWriter: response, remaining: g.maxResponseBytes}

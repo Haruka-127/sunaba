@@ -74,7 +74,7 @@ func TestReadGatewaySupportsStandardCloneFetchPullWithoutCredentialLeak(t *testi
 
 func TestReadGatewayRejectsPushExpiredCapabilityAndUnknownRoutes(t *testing.T) {
 	capability, _ := NewReadCapability("guest-capability-token-0123456789abcdef", "project", "vm", "session", time.Now().Add(-time.Second))
-	gateway, err := NewReadGateway(ReadConfig{UpstreamURL: "https://example.invalid/repository.git", GuestRepositoryPath: "/repository.git", AuthorizationHeader: "Bearer host-secret", Capability: capability})
+	gateway, err := NewReadGateway(ReadConfig{UpstreamURL: "https://example.invalid/repository.git", GuestRepositoryPath: "/repository.git", AuthorizationHeader: "Bearer host-secret", Capability: capability, Audit: func(ReadAuditEvent) {}})
 	if err != nil {
 		t.Fatal(err)
 	}

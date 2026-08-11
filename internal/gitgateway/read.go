@@ -85,6 +85,9 @@ func NewReadGateway(config ReadConfig) (*ReadGateway, error) {
 	if config.AuthorizationHeader == "" || len(config.AuthorizationHeader) > 4096 || containsControl(config.AuthorizationHeader) || (!strings.HasPrefix(config.AuthorizationHeader, "Basic ") && !strings.HasPrefix(config.AuthorizationHeader, "Bearer ")) {
 		return nil, fmt.Errorf("Git Gateway host authorization is invalid")
 	}
+	if config.Audit == nil {
+		return nil, fmt.Errorf("Git Gateway requires a host audit sink")
+	}
 	capability := config.Capability
 	if capability.MaxRequests <= 0 || capability.MaxConcurrent <= 0 || capability.MaxRequestBytes <= 0 || capability.MaxResponseBytes <= 0 || capability.ExpiresAt.IsZero() || !gitIdentityPattern.MatchString(capability.ProjectID) || !gitIdentityPattern.MatchString(capability.VMID) || !gitIdentityPattern.MatchString(capability.SessionID) {
 		return nil, fmt.Errorf("Git Gateway read capability limits are invalid")

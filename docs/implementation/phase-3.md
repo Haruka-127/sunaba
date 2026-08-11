@@ -1,6 +1,6 @@
 # Phase 3: Git Gateway
 
-状態: 実施中。object-bound one-shot push approval、host quarantine resolver、HTTPS credential終端、smart HTTP read/receive relayを実装済み。session lifecycle統合は継続中。
+状態: 完了。HTTPS smart HTTP、object-bound one-shot push approval、host quarantine resolver、credential終端、read/receive relay、Trusted UI、secure session lifecycleを実装し、実Agent VM gateを通過した。
 
 ## push approval binding
 
@@ -34,15 +34,25 @@ host UIはProject、repository、remote名、固定送信先、push digest、期
 
 Git Gatewayはmodel channelと別のProject/VM専用mode `0600` Unix socketとしてsecure session policy digestへ含める。VMへはsocket mount、guest loopback relay、実credentialではない短命Git capabilityだけを渡す。OpenCodeのGit subprocessには固定loopback repositoryだけへ送るcapability headerをprocess environmentで設定し、guest repositoryのremote URLにはcredentialを含めない。pause中は永続leaseとin-process gateの双方で`503`にし、resume時は同一VM/socket relayで再開する。session endではHTTP handlerに加えてapproval hook channelのclose callbackを一度だけ実行する。
 
+receive advertisement前にhost bare quarantineを固定upstreamへatomic fetch/pruneし、guestがpullした後もapprovalのold refをupstream currentへ一致させる。retry時は同じmirrorを再検証し、exact leaseでそれ以降の競合も拒否する。clone/fetch/pull/pushの各request、mirror sync、approval、consume、upstream結果、session start/stopをhost JSONL auditへ記録し、audit sinkなしのGateway生成を拒否する。
+
+実Agent VM gate:
+
+```sh
+SUNABA_PHASE3_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase3GitGatewayInAgentVM$' -count=1 -v
+```
+
+このgateはVM内の実`git clone`、pause/resume、upstream更新後の`pull --ff-only`、未承認push拒否、Trusted UI confirm、同一retry成功、host credential非混入、Destroy後のsocket失効、監査event完全性とsecret非混入を検証する。通常/force/deleteのstandard Git retryはhost smart HTTP統合試験で別途固定する。
+
 再現コマンド:
 
 ```sh
 go test -race -v ./internal/gitgateway
 ```
 
-## 残件
+## Phase 3 gate
 
-- 実Agent VMでclone/fetch/pull/push、pause/end、credential非混入を統合試験する
-- expiry、別Project/VM、object/ref差し替えのVM攻撃試験
-
-これらを完了するまでPhase 3を完了扱いにしない。
+- expiryはrequest confirm後のgrantにも引き継ぎ、期限後のconsumeをunit testで拒否する
+- 別Project/VMは専用socket mount、session policy digest、capability identity、hook tokenで分離する
+- object/ref/force差し替え、stale old、missing object、symlink quarantine、upstream raceをhost統合試験で拒否する
+- force/deleteをTrusted UIで通常pushと別flagとして表示する

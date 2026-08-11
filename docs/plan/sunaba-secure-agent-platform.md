@@ -728,6 +728,22 @@ push承認は一回限りで、少なくとも次へ束縛する。
 
 承認後にcommitやrefが変化した場合、pushを拒否して再承認を要求する。secure/devのどちらでも、ホストcredentialを使うpushにはこの規則を適用する。
 
+### 13.3 MVPの確定方式と対象範囲
+
+MVPはHTTPS smart HTTPを採用し、SSH transportは対象外とする。guestはProject/VM/Session専用socketへ接続するloopback relayと、固定repository URLだけへ送る短命Gateway capabilityを使う。upstreamのBasic/Bearer Authorization、TLS設定、実credentialはhost read relayまたはhost Git subprocessでだけ注入し、guestのcredential helper、remote URL、argv、auditへ返さない。
+
+clone/fetch/pullは固定upstreamの`upload-pack`だけを中継する。pushはhost bare quarantineの`receive-pack`を使う。pre-receive helperはGit自身のobject quarantineにあるold/new/refをprivate Unix socketでhost brokerへ送り、host brokerがobject存在、current old ref、fast-forward/force/deleteを再計算する。初回pushはpending approvalを作って拒否し、Trusted Approval UIで確定した同一bindingのretryだけを一回受理する。hostはreceive advertisement前に固定upstreamからbare quarantineへatomic fetch/pruneし、表示するold refをupstreamへ同期する。承認retryのupstream pushにはrefごとのexact object leaseとatomic pushを要求し、upstream refの競合を拒否する。
+
+upstream push成功後、local receive-packのref更新が失敗する分散transactionの窓は完全には除去できない。この場合はupstream成功のhost auditを正とし、clientへ失敗を返す。次のreceive advertisementでupstreamから再同期し、利用者はfetch後の状態から新しいpush requestを作る。local成功を理由にupstream失敗を成功扱いすることはない。Phase 5でこのpartial failureをfault injectionする。
+
+MVPの追加scopeは次とする。
+
+- Git LFS endpointは中継しない。pointer fileは通常のGit objectとして扱えるが、LFS object download/uploadはroute拒否する。
+- submodule URLへ親repositoryのcapabilityやcredentialを継承しない。利用する場合はsubmodule repositoryを別の固定Gateway/quarantineとして明示登録する。
+- 複数remoteはremoteごとに別の固定送信先、host quarantine、capability、approval bindingを持つ。同じGateway instanceでguest指定の任意upstreamを選ばせない。
+- HTTPS redirectは追跡しない。送信先変更はProject policy更新と新しいapproval対象にする。
+- session pause中はGatewayを拒否し、session endでHTTP listener、hook broker、capabilityを失効する。
+
 ---
 
 ## 14. Web Gateway：未決事項と要求
@@ -1105,10 +1121,12 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 
 ### DG-04: Git Gatewayの透過性とpush TOCTOU耐性
 
-- tokenをguestへ返さない方式
-- 標準Gitとの互換性
-- object ID束縛承認
-- LFS、submodule、複数remoteをどこまでMVP対象にするか
+状態: 解決済み。13.3のHTTPS smart HTTP、host credential終端、object quarantine、one-shot approval、exact leaseを採用する。
+
+- 実credentialをguestへ返さず、短命Gateway capabilityだけを渡す
+- 標準Gitのclone/fetch/pull/pushを実Agent VMで検証する
+- object ID、force、deleteへ束縛したone-shot承認を使う
+- LFS、submodule、複数remoteのMVP scopeは13.3に固定する
 
 ### DG-05: Web Gatewayの保証範囲
 

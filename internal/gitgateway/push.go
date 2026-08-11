@@ -24,6 +24,25 @@ type PushExecutor struct {
 	SessionID           string
 }
 
+func (e PushExecutor) Sync(ctx context.Context) error {
+	if e.Audit == nil || !gitIdentityPattern.MatchString(e.Resolver.ProjectID) || !gitIdentityPattern.MatchString(e.VMID) || !gitIdentityPattern.MatchString(e.SessionID) {
+		return fmt.Errorf("host Git sync configuration is invalid")
+	}
+	if err := e.validateTransport(); err != nil {
+		return err
+	}
+	lock, err := lockRepository(e.Resolver.RepositoryPath)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	binding := PushBinding{ProjectID: e.Resolver.ProjectID, Repository: e.Resolver.Repository, RemoteName: e.Resolver.RemoteName, RemoteURL: e.Resolver.RemoteURL}
+	if err := e.runGit(ctx, []string{"fetch", "--atomic", "--prune", "--no-tags", e.Resolver.RemoteURL, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"}); err != nil {
+		return errors.Join(fmt.Errorf("host Git upstream sync failed"), e.recordSync("rejected", binding, "upstream_sync_failed"))
+	}
+	return e.recordSync("success", binding, "")
+}
+
 func (e PushExecutor) Execute(ctx context.Context, grant *PushGrant, proposed []ProposedRefUpdate) error {
 	if e.Approvals == nil || e.Audit == nil || e.AuthorizationHeader == "" || len(e.AuthorizationHeader) > 4096 || containsControl(e.AuthorizationHeader) || !gitIdentityPattern.MatchString(e.VMID) || !gitIdentityPattern.MatchString(e.SessionID) {
 		return fmt.Errorf("host Git push executor configuration is invalid")
@@ -59,21 +78,10 @@ func (e PushExecutor) Execute(ctx context.Context, grant *PushGrant, proposed []
 }
 
 func (e PushExecutor) push(ctx context.Context, binding PushBinding) error {
-	if !strings.HasPrefix(binding.RemoteURL, "https://") {
-		return fmt.Errorf("HTTPS push executor received a non-HTTPS remote")
+	if err := e.validateTransport(); err != nil {
+		return err
 	}
-	gitPath := e.Resolver.GitPath
-	if gitPath == "" {
-		var err error
-		gitPath, err = exec.LookPath("git")
-		if err != nil {
-			return fmt.Errorf("locate host Git: %w", err)
-		}
-	}
-	if !filepath.IsAbs(gitPath) {
-		return fmt.Errorf("host Git path must be absolute")
-	}
-	args := []string{"--git-dir=" + e.Resolver.RepositoryPath, "push", "--atomic", "--porcelain"}
+	args := []string{"push", "--atomic", "--porcelain"}
 	for _, update := range binding.Updates {
 		expected := update.Old
 		if strings.Trim(expected, "0") == "" {
@@ -89,6 +97,32 @@ func (e PushExecutor) push(ctx context.Context, binding PushBinding) error {
 		}
 		args = append(args, source+":"+update.Ref)
 	}
+	return e.runGit(ctx, args)
+}
+
+func (e PushExecutor) validateTransport() error {
+	if !strings.HasPrefix(e.Resolver.RemoteURL, "https://") || e.AuthorizationHeader == "" || len(e.AuthorizationHeader) > 4096 || containsControl(e.AuthorizationHeader) || (!strings.HasPrefix(e.AuthorizationHeader, "Basic ") && !strings.HasPrefix(e.AuthorizationHeader, "Bearer ")) {
+		return fmt.Errorf("host Git HTTPS transport configuration is invalid")
+	}
+	if e.TLSCAInfoPath != "" {
+		return validateHostCredentialFile(e.TLSCAInfoPath)
+	}
+	return nil
+}
+
+func (e PushExecutor) runGit(ctx context.Context, operationArgs []string) error {
+	gitPath := e.Resolver.GitPath
+	if gitPath == "" {
+		var err error
+		gitPath, err = exec.LookPath("git")
+		if err != nil {
+			return fmt.Errorf("locate host Git: %w", err)
+		}
+	}
+	if !filepath.IsAbs(gitPath) {
+		return fmt.Errorf("host Git path must be absolute")
+	}
+	args := append([]string{"--git-dir=" + e.Resolver.RepositoryPath}, operationArgs...)
 	command := exec.CommandContext(ctx, gitPath, args...)
 	command.Dir = e.Resolver.RepositoryPath
 	configCount := "1"
@@ -119,9 +153,20 @@ func (e PushExecutor) push(ctx context.Context, binding PushBinding) error {
 	}
 	command.Stdin = nil
 	if _, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("host Git upstream rejected the approved push")
+		return fmt.Errorf("host Git operation was rejected by fixed upstream")
 	}
 	return nil
+}
+
+func (e PushExecutor) recordSync(outcome string, binding PushBinding, reason string) error {
+	details := map[string]string{"repository": binding.Repository, "remote_name": binding.RemoteName, "remote_url": binding.RemoteURL}
+	if reason != "" {
+		details["reason"] = reason
+	}
+	return e.Audit.Append(audit.BoundaryEvent{
+		Category: "git", Action: "git.fetch.sync", Outcome: outcome, ProjectID: binding.ProjectID,
+		VMID: e.VMID, SessionID: e.SessionID, Details: details,
+	})
 }
 
 func (e PushExecutor) record(outcome string, binding PushBinding, reason string) error {
