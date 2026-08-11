@@ -126,7 +126,24 @@ container delete --force sunaba-<projectID>-<sessionID>
 
 force deleteは当該一時VMのoverlayを復元不能に破棄する。未承認成果物があるProject VMには使わず、通常のexport/stop/delete経路を使う。この例外も、本文書を実装者が更新したこと自体は実行承認とみなさない。
 
-同じ障害で、当該検証が起動した`container stop`、`container kill`、`container delete --force`、または当該exact VMへの`container exec` client processだけが60秒以上応答せず残った場合は、`ps -axo user,pid,ppid,lstart,command`でcurrent user、完全なargv、対応VM名を再確認し、人間の個別承認後にそのclient PIDだけへ`kill -TERM`を送ってよい。Apple Containerのruntime/plugin process、Supervisor、`buildkit`、名前や由来を確認できないprocessへsignalを送らない。TERM後も残るclientへ別signalを送る場合は改めて人間へ確認する。
+個別の通常stop、KILL、force deleteがすべて60秒以上固着し、Apple Containerの公開lifecycle APIだけではorphan test VMを回収できない場合は、次をすべて満たす最終復旧に限り、人間へ一時停止するuser-owned resourceと復元手順を提示して承認を得た後、system serviceを1回だけstop/startしてよい。
+
+```sh
+container system stop
+container system start
+```
+
+- 直前に`container system version` / `status`、全container、network、volumeをinventoryし、exact orphan VM以外のresourceを完全名・設定・状態ごと記録する
+- 未承認の一般containerがrunningなら実行を拒否する。plugin管理の`buildkit`だけがrunningの場合も、人間へ一時停止の影響を明示して承認を得る
+- `container system restart`、`sudo`、`launchctl`、service/runtime/plugin processへの直接signalを使わない
+- stop完了後に直ちにstartし、system version/statusと全resourceを再inventoryする
+- orphan VMがstoppedになった場合だけ個別deleteする。なおrunningなら、この節を反復せず停止して人間へ報告する
+- 事前にrunningだったplugin管理`buildkit`が自動復元されなければ、同じ完全名を個別`container start buildkit`で復元してよい。delete、recreate、設定変更は行わない
+- 復旧後の`buildkit`について、ID、image、labels、mount、network、running状態が事前inventoryと一致することを確認する
+
+このsystem cycleは全container serviceを一時停止する。通常のtest cleanupには使わず、上記の固着状態から利用者承認付きで復旧する場合だけに限定する。この例外も、本文書を実装者が更新したこと自体は実行承認とみなさない。
+
+同じ障害で、当該検証が起動した`container stop`、`container kill`、`container delete --force`、`container system stop`、または当該exact VMへの`container exec` client processだけが60秒以上応答せず残った場合は、`ps -axo user,pid,ppid,lstart,command`でcurrent user、完全なargv、対応VM名を再確認し、人間の個別承認後にそのclient PIDだけへ`kill -TERM`を送ってよい。Apple Containerのruntime/plugin process、Supervisor、`buildkit`、名前や由来を確認できないprocessへsignalを送らない。TERM後も残るclientへ別signalを送る場合は改めて人間へ確認する。
 
 ## 許可するRuntime Adapter操作
 
