@@ -11,6 +11,9 @@
   "agent_image": {
     "tag": "sunaba-base:1.18.16-secure.1"
   },
+  "go_modules": {
+    "golang.org/x/sys": "v0.30.0"
+  },
   "opencode": {
     "version": "1.18.16",
     "host": {

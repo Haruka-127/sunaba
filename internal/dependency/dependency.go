@@ -37,7 +37,8 @@ type Manifest struct {
 	AgentImage struct {
 		Tag string `json:"tag"`
 	} `json:"agent_image"`
-	OpenCode struct {
+	GoModules map[string]string `json:"go_modules"`
+	OpenCode  struct {
 		Version string   `json:"version"`
 		Host    Artifact `json:"host"`
 		Guest   Artifact `json:"guest"`
@@ -82,6 +83,9 @@ func (m Manifest) Validate() error {
 	}
 	if m.AgentImage.Tag != "sunaba-base:"+OpenCodeVersion+"-secure.1" {
 		return fmt.Errorf("unexpected agent image tag %q", m.AgentImage.Tag)
+	}
+	if m.GoModules["golang.org/x/sys"] != "v0.30.0" {
+		return fmt.Errorf("golang.org/x/sys must be pinned to v0.30.0")
 	}
 	if strings.Contains(strings.ToLower(m.OpenCode.Host.URL), "latest") || strings.Contains(strings.ToLower(m.OpenCode.Guest.URL), "latest") {
 		return fmt.Errorf("dependency URLs must not use latest")

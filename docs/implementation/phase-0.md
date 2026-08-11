@@ -68,10 +68,26 @@ go test -tags=integration -run TestPhase0SecureNetworkAndGatewayTransport -v ./t
 
 この結果はDG-01のsecure egress、guest-to-host Gateway transport、host-to-guest reverse attach transportの中核証拠である。DG-01通過には、別Project socket非共有、構成検証失敗時のsession fail-closed、dev session egress leaseも追加で実測する。
 
+## DG-02 host Snapshot
+
+host Projectから固定Snapshotを作る前半を実装した。
+
+- canonical Project rootをdirectory descriptorで開き、`openat` / `fstatat` / `O_NOFOLLOW`で相対walkする。
+- symlinkはtarget文字列だけを記録し、Project root内外を問わずリンク先を読まない。
+- `.git`と`.sunaba`をcase-insensitiveなProtected PathとしてSnapshot対象外にする。
+- socket、FIFO、device等の特殊file、depth、entry数、個別size、総size超過を拒否する。
+- path、type、mode、size、content SHA-256、symlink targetを整列したcanonical manifestからdigestを作る。
+- 新規Snapshot directoryへfd-relative/no-followでcopyし、copy後のmanifest digestがsourceと一致しなければ失敗して、そのtransactionが作成したdestinationだけを削除する。
+- xattrとhost hardlink関係はSnapshotへ継承しない。
+
+unit testは外部symlink targetの内容変更がdigestへ影響しないこと、Protected Path除外、特殊fileと上限の拒否、host編集から独立した固定copy、既存またはProject内destinationの拒否を検証する。
+
+DG-02通過には、Project Snapshotをbind mountせずguestへcopyすること、OverlayFSのrename/delete/whiteout/symlink、host境界freeze、停止後rootfs export、safe OCI extractionとmerged view再現を実Apple Containerで検証する必要がある。
+
 ## 未解決のDecision Gate
 
 - DG-01: Project間socket分離、fail-closed、dev egress leaseの実測
-- DG-02: immutable lower、freeze、merged semantics、safe exportの実測
+- DG-02: guest copy、OverlayFS、freeze、safe OCI export、merged semanticsの実測
 - DG-03: pinned host artifact、serve/attach、isolated config、terminal境界、Responses contractの実測
 
 これらが再現可能なintegration/attack testで成功するまでPhase 1へ進まない。
