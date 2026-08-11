@@ -1,6 +1,6 @@
 # Phase 0: 契約固定と技術probe
 
-状態: 実施中。DG-01、DG-02、DG-03は通過。Project lockのprobeが残っている。
+状態: **完了**。DG-01、DG-02、DG-03とProject lockのprobeを通過した。
 
 ## Dependency contract
 
@@ -144,8 +144,21 @@ go test -tags=integration -run TestPhase0SecureNetworkAndGatewayTransport -v ./t
 
 attack/unit testは認証なし、管理path、許可外model、別token、並行数超過、悪意あるSSE TUI command、ANSI/OSC/BEL、双方向文字、不正UTF-8、悪意あるdiff/file名を拒否または無害化する。これによりDG-03の固定artifact、serve/attach/health契約、Host TUI分離、terminal境界、Responses subset、stream/tool/error/cancel、短命token、provider/model固定を満たす。
 
-## Phase 0の残件
+## Project lock probe
 
-- canonical Project rootに対するprocess間Project lockの取得、競合拒否、process crash時の解放をprobeする。
+状態: **通過**。canonical Project rootからProject IDを導出し、sunaba state内のmode `0700`専用directoryにmode `0600`のlock fileを置く。lock fileは`O_NOFOLLOW`で開き、current user所有のregular fileだけを受け付け、non-blockingなkernel `flock`をdescriptorの生存期間だけ保持する。
 
-これが再現可能なtestで成功するまでPhase 1へ進まない。
+unit/race testは次を確認した。
+
+- 同じProjectを直接pathとsymlink aliasから取得しても同じcanonical identityとなり、二つ目を`ErrProjectLocked`で拒否する。
+- lock fileを外部fileへのsymlinkへ置換しても追跡せず、外部fileを変更しない。
+- holder processを強制終了してもkernelがlockを解放し、次のprocessが取得できる。staleなPID recordをlock保持判定には使わない。
+- 明示`Close`後に再取得でき、lock metadataにcanonical Project、Project ID、PID、取得時刻を残す。
+
+再現コマンド:
+
+```sh
+go test -race -v ./internal/state
+```
+
+以上によりPhase 0の全probeを完了し、Phase 1のvertical sliceへ進める。
