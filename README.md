@@ -1,150 +1,108 @@
 # sunaba
 
-> [!IMPORTANT]
-> このREADMEは現在リポジトリに実装されている旧プロトタイプの挙動を説明しており、次期アーキテクチャの実装仕様ではありません。新規実装では [`docs/plan/README.md`](./docs/plan/README.md) と [`docs/plan/sunaba-secure-agent-platform.md`](./docs/plan/sunaba-secure-agent-platform.md) を正本としてください。旧プロトタイプのbind mount、credential注入、ネットワーク方針を新設計へ引き継いではなりません。
+sunabaは、侵害済みのOpenCode serverとVM内rootを前提に、Projectの開発セッションをApple Container VMへ隔離するmacOS向け実行基盤です。host worktreeや実credentialをVMへ渡さず、host側のSupervisor、Gateway、Snapshot、OverlayFS、Change Set、Trusted Approval UIで境界を強制します。
 
-sunaba は、opencode server をプロジェクト専用の apple/container Linux VM 内で起動し、ホスト側の opencode TUI から接続するための CLI です。
+製品仕様の正本は[`docs/plan/sunaba-secure-agent-platform.md`](./docs/plan/sunaba-secure-agent-platform.md)、実装・検証で許可するhost操作は[`docs/plan/allowed-host-operations.md`](./docs/plan/allowed-host-operations.md)です。
 
-## 前提
+## 固定dependency
 
-- macOS / Apple silicon
-- [apple/container 1.2.2](https://github.com/apple/container/releases/tag/1.2.2) 以上
-- `container system start` 済み
-- ホスト側に opencode CLI がインストール済み
-- Go 1.22 以上
+- macOS 26 / Apple silicon
+- Apple Container exact `1.2.2`
+- OpenCode host TUI / guest server exact `1.18.16`
+- Agent image `sunaba-base:1.18.16-secure.1`
+- Go 1.22以降（build時のみ）
 
-## インストール
+artifact URL、SHA-256、source tag/commit、base OCI digest、image build input digestは[`internal/dependency/manifest.json`](./internal/dependency/manifest.json)に固定されています。`latest`、自動update、host/guestのversion混在は拒否します。
+
+## 境界
+
+secure modeではVMを`--network none --no-dns`で作り、Project/VM/session専用Unix socketからLocal Attach Relay、Model Gateway、任意でGit/Web Gatewayだけへ接続します。host Projectはfd-relative/no-follow walkでSnapshot化してguest rootfsへcopyし、直接mountしません。VM停止後のrootfs exportはuntrusted archiveとして検証し、host側でMerged ViewとChange Setを再構成します。host worktreeへの反映にはdigestへ束縛したone-shot承認が必要です。
+
+dev modeは明示選択です。activeなAgent Session中だけ専用Apple Container networkから直接Internet egressを許可します。このモードは情報流出防止を保証しません。専用subnetに束縛したpf規則でhost、LAN/private/link-local/metadata、別VM、unsolicited inboundを拒否し、session終了時にVM停止、pf anchor解除、network削除を行います。同時にactiveにできるdev sessionは1つです。
+
+## Build
+
+グローバルinstallは不要です。
 
 ```sh
-go build -o bin/sunaba ./cmd/sunaba
+mkdir -p bin
+go build -trimpath -o bin/sunaba ./cmd/sunaba
+go build -trimpath -o bin/sunaba-guest-relay ./cmd/sunaba-guest-relay
+go build -trimpath -o bin/sunaba-git-hook ./cmd/sunaba-git-hook
 ```
 
-必要なら `bin/sunaba` を PATH の通った場所へ配置してください。
-
-## 初回セットアップ
+3 binaryは同じdirectoryへ置きます。hostの`opencode`はPATH上のexact v1.18.16 artifactでなければならず、実行前に固定SHA-256を確認してsunaba管理stateへcopyします。Apple Container systemは利用前に人間が起動します。
 
 ```sh
 container system start
-bin/sunaba update
-cd /path/to/project
-bin/sunaba up
 ```
 
-初回 `up` ではプロジェクト状態が `~/.local/share/sunaba/projects/<projectID>/` に作成されます。opencode の認証情報はコンテナ内で設定します。
+## 基本操作
 
 ```sh
-bin/sunaba shell
-opencode auth login
+bin/sunaba project init /absolute/project/path --mode secure
+bin/sunaba up --dir /absolute/project/path
+OPENAI_API_KEY=... bin/sunaba agent --dir /absolute/project/path
+bin/sunaba changes export --dir /absolute/project/path
+bin/sunaba changes apply --dir /absolute/project/path
 ```
 
-認証情報は `opencode-data/` に保存され、通常の `reset` では保持されます。
+`OPENAI_API_KEY`はhost Model Gatewayだけが読み、VM、Host TUI、Project、auditへ保存しません。`agent`は固定OpenCode serverと隔離Host TUIを同時管理し、TUI終了後にcapabilityを失効してVMを停止・exportします。変更があれば、検証済みMerged ViewとChange Setをsunaba state内のpending領域へ保存します。`changes apply`はhost生成nonceを表示し、同じnonceの手入力後だけtransactional applyを実行します。
 
-## コマンド
+dev modeへの変更は明示的に行います。
 
 ```sh
-sunaba up [--dir PATH] [--cpus N] [--memory SIZE] [--no-attach] [--no-firewall]
+bin/sunaba up --dir /absolute/project/path --mode dev
+OPENAI_API_KEY=... bin/sunaba agent --dir /absolute/project/path
 ```
 
-プロジェクト用コンテナを作成または起動し、opencode server の health を待ってから監査デーモンを起動します。既定ではホスト側 TUI を `opencode attach` で接続します。
+dev sessionのpf構成では、許可文書に記載した`sudo bin/sunaba firewall ...`だけが使われます。secure modeはpfやdefault container networkに依存しません。
+
+コマンド一覧は`bin/sunaba help`を正とします。guest shellは、interactive terminal relayへ同じsanitizerを強制できるまでfail closedで無効です。raw `container exec`へのfallbackは提供しません。
+
+## Git / Web Gateway
+
+Git Gatewayはfixed HTTPS upstream、host credential終端、bare quarantine、standard smart HTTP、object/ref/force/deleteへ束縛したone-shot approvalを実装しています。Web Gatewayはorigin allowlistとhost DNS全回答/IP検査を持つTLS非終端forward proxyで、HTTPはGET/HEADのみ、CONNECTは443のみです。TLS tunnel内部のmethod/path/uploadは復号しないため保証しません。
+
+両Gatewayのproduction contractは実Agent VM integration testで検証しています。Project policy schemaはGit remoteとWeb origin/blocklistを保持しますが、credential取得やblocklist snapshot作成を暗黙に行いません。未構成のpolicyでGatewayを有効にした場合、CLIは安全性の低い経路へfallbackせず開始を拒否します。
+
+## Stateとcleanup
+
+既定stateは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`配下です。Project policy、audit、lease、managed tool、pending Change Setをmode `0700`/`0600`で保持します。Project本文やcredentialをauditへ記録しません。
 
 ```sh
-sunaba shell [--dir PATH] [--no-firewall]
+bin/sunaba status --dir /absolute/project/path
+bin/sunaba recreate --dir /absolute/project/path
+bin/sunaba down --dir /absolute/project/path
+bin/sunaba destroy --dir /absolute/project/path --yes --discard-pending
 ```
 
-起動中のコンテナへ `agent` ユーザーとして入ります。コンテナが停止中または未作成の場合は先に起動します。`--no-firewall` を付けると、起動時の host firewall 適用をスキップします。`agent` は必要時に `sudo` を利用できます。
-
-```sh
-sunaba stop [--dir PATH]
-```
-
-監査デーモンを止め、プロジェクトコンテナを停止します。
-
-```sh
-sunaba reset [--dir PATH] [--full] [--yes]
-```
-
-通常 reset はコンテナのみを削除し、セッション履歴、認証情報、環境変数、server password、監査ログは保持します。`--full` はプロジェクト状態ディレクトリ全体を削除します。
-
-```sh
-sunaba update [--opencode-version X.Y.Z]
-```
-
-埋め込み Containerfile から `sunaba-base:<version>` をローカルビルドします。既存コンテナには次回 `reset` 後に反映されます。
-
-```sh
-sunaba status [--dir PATH]
-sunaba list
-```
-
-プロジェクト状態、コンテナ状態、IP、opencode バージョン、firewall、監査デーモン状態を確認します。
-
-```sh
-sunaba env set KEY=VALUE... [--dir PATH]
-sunaba env unset KEY... [--dir PATH]
-sunaba env list [--dir PATH]
-```
-
-プロジェクト単位の環境変数を管理します。値は `env` ファイルに 0600 で保存され、コンテナ作成時に注入されます。稼働中コンテナには反映されないため、変更後は `sunaba reset` を実行してください。`list` は値をマスクして表示します。
-
-```sh
-sunaba config firewall [enabled|disabled|inherit] [--global] [--dir PATH]
-```
-
-firewall の自動適用設定を管理します。既定は有効です。`--global disabled` は全体の既定を無効にします。プロジェクト単位では `disabled` / `enabled` / `inherit` を設定でき、プロジェクト設定がグローバル設定を上書きします。引数なしで現在の設定と実効値を表示します。
-
-例:
-
-```sh
-sunaba config firewall disabled --global
-sunaba config firewall disabled --dir /path/to/project
-sunaba config firewall enabled --dir /path/to/project
-sunaba config firewall inherit --dir /path/to/project
-```
-
-```sh
-sunaba firewall enable
-sunaba firewall disable
-sunaba firewall status
-```
-
-pf anchor `sunaba` を管理し、コンテナからホスト自身への IPv4 / IPv6 通信を遮断します。root 権限が必要な場合は `sudo` で自分自身を再実行します。許可された host 操作の範囲は `docs/plan/allowed-host-operations.md` に限定されます。
-
-```sh
-sunaba logs [--dir PATH] [-f]
-```
-
-当日の監査ログのパスを表示し、内容を出力します。`-f` で追尾します。
-
-## セキュリティ上の注意
-
-- LLM API キーは sunaba 専用の低権限キーを使い、プロバイダ側で支出上限を設定してください
-- `~/.ssh`、グローバル git 設定、Keychain などのホスト秘密情報はコンテナへマウントしません
-- `sunaba env` で注入するトークンは、対象リポジトリを限定した fine-grained PAT など最小権限のものにしてください
-- エージェントがプロジェクトフォルダに書いた git hooks、`.vscode`、`node_modules` などは、後からホスト側の git やエディタが実行し得ます。ホスト側でビルドやコミットをする前に diff を確認してください
-- コンテナから外向きインターネット通信は許可されます。プロジェクト内容やコンテナ内認証情報の流出を完全には防げません
-- 使わないプロジェクトは `sunaba stop` で停止してください。macOS の仮想化は稼働中コンテナのメモリを保持し続ける場合があります
-
-## 既知の制限
-
-- ディスクサイズは apple/container のランタイム既定に従います
-- LAN 宛て通信は本版では許可のままです
-- ホスト側編集のファイルウォッチイベントがコンテナ内へ即時伝播しない場合があります
-- `sunaba update` は GitHub API のレート制限を受ける場合があります。その場合は `--opencode-version` を指定してください
+cleanupは`sunaba-` prefixだけでは削除せず、完全名、owner/project/session label、永続leaseを再検証します。他ユーザーのcontainer、network、volume、imageは変更しません。
 
 ## 検証
 
-ビルド、静的解析、単体テストのみを実行する場合:
+通常gateはhost設定やcontainerを変更しません。
 
 ```sh
 scripts/verify.sh
 ```
 
-コンテナ作成、pf変更、自動承認、reset、イメージ更新を含むA2〜A21の統合検証には、opencodeの有効な認証・モデル設定と、一つ前の有効なリリース番号を指定します。
+これはformat、`go test ./...`、`go test -race ./...`、`go vet ./...`、3 binary build、CLI/static boundaryを実行します。bounded fuzzとApple Container実機gateは明示的に有効化します。
 
 ```sh
-SUNABA_FULL_VERIFY=1 \
-SUNABA_PREVIOUS_OPENCODE_VERSION=1.18.15 \
-scripts/verify.sh
+SUNABA_FUZZ=1 scripts/verify.sh
+SUNABA_INTEGRATION=1 scripts/verify.sh
+SUNABA_INTEGRATION=1 SUNABA_DEV_INTEGRATION=1 scripts/verify.sh
 ```
 
-統合検証は `sunaba-` プレフィックスの検証コンテナと一時プロジェクトを作成し、終了時に削除します。pf変更に必要な `sudo` を対話的に許可できる端末で実行してください。
+dev integrationはdocumented pf操作の対話承認が可能なterminalで実行します。実OpenAI/Git credentialを必要とするlive testは自動実行せず、mock upstreamで同じcontractを検証します。Decision Gateの証拠と個別コマンドは[`docs/implementation/`](./docs/implementation/)にあります。
+
+## 残余リスク
+
+- dev modeのactive session中の任意情報流出
+- TLS非終端Web CONNECT内部のmethod/path/uploadを識別できないこと
+- LLMが生成した成果物をapply後にhost toolが実行するsupply-chain risk
+- Apple Container、guest kernel、OpenCode、Gateway/relay/parser実装の未知の脆弱性
+- upstream Git成功後にlocal ref更新だけが失敗する分散transactionの窓（次回syncとauditで収束）
+
+より詳しい保証範囲は正本文書の「残余リスク」を参照してください。

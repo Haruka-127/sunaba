@@ -525,6 +525,8 @@ UIと監査ログにはdevモードであること、情報流出防止を保証
 
 devモードでは任意の直接通信を許すため、VMが自分で取得・生成したcredentialや認証不要のendpointを使うGit pushまで、Git Gatewayの承認で強制的に止めることはできない。sunabaが確実に管理するのはホストcredentialを利用するGit Gateway経由のpushである。すべての外向きGit書き込みを承認対象にする要件は、devモードの直接通信許可と両立しない。
 
+実装方式はProject/session専用のApple Container NAT networkと、割り当てられたsource IPv4/IPv6 subnetへ束縛したpf anchorを採用する。default networkを共有せず、networkの完全名、owner/project/session/mode label、NAT plugin、subnet/gatewayを開始・再開前に再検証する。pfはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、他VM private subnet、unsolicited inboundを拒否する。実装は同時active dev sessionをhost flockで1つへ制限し、VM削除後にanchorと専用networkを失効する。secure modeはこのpfへ依存せず`network none`を維持する。
+
 ### 10.3 モード遷移
 
 - secureが既定である。
@@ -982,6 +984,8 @@ Phase 1は内部vertical sliceであり、untrusted Projectを扱う一般利用
 - image provenanceとdependency更新
 - セキュリティレビューと公開前の残余リスク整理
 
+実装状態: 完了。dependency manifest schema v2、build input provenance、全証拠を要求するversion更新contract、Project policy v2 migration、audit retention/redaction、Gateway fuzz/property、ENOSPC、guardを失ったhost reboot、Git partial failureのfault injectionを自動testへ固定した。通常verifyは旧prototype gateを廃止してformat、unit、race、vet、固定helper build、CLI/static boundaryを実行する。詳細な証拠と再現コマンドは[`../implementation/phase-5.md`](../implementation/phase-5.md)を正とする。
+
 ---
 
 ## 20. MVP受け入れ基準
@@ -1184,11 +1188,10 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 - 利用者が許可したLLMプロバイダーへのソースコード開示
 - Snapshotへ含めた`.env`等のProject内機密が、許可されたLLMプロバイダーへ送信されること
 - 侵害済みVMが、有効なModel/Git/Web capabilityをその許可範囲とquota内で悪用すること
-- Project VMを再利用することで、侵害や悪意ある永続化がセッションをまたぐこと
+- Project VMの状態保持を選択した場合に、侵害や悪意ある永続化がセッションをまたぐこと
 - devモードからの任意の情報流出
 - devモードのactive session中に、侵害済みVMが直接通信を継続すること
 - devモードでGit Gatewayを迂回して行われる、host credentialを使わない外向きGit書き込み
-- Web Gateway完成前のsecureモードで一般Webを利用できないこと
 - Web Gateway実装後も、その明示した保証範囲外で生じる情報流出や悪意ある許可先の利用
 - Change Set自体が、適用後にホスト上のIDE、build tool、shell等の脆弱性を誘発すること
 - 大量の正当形式requestによる、quota内での料金・資源消費
@@ -1207,9 +1210,8 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 
 - 確定: 単一Agent VM、Project単位、OverlayFS、Change Set、secure/dev、Model Gatewayの最小構成
 - 固定dependency: OpenCode `v1.18.16`のhost TUI / guest server同一version
-- 完了段階: Git Gatewayとpush承認
-- 完了段階: Phase 4 Web Gatewayの方式決定、実装、実VM gate
-- 次段階: Phase 5 hardeningと運用gate
+- 完了段階: Phase 0〜5の実装、Decision Gate、mock/実VM contract gate
+- 最終統合: CLI/README/通常verifyを現行境界へ更新済み。dev pf実機gateと全resource cleanupを最終確認する
 - 別承認: `allowed-host-operations.md`の範囲外となるホスト操作
 
 Phase 0でsecure networkまたはOverlayFS/exportの中核不変条件を実現できないと判明した場合は、見かけ上の実装を続けず、アーキテクチャ判断を更新する。

@@ -12,6 +12,17 @@
 
 同じ事項について記述が食い違う場合は、`AGENTS.md`の作業規則と禁止事項を常に守ったうえで、`sunaba-secure-agent-platform.md`を製品仕様の正本とする。ホスト操作は、設計文書に必要性が書かれていても、`allowed-host-operations.md`に明記されていなければ実行してはならない。
 
+## 実装証拠
+
+PhaseごとのDecision Gate、実行コマンド、結果、未解決事項は`docs/implementation/`に保守する。
+
+- [`../implementation/phase-0.md`](../implementation/phase-0.md)
+- [`../implementation/phase-1.md`](../implementation/phase-1.md)
+- [`../implementation/phase-2.md`](../implementation/phase-2.md)
+- [`../implementation/phase-3.md`](../implementation/phase-3.md)
+- [`../implementation/phase-4.md`](../implementation/phase-4.md)
+- [`../implementation/phase-5.md`](../implementation/phase-5.md)
+
 ## Archive
 
 [`archive/`](./archive/)には、現在の設計より前に作られた計画・実装仕様を保存する。

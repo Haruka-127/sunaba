@@ -1,0 +1,110 @@
+# Phase 5: hardeningと運用
+
+状態: 実装完了。fuzz/property、dependency更新契約、policy migration、audit retention/redaction、disk pressure、host reboot、Git partial failure、supply-chain provenanceを自動testへ固定した。最終統合のdev pf実機gateは別項として継続する。
+
+## Fuzz / property
+
+対象:
+
+- Model Gateway Responses envelope: malformed JSON、model substitution、size境界
+- Git Gateway push binding: object/ref/force/deleteのcanonicalityとdigest束縛
+- Web Gateway hostname: ASCII正規化、IP literal、label/port境界
+- Web blocklist hosts parser: record形式、domain数、重複、invalid hostname
+
+再現コマンド:
+
+```sh
+go test ./internal/modelgateway -run '^$' -fuzz FuzzResponsesEnvelope -fuzztime 10s
+go test ./internal/gitgateway -run '^$' -fuzz FuzzCanonicalPushBinding -fuzztime 10s
+go test ./internal/webgateway -run '^$' -fuzz FuzzNormalizeHostname -fuzztime 10s
+go test ./internal/webgateway -run '^$' -fuzz FuzzHostsBlocklistParser -fuzztime 10s
+```
+
+2026-08-11の実行ではそれぞれ61,671、140,074、141,027、120,709 inputを処理し、crashまたは不変条件違反はなかった。corpus本文はcommitせずseedだけをtestに保持する。
+
+## Dependency / supply chain
+
+dependency manifest schema v2は次を固定する。
+
+- Apple Container `1.2.2`のrepository、tag、commit
+- OpenCode `v1.18.16`のrepository、tag、commit、host/guest artifact SHA-256
+- base OCI index digest
+- embedded `Containerfile` / `entrypoint.sh`のSHA-256
+
+image buildはembedded bytesをmanifestへ再照合してから実行する。version更新candidateはexact versionが変わり、artifact digest、runtime version、lifecycle、network isolation、copy/export、resource limitの全証拠が揃わなければ拒否する。`latest`と部分的な更新証拠はtestで拒否する。
+
+現行固定版の再検証にはPhase 0〜4の実機gateを再実行する。新versionへ更新するときは、先にmanifest/source pinをreviewし、同じgateの結果を新しいimplementation recordへ記録する。自動updateは行わない。
+
+## Project policy migration
+
+Project policy schema v2はProject identity/root、mode、dependency、resource、session、Model/Git/Web、export、audit retention、Protected Pathを一つのdigest可能な文書へ統合した。
+
+- JSON unknown field、trailing data、unsupported schemaを拒否
+- canonical rootとProject IDの差し替えを拒否
+- mode `0600` current-user regular fileとmode `0700` canonical parentだけを受理
+- v1からv2へのmigrationをprivate temporary file + fsync + atomic renameで行う
+- legacy Web originがあるpolicyは、blocklist snapshot/digestを推測せずmigrationを拒否
+
+## Audit retention / redaction
+
+auditはmetadata-onlyのhost JSONLであり、sensitive key名、credentialに似た値、URL userinfo、Bearer/Basic、API key形式を拒否またはredactする。保持期間は1〜365日に制限し、exactな`audit-YYYYMMDD.jsonl`だけを対象にmode、owner、symlinkを再検証して削除する。directory fsync前の失敗を成功扱いしない。
+
+## Fault injection
+
+自動testは次を固定する。
+
+- session guest setupの`ENOSPC`: 作成済みVMをownership再検証後に削除し、lease/Project lockを解放
+- transactional applyの`ENOSPC`: host baselineをrollbackし、未完了transactionを成功扱いしない
+- host reboot相当: durable active leaseは残るがprocess guardがない状態から、exact label/lease一致のVMだけを停止・削除してcapabilityをrevoke
+- Git partial failure: upstream push成功後にlocal receive ref更新が失敗してもupstream成功auditを正とし、次のadvertisement前`Sync`で収束
+
+再現コマンド:
+
+```sh
+go test -race ./internal/session ./internal/apply ./internal/cleanup ./internal/gitgateway
+```
+
+## dev session direct-egress boundary
+
+final integration用にProject/session専用Apple Container networkを追加した。default networkを共有せず、owner/project/session/mode labelとinspect結果を毎回照合する。source IPv4/IPv6 subnetへ束縛したpf anchorはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、別VM private subnet、unsolicited inboundを拒否する。
+
+同時dev sessionはcurrent-user所有のmode `0600` flockで1つへ制限する。開始・再開前にnetworkを再inspectしてpfを再検証し、pause/export時はVM停止、destroy時はVM削除後にanchorとnetworkを失効する。secure sessionは引き続き`network none`でありpfへ依存しない。
+
+再現コマンド:
+
+```sh
+SUNABA_DEV_INTEGRATION=1 \
+go test -tags=integration ./test/integration -run 'TestDevSessionNetworkBoundary$' -count=1 -v
+```
+
+このgateはdocumented `sudo ./bin/sunaba firewall enable|disable`を使うため、対話sudoを承認できるterminalが必要である。public DNS/HTTPS、host listener、別network VM、metadata、host-to-VM inbound、session stopを一回の隔離testで確認し、作成した完全名のVM/networkだけをcleanupする。
+
+## 通常verify
+
+[`scripts/verify.sh`](../../scripts/verify.sh)は旧prototypeのA2〜A21を廃止し、次を正とする。
+
+```sh
+scripts/verify.sh
+```
+
+- gofmt / `git diff --check`
+- `go test ./...`
+- `go test -race ./...`
+- `go vet ./...`
+- `sunaba`、guest relay、Git hook helperのbuild
+- CLI helpと旧unsafe entrypointのstatic boundary
+
+container mutation、pf、optional fuzz、live credentialは通常gateで暗黙に実行しない。
+
+## Security review / residual risk
+
+レビューで明示的に残すもの:
+
+- dev active session中は任意の直接情報流出を防がない
+- TLS非終端Web CONNECT内部のmethod/path/uploadは識別しない
+- allowlistされたHTTPS origin自体の侵害、content supply chain、LLM生成成果物のhost側実行
+- Apple Container、guest kernel、OpenCode、Gateway/relay/parserの未知の脆弱性
+- Git upstream成功後のlocal ref更新失敗はatomicにできず、auditと次回syncで収束する
+- credential/providerがない環境ではbillable live testを実行せずmock upstream contractを正とする
+
+これらを保証済み事項として表現せず、secure/devの警告、policy、README、正本文書へ一致させる。
