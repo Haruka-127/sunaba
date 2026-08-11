@@ -74,7 +74,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 func ownedIdentity(info runtime.Info) (projectID, sessionID string, ok bool) {
 	projectID = info.Labels["dev.sunaba.project"]
 	sessionID = info.Labels["dev.sunaba.session"]
-	if info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.mode"] != "secure" || projectID == "" || sessionID == "" {
+	mode := info.Labels["dev.sunaba.mode"]
+	if info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || (mode != "secure" && mode != "dev") || projectID == "" || sessionID == "" {
 		return "", "", false
 	}
 	if info.Name != "sunaba-"+projectID+"-"+sessionID {
