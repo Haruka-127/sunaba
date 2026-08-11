@@ -1,6 +1,6 @@
 # Phase 2: Projectライフサイクルと成果物境界
 
-状態: 実施中。Trusted Approval、crash-safe host apply、永続session leaseを伴う同一VMのpause/resumeを実装・検証済み。orphan cleanup、永続audit hardeningは継続中。
+状態: 実施中。Trusted Approval、crash-safe host apply、永続session leaseを伴う同一VMのpause/resume、orphan cleanupを実装・検証済み。Trusted UIとapply audit統合は継続中。
 
 ## Trusted Approval
 
@@ -36,18 +36,22 @@ Model Gateway capabilityはmode `0700`のhost state directoryに、mode `0600`�
 
 secure sessionはこのrecorderを必須とし、Project/VM/Session identity、snapshot、VM lifecycle、attach relay、Model Gateway lifecycleとrequest metadata、capability、pause/resume、export後のChange Set digest、cleanupを記録する。本文、upstream key、capability token、OpenCode server passwordは記録しない。audit追記不能時のpause/cleanupは、先にGateway gateと永続leaseをinactiveにしてVM停止・所有VM cleanupを継続し、操作自体はerrorとして返す。
 
+## orphan cleanup
+
+sessionは永続leaseに加え、Supervisor process寿命中だけOSが保持するsession別file guardを取得する。pause中もguardを保持し、process crashではkernelが自動解放する。orphan cleanupはApple Containerの一覧を読むだけでは削除せず、個別inspectを行い、`sunaba-<ProjectID>-<SessionID>`の完全名、owner/project/session/mode label、永続leaseのProject/VM/Session/用途identityをすべて完全一致させる。live guardがあればactive/paused sessionとして維持する。guardがなく、identityが完全一致する管理VMだけをauditへ事前記録し、leaseをrevokeし、再inspectしてから停止・削除し、結果を追記する。label欠落、名前差し替え、lease欠落・破損・identity不一致、audit障害では削除を拒否し、他resourceへ範囲を広げない。
+
 再現コマンド:
 
 ```sh
 go test -race -v ./internal/approval ./internal/apply ./internal/lease ./internal/session
 SUNABA_PHASE1_INTEGRATION=1 go test -tags=integration -run TestPhase1SecureSessionVerticalSlice -count=1 -v ./test/integration
+SUNABA_PHASE2_INTEGRATION=1 go test -tags=integration -run TestPhase2ActualOrphanCleanup -count=1 -v ./test/integration
 ```
 
-実Apple Container試験はstart、pause中のattach到達不能と有効tokenによるModel Gateway requestの`503`拒否、同じVMのresume、再度のOpenCode tool call、停止export、承認済みbaselineからのclean recreationまでを通過した。host JSONLにsession、Gateway、export、cleanup eventが存在し、3種のsecretが存在しないこと、および試験終了後に所有VMが残っていないことも確認した。
+実Apple Container試験はstart、pause中のattach到達不能と有効tokenによるModel Gateway requestの`503`拒否、同じVMのresume、再度のOpenCode tool call、停止export、承認済みbaselineからのclean recreationまでを通過した。host JSONLにsession、Gateway、export、cleanup eventが存在し、3種のsecretが存在しないことも確認した。別の実機試験ではlive guard中のVMを維持し、guard解放後だけ同じVMをorphanとして停止・削除した。いずれの試験後も所有VMは残っていない。
 
 ## 残件
 
-- ownership labelとactive leaseを照合するorphan cleanup
 - Trusted Approvalとcrash-safe applyのhost audit統合
 - actual Phase 1 export artifactから承認・applyまでの統合試験
 - resource quotaとTrusted UIのCLI統合

@@ -82,3 +82,27 @@ func TestRegisterPausedNeverCreatesAnInitiallyActiveLease(t *testing.T) {
 		t.Fatalf("initial record=%+v", record)
 	}
 }
+
+func TestGuardDetectsLiveSupervisorAndReleasesOnClose(t *testing.T) {
+	registry := &Registry{Root: filepath.Join(t.TempDir(), "leases")}
+	if _, err := registry.RegisterPaused("project", "vm", "session", "model", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	first, err := registry.AcquireGuard("session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Registry{Root: registry.Root}).AcquireGuard("session"); !errors.Is(err, ErrGuardHeld) {
+		t.Fatalf("second guard error=%v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := (&Registry{Root: registry.Root}).AcquireGuard("session")
+	if err != nil {
+		t.Fatalf("released guard remained held: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -71,6 +71,7 @@ type Session struct {
 	cfg           Config
 	projectLock   *state.ProjectLock
 	leaseRegistry *lease.Registry
+	leaseGuard    *lease.Guard
 	leaseCreated  bool
 	gatewayServer *http.Server
 	gatewayDone   chan error
@@ -122,6 +123,10 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, err
 	}
 	s.leaseCreated = true
+	s.leaseGuard, err = s.leaseRegistry.AcquireGuard(s.SessionID)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.emit("capability.issued", "paused"); err != nil {
 		return nil, err
 	}
@@ -606,6 +611,12 @@ func (s *Session) Close() error {
 					s.closeErr = auditErr
 				}
 			}
+		}
+		if s.leaseGuard != nil {
+			if err := s.leaseGuard.Close(); err != nil && s.closeErr == nil {
+				s.closeErr = err
+			}
+			s.leaseGuard = nil
 		}
 		if s.projectLock != nil {
 			if err := s.projectLock.Close(); err != nil && s.closeErr == nil {

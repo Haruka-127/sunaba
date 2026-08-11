@@ -23,6 +23,7 @@ const (
 )
 
 var ErrInactive = errors.New("session lease is inactive or expired")
+var ErrGuardHeld = errors.New("session lease guard is held by a live supervisor")
 var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 type Record struct {
@@ -40,6 +41,61 @@ type Registry struct {
 	Root string
 	Now  func() time.Time
 	mu   sync.Mutex
+}
+
+type Guard struct {
+	file *os.File
+	once sync.Once
+	err  error
+}
+
+func (r *Registry) AcquireGuard(sessionID string) (*Guard, error) {
+	if err := r.validate(); err != nil || !validIdentity(sessionID) {
+		return nil, fmt.Errorf("invalid lease registry or session identity")
+	}
+	if err := r.ensureDirectory(); err != nil {
+		return nil, err
+	}
+	filename := filepath.Join(r.Root, sessionID+".guard")
+	fd, err := unix.Open(filename, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), filename)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open lease guard")
+	}
+	fail := func(err error) (*Guard, error) {
+		_ = file.Close()
+		return nil, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fail(err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0777 != 0600 || stat.Uid != uint32(os.Geteuid()) {
+		return fail(fmt.Errorf("lease guard must be a mode 0600 regular file owned by the current user"))
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return fail(ErrGuardHeld)
+		}
+		return fail(err)
+	}
+	return &Guard{file: file}, nil
+}
+
+func (g *Guard) Close() error {
+	if g == nil {
+		return nil
+	}
+	g.once.Do(func() {
+		if g.file != nil {
+			g.err = g.file.Close()
+		}
+	})
+	return g.err
 }
 
 func (r *Registry) Register(projectID, vmID, sessionID, use string, ttl time.Duration) (Record, error) {
