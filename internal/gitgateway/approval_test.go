@@ -69,6 +69,25 @@ func TestPushApprovalRejectsCredentialRemoteAndInconsistentDelete(t *testing.T) 
 	}
 }
 
+func TestPushApprovalGrantRetainsRequestExpiry(t *testing.T) {
+	recorder, _ := audit.NewRecorder(filepath.Join(t.TempDir(), "audit"))
+	now := time.Now()
+	manager, _ := NewPushApprovalManager(func() time.Time { return now }, recorder, "vm", "session")
+	binding := pushBinding()
+	request, err := manager.NewRequest(binding, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := manager.Confirm(request.Nonce, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if err := manager.Consume(grant, binding); !errors.Is(err, ErrPushApprovalInvalid) {
+		t.Fatalf("expired confirmed grant error=%v", err)
+	}
+}
+
 func pushBinding() PushBinding {
 	return PushBinding{
 		ProjectID: "project", Repository: "origin-repository", RemoteName: "origin", RemoteURL: "HTTPS://Example.COM/repo.git",

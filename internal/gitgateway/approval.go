@@ -55,10 +55,15 @@ type pendingPush struct {
 	expires time.Time
 }
 
+type approvedPush struct {
+	binding PushBinding
+	expires time.Time
+}
+
 type PushApprovalManager struct {
 	mu      sync.Mutex
 	pending map[[sha256.Size]byte]pendingPush
-	grants  map[[sha256.Size]byte]PushBinding
+	grants  map[[sha256.Size]byte]approvedPush
 	now     func() time.Time
 	audit   *audit.Recorder
 	vm      string
@@ -72,7 +77,7 @@ func NewPushApprovalManager(now func() time.Time, recorder *audit.Recorder, vmID
 	if now == nil {
 		now = time.Now
 	}
-	return &PushApprovalManager{pending: make(map[[sha256.Size]byte]pendingPush), grants: make(map[[sha256.Size]byte]PushBinding), now: now, audit: recorder, vm: vmID, session: sessionID}, nil
+	return &PushApprovalManager{pending: make(map[[sha256.Size]byte]pendingPush), grants: make(map[[sha256.Size]byte]approvedPush), now: now, audit: recorder, vm: vmID, session: sessionID}, nil
 }
 
 func (m *PushApprovalManager) NewRequest(binding PushBinding, lifetime time.Duration) (PushRequest, error) {
@@ -116,7 +121,7 @@ func (m *PushApprovalManager) Confirm(nonce string, presented PushBinding) (*Pus
 		return nil, err
 	}
 	m.mu.Lock()
-	m.grants[grantID] = item.binding
+	m.grants[grantID] = approvedPush{binding: item.binding, expires: item.expires}
 	m.mu.Unlock()
 	return &PushGrant{id: grantID}, nil
 }
@@ -130,8 +135,8 @@ func (m *PushApprovalManager) Consume(grant *PushGrant, current PushBinding) err
 	expected, ok := m.grants[grant.id]
 	delete(m.grants, grant.id)
 	m.mu.Unlock()
-	_, expectedDigest, expectedErr := canonicalBinding(expected)
-	if err != nil || expectedErr != nil || !ok || !equalDigest(expectedDigest, digest) {
+	_, expectedDigest, expectedErr := canonicalBinding(expected.binding)
+	if err != nil || expectedErr != nil || !ok || !m.now().Before(expected.expires) || !equalDigest(expectedDigest, digest) {
 		_ = m.record("git.push.consume", "rejected", canonical, digest, "")
 		return ErrPushApprovalInvalid
 	}
