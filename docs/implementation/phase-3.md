@@ -1,6 +1,6 @@
 # Phase 3: Git Gateway
 
-状態: 実施中。object-bound one-shot push approval coreとhost quarantine resolverを実装済み。host credential終端、smart HTTP relay、clone/fetch/pull/pushの実統合は継続中。
+状態: 実施中。object-bound one-shot push approval、host quarantine resolver、HTTPS credential終端、smart HTTP read relayを実装済み。receive-packとsession統合は継続中。
 
 ## push approval binding
 
@@ -16,6 +16,10 @@ mode `0700`でsymlinkを含まないhost bare repositoryだけを読み、Git自
 
 承認retryではhost repository lock内でresolverとone-shot grant consumeを再実行し、HTTPS upstreamへ`--atomic`かつrefごとのexact object leaseを付けてpushする。Authorizationはhost Git subprocessの環境設定だけへ注入し、remote URL、argv、guest、auditへ返さない。upstream refが承認時のold objectから変化していれば拒否し、失敗したgrantも再利用できない。
 
+## smart HTTP read relay
+
+標準Gitの`upload-pack`で使う固定の`info/refs`とPOSTだけをProject/VM/Session、短期限、request/body/response/concurrency上限へ束縛したguest capabilityで許可する。固定HTTPS upstreamへのAuthorizationはhostで置換し、redirect、receive-pack、別repository、別routeを拒否する。実smart HTTP serverを使った`git clone`、`git fetch`、`git pull --ff-only`で互換性とcredential非混入を検証する。
+
 再現コマンド:
 
 ```sh
@@ -25,7 +29,6 @@ go test -race -v ./internal/gitgateway
 ## 残件
 
 - smart HTTP receive-packのpre-receiveをapproval transactionへ接続する
-- Git credentialをguestへ返さずhost transportだけへ注入する
 - standard Git smart HTTPによるclone/fetch/pullと、pending approval後のpush retry
 - session終了、expiry、別Project/VM、object/ref差し替えの実統合試験
 
