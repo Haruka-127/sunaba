@@ -34,11 +34,16 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIntegrationFile(t, filepath.Join(project, "baseline.txt"), "baseline\n")
-	sunaba := buildHostBinary(t, ctx, runtimeBase, "sunaba", "./cmd/sunaba")
+	fakeSecurity := filepath.Join(runtimeBase, "security")
+	writeIntegrationFile(t, fakeSecurity, "#!/bin/sh\ncase \"$1\" in\n  login-keychain) printf '\"%s\"\\n' '"+filepath.Join(runtimeBase, "login.keychain-db")+"' ;;\n  find-generic-password) printf '%s\\n' 'host-only-integration-placeholder-key' ;;\n  *) exit 2 ;;\nesac\n")
+	if err := os.Chmod(fakeSecurity, 0700); err != nil {
+		t.Fatal(err)
+	}
+	sunaba := buildHostBinaryWithLDFlags(t, ctx, runtimeBase, "sunaba", "./cmd/sunaba", "-X sunaba/internal/secretstore.commandPath="+fakeSecurity)
 	_ = buildHostBinary(t, ctx, runtimeBase, "sunaba-git-hook", "./cmd/sunaba-git-hook")
 	_ = buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
 	xdg := filepath.Join(runtimeBase, "data")
-	environment := append(os.Environ(), "XDG_DATA_HOME="+xdg, "OPENAI_API_KEY=host-only-integration-placeholder")
+	environment := append(os.Environ(), "XDG_DATA_HOME="+xdg)
 	runSunaba := func(input string, args ...string) (string, error) {
 		command := exec.CommandContext(ctx, sunaba, args...)
 		command.Env = environment

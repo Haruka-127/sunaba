@@ -64,6 +64,8 @@ func Run(ctx context.Context, args []string) error {
 	switch filtered[0] {
 	case "project":
 		return a.project(ctx, filtered[1:])
+	case "credentials":
+		return a.credentials(ctx, filtered[1:])
 	case "up":
 		return a.up(ctx, filtered[1:])
 	case "agent":
@@ -102,11 +104,14 @@ func usage(output io.Writer) {
 	fmt.Fprint(output, `sunaba securely runs OpenCode v1.18.16 in a Project Agent VM.
 
 Usage:
+  sunaba credentials openai set|status|delete
   sunaba project init <path> [--mode secure|dev]
   sunaba up [--dir <path>] [--mode secure|dev]
   sunaba agent [--dir <path>]
   sunaba shell [--dir <path>]
-  sunaba git set --remote <https-url> [--dir <path>]
+  sunaba git remote add --name <name> --url <https-url> [--dir <path>]
+  sunaba git remote remove --name <name> [--dir <path>]
+  sunaba git remote list [--dir <path>]
   sunaba git disable [--dir <path>]
   sunaba web enable --origin <http(s)://host>... [--dir <path>]
   sunaba web refresh|disable [--dir <path>]
@@ -491,8 +496,8 @@ func (a *app) status(ctx context.Context, args []string) error {
 		pending = fmt.Sprintf("%s (%d changes)", change.ChangeSet.Digest, len(change.ChangeSet.Changes))
 	}
 	gitState := "disabled"
-	if len(projectPolicy.Git.Remotes) == 1 {
-		gitState = "enabled (fixed HTTPS remote)"
+	if len(projectPolicy.Git.Remotes) > 0 {
+		gitState = fmt.Sprintf("enabled (%d fixed HTTPS remotes)", len(projectPolicy.Git.Remotes))
 	}
 	webState := "disabled"
 	if projectPolicy.Web.Enabled {

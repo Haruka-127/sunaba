@@ -37,12 +37,12 @@ image buildはembedded bytesをmanifestへ再照合してから実行する。ve
 
 ## Project policy migration
 
-Project policy schema v2はProject identity/root、mode、dependency、resource、session、Model/Git/Web、export、audit retention、Protected Pathを一つのdigest可能な文書へ統合した。
+Project policy schema v3はProject identity/root、mode、dependency、resource、session、Model/Git/Web、export、audit retention、Protected Pathを一つのdigest可能な文書へ統合し、Git remoteを名前と固定URLの組として保持する。
 
 - JSON unknown field、trailing data、unsupported schemaを拒否
 - canonical rootとProject IDの差し替えを拒否
 - mode `0600` current-user regular fileとmode `0700` canonical parentだけを受理
-- v1からv2へのmigrationをprivate temporary file + fsync + atomic renameで行う
+- v1からv3、およびv2のGit URL配列からv3 named remoteへのmigrationをprivate temporary file + fsync + atomic renameで行う
 - legacy Web originがあるpolicyは、blocklist snapshot/digestを推測せずmigrationを拒否
 
 ## Audit retention / redaction
@@ -94,7 +94,7 @@ scripts/verify.sh
 - `sunaba`、Linux/AArch64 guest relay、Git hook helperのbuildとguest relay ELF形式検証
 - CLI helpと旧unsafe entrypointのstatic boundary
 
-static boundaryは旧`_audit` daemon、永続`server-password`/Project env API、Project bind mount、default network、firewall bypass、guest側automatic approvalがproduction codeへ戻ることも拒否する。旧prototypeのstate/audit API自体を削除し、global image stateはowner-only mode `0600` regular fileとしてno-followで読み、同一private directory内のfsync済みtempから原子的に置換する。
+static boundaryは旧`_audit` daemon、永続`server-password`/Project env API、`OPENAI_API_KEY`環境変数、Project bind mount、default network、firewall bypass、guest側automatic approvalがproduction codeへ戻ることも拒否する。旧prototypeのstate/audit API自体を削除し、global image stateはowner-only mode `0600` regular fileとしてno-followで読み、同一private directory内のfsync済みtempから原子的に置換する。
 
 container mutation、pf、optional fuzz、live credentialは通常gateで暗黙に実行しない。
 

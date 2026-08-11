@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,12 +27,12 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 	a := &app{output: &output}
 	usage(a.output)
 	text := output.String()
-	for _, expected := range []string{"project init", "agent", "git set", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
+	for _, expected := range []string{"credentials openai", "project init", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
 	}
-	for _, obsolete := range []string{"--no-firewall", "env set", "reset --full", "automatic approval"} {
+	for _, obsolete := range []string{"--no-firewall", "env set", "git set", "reset --full", "automatic approval"} {
 		if strings.Contains(text, obsolete) {
 			t.Fatalf("help retained obsolete prototype behavior %q", obsolete)
 		}
@@ -80,7 +82,7 @@ func TestHostGitAuthorizationUsesOnlyNonInteractiveCredentialHelper(t *testing.T
 	}
 }
 
-func TestGitPolicyAcceptsOneFixedHTTPSRemoteAndRejectsCredentialURLs(t *testing.T) {
+func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -95,12 +97,22 @@ func TestGitPolicyAcceptsOneFixedHTTPSRemoteAndRejectsCredentialURLs(t *testing.
 	if err := a.project(context.Background(), []string{"init", project}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.gitPolicy(context.Background(), []string{"set", "--dir", project, "--remote", "https://git.example/team/repository.git"}); err != nil {
+	if err := a.gitPolicy(context.Background(), []string{"set", "--remote", "https://git.example/legacy.git", "--dir", project}); err == nil {
+		t.Fatal("legacy single-remote command remained accepted")
+	}
+	if err := a.gitPolicy(context.Background(), []string{"remote", "add", "--dir", project, "--name", "origin", "--url", "https://git.example/team/repository.git"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.gitPolicy(context.Background(), []string{"remote", "add", "--dir", project, "--name", "upstream", "--url", "https://git.example/team/upstream.git"}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
-	if err != nil || len(loaded.Git.Remotes) != 1 || loaded.Git.Remotes[0] != "https://git.example/team/repository.git" {
+	if err != nil || len(loaded.Git.Remotes) != 2 || loaded.Git.Remotes[0].Name != "origin" || loaded.Git.Remotes[1].Name != "upstream" {
 		t.Fatalf("policy=%+v error=%v", loaded.Git, err)
+	}
+	output.Reset()
+	if err := a.gitPolicy(context.Background(), []string{"remote", "list", "--dir", project}); err != nil || !strings.Contains(output.String(), "origin\thttps://git.example/team/repository.git") || !strings.Contains(output.String(), "upstream\thttps://git.example/team/upstream.git") {
+		t.Fatalf("list output=%q error=%v", output.String(), err)
 	}
 	locator := filepath.Join(store.Root, "projects", state.ProjectID(project), approvalControlLocator)
 	if err := os.WriteFile(locator, []byte(`{"version":1}`), 0600); err != nil {
@@ -119,9 +131,54 @@ func TestGitPolicyAcceptsOneFixedHTTPSRemoteAndRejectsCredentialURLs(t *testing.
 		"https://git.example/repository",
 		"https://git.example:8443/repository.git",
 	} {
-		if err := a.gitPolicy(context.Background(), []string{"set", "--dir", project, "--remote", unsafe}); err == nil {
+		if err := a.gitPolicy(context.Background(), []string{"remote", "add", "--dir", project, "--name", "unsafe", "--url", unsafe}); err == nil {
 			t.Fatalf("unsafe Git remote accepted: %s", unsafe)
 		}
+	}
+}
+
+func TestGitGatewayMuxKeepsNamedRemoteRoutesAndTokensSeparate(t *testing.T) {
+	route := func(token, name string) http.Handler {
+		return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			if request.Header.Get("Authorization") != "Bearer "+token {
+				http.Error(response, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(response, name)
+		})
+	}
+	server := httptest.NewServer(newGitGatewayMux(map[string]http.Handler{
+		"/origin.git":   route("origin-token", "origin"),
+		"/upstream.git": route("upstream-token", "upstream"),
+	}))
+	defer server.Close()
+
+	request := func(path, token string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		response, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(body)
+	}
+	if status, body := request("/origin.git/info/refs", "origin-token"); status != http.StatusOK || body != "origin" {
+		t.Fatalf("origin route status=%d body=%q", status, body)
+	}
+	if status, _ := request("/upstream.git/info/refs", "origin-token"); status != http.StatusUnauthorized {
+		t.Fatalf("cross-remote token status=%d", status)
+	}
+	if status, body := request("/upstream.git/info/refs", "upstream-token"); status != http.StatusOK || body != "upstream" {
+		t.Fatalf("upstream route status=%d body=%q", status, body)
+	}
+	if status, _ := request("/unknown.git/info/refs", "upstream-token"); status != http.StatusNotFound {
+		t.Fatalf("unknown route status=%d", status)
 	}
 }
 

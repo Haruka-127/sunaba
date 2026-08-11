@@ -152,9 +152,6 @@ func (a *app) ensureSupervisor(ctx context.Context, projectRoot, projectState st
 	} else if !errors.Is(err, errNoSupervisor) {
 		return nil, supervisorInfo{}, err
 	}
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		return nil, supervisorInfo{}, fmt.Errorf("OPENAI_API_KEY is required to start the host supervisor; it is retained only in host process memory")
-	}
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, supervisorInfo{}, err

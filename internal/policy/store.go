@@ -36,6 +36,29 @@ type legacyPolicyV1 struct {
 	CreatedAt          time.Time `json:"created_at"`
 }
 
+type legacyPolicyV2 struct {
+	SchemaVersion  int              `json:"schema_version"`
+	ProjectID      string           `json:"project_id"`
+	ProjectRoot    string           `json:"project_root"`
+	Mode           string           `json:"mode"`
+	Dependency     DependencyPolicy `json:"dependency"`
+	Resources      ResourcePolicy   `json:"resources"`
+	Session        SessionPolicy    `json:"session"`
+	Model          ModelPolicy      `json:"model"`
+	Git            legacyGitV2      `json:"git"`
+	Web            WebPolicy        `json:"web"`
+	Export         ExportPolicy     `json:"export"`
+	Audit          AuditPolicy      `json:"audit"`
+	ProtectedPaths []string         `json:"protected_paths"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+}
+
+type legacyGitV2 struct {
+	Remotes              []string `json:"remotes"`
+	PushApprovalRequired bool     `json:"push_approval_required"`
+}
+
 func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 	data, err := readPolicyFile(path)
 	if err != nil {
@@ -54,6 +77,19 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 			return ProjectPolicy{}, false, err
 		}
 		return current, false, current.Validate()
+	case 2:
+		var legacy legacyPolicyV2
+		if err := decodeStrict(data, &legacy); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		migrated, err := migrateV2(legacy, now)
+		if err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		if err := Save(path, migrated); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		return migrated, true, nil
 	case 1:
 		var legacy legacyPolicyV1
 		if err := decodeStrict(data, &legacy); err != nil {
@@ -70,6 +106,25 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 	default:
 		return ProjectPolicy{}, false, fmt.Errorf("unsupported Project policy schema %d", envelope.SchemaVersion)
 	}
+}
+
+func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
+	remotes := make([]GitRemotePolicy, 0, len(legacy.Git.Remotes))
+	for index, remoteURL := range legacy.Git.Remotes {
+		name := "origin"
+		if index > 0 {
+			name = fmt.Sprintf("remote-%d", index+1)
+		}
+		remotes = append(remotes, GitRemotePolicy{Name: name, URL: remoteURL})
+	}
+	policy := ProjectPolicy{
+		SchemaVersion: CurrentSchemaVersion, ProjectID: legacy.ProjectID, ProjectRoot: legacy.ProjectRoot, Mode: legacy.Mode,
+		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: legacy.Model,
+		Git: GitPolicy{Remotes: remotes, PushApprovalRequired: legacy.Git.PushApprovalRequired},
+		Web: legacy.Web, Export: legacy.Export, Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
+		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
+	}
+	return policy, policy.Validate()
 }
 
 func Save(path string, policy ProjectPolicy) error {

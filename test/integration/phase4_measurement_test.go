@@ -134,7 +134,7 @@ func TestPhase4MeasureWebClients(t *testing.T) {
 		Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", DiskBytes: 128 << 20,
 		ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
 		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelToken: modelToken,
-		GitGateway: proxy, GitToken: proxyToken, GitGatewayClose: func() error { return nil },
+		GitGateway: proxy, GitRemotes: []session.GitRemote{{Name: "origin", Token: proxyToken}}, GitGatewayClose: func() error { return nil },
 		ServerPassword: serverPassword, LeaseTTL: 4 * time.Minute, Audit: auditRecorder,
 	}
 	active, err := session.Start(ctx, cfg)

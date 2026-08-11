@@ -19,6 +19,7 @@ import (
 	"sunaba/internal/modelgateway"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
+	"sunaba/internal/secretstore"
 	"sunaba/internal/session"
 )
 
@@ -53,9 +54,9 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if len(cleanupResult.Refused) > 0 {
 		fmt.Fprintf(a.errors, "WARNING: cleanup refused resources without matching current ownership/lease: %s\n", strings.Join(cleanupResult.Refused, ", "))
 	}
-	upstreamKey := os.Getenv("OPENAI_API_KEY")
-	if upstreamKey == "" {
-		return nil, fmt.Errorf("OPENAI_API_KEY is required by the host Model Gateway; it is never copied into the VM, Host TUI, Project, or audit log")
+	upstreamKey, err := secretstore.LoadOpenAIKey(ctx)
+	if err != nil {
+		return nil, err
 	}
 	sessionID, err := newSessionID()
 	if err != nil {
@@ -133,7 +134,7 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		CPUs: projectPolicy.Resources.CPUs, Memory: projectPolicy.Resources.Memory, DiskBytes: projectPolicy.Resources.DiskBytes,
 		ProcessMax: projectPolicy.Resources.ProcessMax, FileSizeMax: projectPolicy.Resources.FileSizeMax, OpenFileMax: projectPolicy.Resources.OpenFileMax,
 		GuestRelayBinary: guestRelay, ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken,
-		GitGateway: gateways.gitHandler, GitToken: gateways.gitToken, GitGatewayClose: gateways.gitClose,
+		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
 		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
 		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second, Audit: recorder,
 	}

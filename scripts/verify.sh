@@ -35,15 +35,15 @@ grep -Eq 'ARM aarch64|ARM64' <<<"$GUEST_RELAY_FILE" || fail guest-relay 'not an 
 pass "unit/race/vet/build"
 
 HELP="$(./bin/sunaba help)"
-for REQUIRED in 'project init' 'agent' 'changes export' 'changes apply' 'secure|dev' 'never bind-mounted'; do
+for REQUIRED in 'credentials openai' 'project init' 'agent' 'git remote add' 'changes export' 'changes apply' 'secure|dev' 'never bind-mounted'; do
   grep -Fq "$REQUIRED" <<<"$HELP" || fail cli-help "missing $REQUIRED"
 done
-for OBSOLETE in '--no-firewall' 'env set' 'reset --full' 'automatic approval'; do
+for OBSOLETE in '--no-firewall' 'env set' 'git set' 'reset --full' 'automatic approval'; do
   if grep -Fq -- "$OBSOLETE" <<<"$HELP"; then
     fail cli-help "retained obsolete prototype behavior: $OBSOLETE"
   fi
 done
-if rg -n --glob '*.go' --glob '*.sh' --glob '!*_test.go' --glob '!scripts/verify.sh' -- '--no-firewall|EnvFiles:.*Project|Networks:.*default|HostPath:.*Project|server-password|EnvFileForContainer|_audit|func Attach\(|"permission"[[:space:]]*:[[:space:]]*"allow"' internal cmd scripts; then
+if rg -n --glob '*.go' --glob '*.sh' --glob '!*_test.go' --glob '!scripts/verify.sh' -- '--no-firewall|OPENAI_API_KEY|EnvFiles:.*Project|Networks:.*default|HostPath:.*Project|server-password|EnvFileForContainer|_audit|func Attach\(|"permission"[[:space:]]*:[[:space:]]*"allow"' internal cmd scripts; then
   fail static-boundary "found an obsolete unsafe execution path"
 fi
 pass "CLI and static boundary"
@@ -82,8 +82,9 @@ else
   skip dev-integration 'set SUNABA_DEV_INTEGRATION=1 after authorizing sudo ./bin/sunaba firewall operations'
 fi
 
-if [[ -n "${OPENAI_API_KEY:-}" ]]; then
-  skip live-openai 'no automatic billable live request; run the documented opt-in live contract command'
+if [[ "${SUNABA_LIVE_OPENAI:-0}" == "1" ]]; then
+  SUNABA_LIVE_OPENAI=1 go test -tags=integration ./test/integration -run '^TestLiveOpenAIThroughAgentVM$' -count=1 -v
+  pass "live OpenAI Agent VM contract"
 else
-  skip live-openai 'OPENAI_API_KEY is absent; mock upstream contracts already ran'
+  skip live-openai 'set SUNABA_LIVE_OPENAI=1 to authorize one billable request using the macOS Keychain credential'
 fi

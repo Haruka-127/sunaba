@@ -294,7 +294,10 @@ func TestPauseFailsClosedWhenAuditCannotAppend(t *testing.T) {
 func TestSessionBindsOptionalGitGatewayToLifecycle(t *testing.T) {
 	cfg, fake := sessionFixture(t)
 	closed := false
-	cfg.GitToken = strings.Repeat("g", 43)
+	cfg.GitRemotes = []GitRemote{
+		{Name: "origin", Token: strings.Repeat("g", 43)},
+		{Name: "upstream", Token: strings.Repeat("h", 43)},
+	}
 	cfg.GitGateway = http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(response, "git-gateway")
 	})
@@ -306,11 +309,11 @@ func TestSessionBindsOptionalGitGatewayToLifecycle(t *testing.T) {
 	if len(fake.spec.Mounts) != 2 || fake.spec.Mounts[1].Target != runtime.SecureGitGatewayGuestPath {
 		t.Fatalf("Git Gateway mount=%+v", fake.spec.Mounts)
 	}
-	if !strings.Contains(fake.setup, "127.0.0.1:4242") || !strings.Contains(fake.setup, "remote.origin.url") || strings.Contains(fake.setup, cfg.GitToken) {
+	if !strings.Contains(fake.setup, "127.0.0.1:4242") || !strings.Contains(fake.setup, "remote.origin.url") || !strings.Contains(fake.setup, "remote.upstream.url") || !strings.Contains(fake.setup, "GIT_CONFIG_COUNT=2") || strings.Contains(fake.setup, cfg.GitRemotes[0].Token) || strings.Contains(fake.setup, cfg.GitRemotes[1].Token) {
 		t.Fatalf("Git guest setup is incomplete or leaked capability: %s", fake.setup)
 	}
 	client := sessionUnixHTTPClient(filepath.Join(s.Root, "git-gateway.sock"))
-	request, _ := http.NewRequest(http.MethodGet, "http://sunaba/repository.git/info/refs?service=git-upload-pack", nil)
+	request, _ := http.NewRequest(http.MethodGet, "http://sunaba/origin.git/info/refs?service=git-upload-pack", nil)
 	response, err := client.Do(request)
 	if err != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("active Git Gateway response=%v error=%v", response, err)

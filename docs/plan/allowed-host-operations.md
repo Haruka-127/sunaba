@@ -58,6 +58,32 @@ sudo ./bin/sunaba firewall status
 - `/sbin/pfctl -s info` でpfの有効状態を確認する
 - `/sbin/pfctl -a sunaba -sr` で sunaba anchor のルール状態を確認する
 
+## 許可するmacOS Keychain操作
+
+Host Model Gateway用OpenAI API keyは、固定service `dev.sunaba.openai`、固定account `openai-api-key`のgeneric passwordとしてlogin Keychainへ保存する。許可する入口はsunabaの次のサブコマンドに限定する。
+
+```sh
+sunaba credentials openai set
+sunaba credentials openai status
+sunaba credentials openai delete
+```
+
+内部では固定パス`/usr/bin/security`の次の操作だけを使う。
+
+```sh
+/usr/bin/security login-keychain
+/usr/bin/security add-generic-password -U -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path> -w
+/usr/bin/security find-generic-password -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path>
+/usr/bin/security find-generic-password -a openai-api-key -s dev.sunaba.openai -w <verified-login-keychain-path>
+/usr/bin/security delete-generic-password -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path>
+```
+
+- `add-generic-password`の`-w`は必ず最後の引数とし、Keychain自身の対話promptから入力する。secretをargv、environment、Project file、auditへ渡さない
+- `login-keychain`のbounded outputからquoted absolute clean pathだけを受理し、同じ操作内の明示的なkeychain引数として使う
+- service/account、security executable、Keychain search listをguestまたはProject policyから変更させない
+- `-A`、password値付き`-w`、任意itemの列挙・削除、login Keychain以外の作成、Keychain設定変更を行わない
+- 実Keychainを変更するintegration testは自動実行しない。固定command pathをlink-time test seamで差し替えたfakeだけを使う
+
 ## 許可する container 操作
 
 以下の操作は `sudo` 不要だが、ホスト上にコンテナ・イメージを作成または削除するため、対象を sunaba 管理リソースに限定する。

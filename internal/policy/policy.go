@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,11 +17,12 @@ import (
 	"sunaba/internal/webgateway"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var memoryPattern = regexp.MustCompile(`^[1-9][0-9]*[KMGTP]$`)
+var gitRemoteNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 type ProjectPolicy struct {
 	SchemaVersion  int              `json:"schema_version"`
@@ -70,8 +72,13 @@ type ModelPolicy struct {
 }
 
 type GitPolicy struct {
-	Remotes              []string `json:"remotes"`
-	PushApprovalRequired bool     `json:"push_approval_required"`
+	Remotes              []GitRemotePolicy `json:"remotes"`
+	PushApprovalRequired bool              `json:"push_approval_required"`
+}
+
+type GitRemotePolicy struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 type WebPolicy struct {
@@ -137,7 +144,7 @@ func (p ProjectPolicy) Validate() error {
 	if len(p.Model.AllowedModels) == 0 || len(p.Model.AllowedModels) > 32 || p.Model.MaxRequests <= 0 || p.Model.MaxConcurrent <= 0 || p.Model.MaxRequestBytes <= 0 || p.Model.MaxResponseBytes <= 0 {
 		return fmt.Errorf("Project Model Gateway policy is invalid")
 	}
-	if !uniqueSafeStrings(p.Model.AllowedModels, 128) || !uniqueSafeStrings(p.Git.Remotes, 2048) || !p.Git.PushApprovalRequired {
+	if !uniqueSafeStrings(p.Model.AllowedModels, 128) || !validGitRemotes(p.Git.Remotes) || !p.Git.PushApprovalRequired {
 		return fmt.Errorf("Project Model/Git policy is invalid")
 	}
 	if p.Web.Enabled {
@@ -158,6 +165,45 @@ func (p ProjectPolicy) Validate() error {
 		return fmt.Errorf("Project protected paths or timestamps are invalid")
 	}
 	return nil
+}
+
+func ValidateGitRemote(remote GitRemotePolicy) error {
+	if !gitRemoteNamePattern.MatchString(remote.Name) {
+		return fmt.Errorf("Git remote name must match %s", gitRemoteNamePattern)
+	}
+	parsed, err := url.Parse(remote.URL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || !strings.HasSuffix(parsed.Path, ".git") || parsed.Path == ".git" {
+		return fmt.Errorf("Git remote must be a credential-free fixed HTTPS URL ending in .git")
+	}
+	if parsed.Port() != "" && parsed.Port() != "443" {
+		return fmt.Errorf("Git remote must use the standard HTTPS port")
+	}
+	if len(remote.URL) > 2048 || strings.ContainsAny(remote.URL, "\x00\r\n") {
+		return fmt.Errorf("Git remote URL is invalid")
+	}
+	return nil
+}
+
+func validGitRemotes(remotes []GitRemotePolicy) bool {
+	if len(remotes) > 16 {
+		return false
+	}
+	names := make(map[string]struct{}, len(remotes))
+	urls := make(map[string]struct{}, len(remotes))
+	for _, remote := range remotes {
+		if ValidateGitRemote(remote) != nil {
+			return false
+		}
+		if _, exists := names[remote.Name]; exists {
+			return false
+		}
+		if _, exists := urls[remote.URL]; exists {
+			return false
+		}
+		names[remote.Name] = struct{}{}
+		urls[remote.URL] = struct{}{}
+	}
+	return true
 }
 
 func (p ProjectPolicy) Digest() (string, error) {

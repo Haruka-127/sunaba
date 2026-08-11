@@ -52,7 +52,8 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	source := filepath.Join(runtimeBase, "source")
 	project := filepath.Join(runtimeBase, "project")
 	upstream := filepath.Join(runtimeBase, "upstream.git")
-	quarantine := filepath.Join(runtimeBase, "repository.git")
+	upstream2 := filepath.Join(runtimeBase, "upstream2.git")
+	quarantine := filepath.Join(runtimeBase, "origin.git")
 	integrationGit(t, gitPath, "", "init", source)
 	integrationGit(t, gitPath, source, "config", "user.name", "Sunaba Integration")
 	integrationGit(t, gitPath, source, "config", "user.email", "sunaba@example.invalid")
@@ -60,6 +61,7 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	integrationGit(t, gitPath, source, "add", "project.txt")
 	integrationGit(t, gitPath, source, "commit", "-m", "baseline")
 	integrationGit(t, gitPath, "", "clone", "--bare", source, upstream)
+	integrationGit(t, gitPath, "", "clone", "--bare", source, upstream2)
 	integrationGit(t, gitPath, upstream, "config", "http.receivepack", "true")
 	integrationGit(t, gitPath, "", "clone", "--mirror", upstream, quarantine)
 	if err := os.Chmod(quarantine, 0700); err != nil {
@@ -73,6 +75,10 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	upstreamAuthorization := "Bearer " + upstreamSecret
 	upstreamServer := integrationGitHTTPSServer(t, gitPath, runtimeBase, upstreamAuthorization)
 	defer upstreamServer.Close()
+	upstreamSecret2 := "host-upstream-two-" + runID
+	upstreamAuthorization2 := "Bearer " + upstreamSecret2
+	upstreamServer2 := integrationGitHTTPSServer(t, gitPath, runtimeBase, upstreamAuthorization2)
+	defer upstreamServer2.Close()
 	caPath := integrationServerCertificate(t, runtimeBase, upstreamServer.Certificate())
 	projectID := state.ProjectID(project)
 	sessionID := "p3a" + runID
@@ -100,7 +106,7 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolver := gitgateway.RepositoryResolver{
-		GitPath: gitPath, RepositoryPath: quarantine, ProjectID: projectID, Repository: "repository",
+		GitPath: gitPath, RepositoryPath: quarantine, ProjectID: projectID, Repository: "origin",
 		RemoteName: "origin", RemoteURL: upstreamServer.URL + "/upstream.git",
 	}
 	executor := gitgateway.PushExecutor{
@@ -123,19 +129,34 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	gitToken2, err := session.NewSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCapability2, err := gitgateway.NewReadCapability(gitToken2, projectID, vmID, sessionID, time.Now().Add(5*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
 	gitCapability, err := gitgateway.NewReadCapability(gitToken, projectID, vmID, sessionID, time.Now().Add(5*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
+	readGateway2, err := gitgateway.NewReadGateway(gitgateway.ReadConfig{
+		UpstreamURL: upstreamServer2.URL + "/upstream2.git", GuestRepositoryPath: "/upstream.git",
+		AuthorizationHeader: upstreamAuthorization2, Capability: gitCapability2, HTTPClient: upstreamServer2.Client(), Audit: gitAudit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	readGateway, err := gitgateway.NewReadGateway(gitgateway.ReadConfig{
-		UpstreamURL: upstreamServer.URL + "/upstream.git", GuestRepositoryPath: "/repository.git",
+		UpstreamURL: upstreamServer.URL + "/upstream.git", GuestRepositoryPath: "/origin.git",
 		AuthorizationHeader: upstreamAuthorization, Capability: gitCapability, HTTPClient: upstreamServer.Client(), Audit: gitAudit,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	receiveGateway, err := gitgateway.NewReceiveGateway(gitgateway.ReceiveConfig{
-		GitPath: gitPath, RepositoryPath: quarantine, GuestRepositoryPath: "/repository.git",
+		GitPath: gitPath, RepositoryPath: quarantine, GuestRepositoryPath: "/origin.git",
 		HookHelperPath: hostHook, HookSocketPath: hookSocket, HookToken: hookToken, Capability: gitCapability,
 		MaxRequestBytes: 64 << 20, MaxResponseBytes: 4 << 20, MaxConcurrent: 1,
 		BeforeAdvertise: executor.Sync,
@@ -145,6 +166,14 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitHandler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/upstream.git/") {
+			readGateway2.ServeHTTP(response, request)
+			return
+		}
+		if !strings.HasPrefix(request.URL.Path, "/origin.git/") {
+			http.NotFound(response, request)
+			return
+		}
 		if strings.Contains(request.URL.RawQuery, "git-receive-pack") || strings.HasSuffix(request.URL.Path, "/git-receive-pack") {
 			receiveGateway.ServeHTTP(response, request)
 			return
@@ -177,7 +206,7 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", DiskBytes: 128 << 20,
 		ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
 		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelToken: modelToken,
-		GitGateway: gitHandler, GitToken: gitToken, GitGatewayClose: broker.Close,
+		GitGateway: gitHandler, GitRemotes: []session.GitRemote{{Name: "origin", Token: gitToken}, {Name: "upstream", Token: gitToken2}}, GitGatewayClose: broker.Close,
 		ServerPassword: serverPassword, LeaseTTL: 5 * time.Minute, Audit: auditRecorder,
 	}
 	active, err := session.Start(ctx, cfg)
@@ -191,15 +220,30 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		}
 	}()
 	guestClone := "/var/lib/sunaba/overlay/git-clone"
-	gitEnvironment := "set -a; . /run/sunaba/session.env; set +a; export HOME=/run/sunaba/home; git -c \"http.extraHeader=Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN\" "
-	cloneCommand := gitEnvironment + "clone http://127.0.0.1:4242/repository.git " + guestClone
+	guestClone2 := "/var/lib/sunaba/overlay/git-clone-upstream"
+	gitEnvironment := "set -a; . /run/sunaba/session.env; set +a; export HOME=/run/sunaba/home; export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.http://127.0.0.1:4242/origin.git.extraHeader GIT_CONFIG_VALUE_0=\"Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN_0\" GIT_CONFIG_KEY_1=http.http://127.0.0.1:4242/upstream.git.extraHeader GIT_CONFIG_VALUE_1=\"Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN_1\"; git "
+	cloneCommand := gitEnvironment + "clone http://127.0.0.1:4242/origin.git " + guestClone
 	if output, err := cfg.Runtime.ExecOutput(ctx, active.Container, []string{"runuser", "-u", "sunaba-agent", "--", "/bin/bash", "-lc", cloneCommand}); err != nil {
 		t.Fatalf("guest clone: %v: %s", err, output)
+	}
+	cloneCommand2 := gitEnvironment + "clone http://127.0.0.1:4242/upstream.git " + guestClone2
+	if output, err := cfg.Runtime.ExecOutput(ctx, active.Container, []string{"runuser", "-u", "sunaba-agent", "--", "/bin/bash", "-lc", cloneCommand2}); err != nil {
+		t.Fatalf("second guest clone: %v: %s", err, output)
+	}
+	crossTokenRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://sunaba/upstream.git/info/refs?service=git-upload-pack", nil)
+	crossTokenRequest.Header.Set("Authorization", "Bearer "+gitToken)
+	crossTokenResponse, err := unixHTTPClient(filepath.Join(active.Root, "git-gateway.sock")).Do(crossTokenRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = crossTokenResponse.Body.Close()
+	if crossTokenResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("cross-remote capability status=%d", crossTokenResponse.StatusCode)
 	}
 	if err := active.Pause(ctx); err != nil {
 		t.Fatal(err)
 	}
-	pausedRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://sunaba/repository.git/info/refs?service=git-upload-pack", nil)
+	pausedRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://sunaba/origin.git/info/refs?service=git-upload-pack", nil)
 	pausedRequest.Header.Set("Authorization", "Bearer "+gitToken)
 	pausedResponse, err := unixHTTPClient(filepath.Join(active.Root, "git-gateway.sock")).Do(pausedRequest)
 	if err != nil {
@@ -249,7 +293,7 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	if strings.TrimSpace(guestHead) != upstreamHead {
 		t.Fatalf("approved guest object=%s upstream=%s", guestHead, upstreamHead)
 	}
-	credentialProbe := "! grep -R --binary-files=without-match -- " + upstreamSecret + " /run/sunaba /var/lib/sunaba " + active.WorkspacePath
+	credentialProbe := "! grep -R --binary-files=without-match -e " + upstreamSecret + " -e " + upstreamSecret2 + " /run/sunaba /var/lib/sunaba " + active.WorkspacePath
 	if output, err := cfg.Runtime.ExecOutput(ctx, active.Container, []string{"/bin/bash", "-lc", credentialProbe}); err != nil {
 		t.Fatalf("host Git credential visible in guest: %v: %s", err, output)
 	}
@@ -257,7 +301,7 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	destroyed = true
-	revokedRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://sunaba/repository.git/info/refs?service=git-upload-pack", nil)
+	revokedRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://sunaba/origin.git/info/refs?service=git-upload-pack", nil)
 	revokedRequest.Header.Set("Authorization", "Bearer "+gitToken)
 	if response, err := unixHTTPClient(filepath.Join(active.Root, "git-gateway.sock")).Do(revokedRequest); err == nil {
 		_ = response.Body.Close()
@@ -268,7 +312,7 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatalf("Phase 3 audit files=%v", auditFiles)
 	}
 	auditBytes, _ := os.ReadFile(auditFiles[0])
-	if bytes.Contains(auditBytes, []byte(upstreamAuthorization)) || bytes.Contains(auditBytes, []byte(gitToken)) || bytes.Contains(auditBytes, []byte(hookToken)) {
+	if bytes.Contains(auditBytes, []byte(upstreamAuthorization)) || bytes.Contains(auditBytes, []byte(upstreamAuthorization2)) || bytes.Contains(auditBytes, []byte(gitToken)) || bytes.Contains(auditBytes, []byte(gitToken2)) || bytes.Contains(auditBytes, []byte(hookToken)) {
 		t.Fatal("Phase 3 audit contained a host or session secret")
 	}
 	for _, action := range []string{"git.clone_fetch", "git.push", "git.fetch.sync", "git.push.approval", "git.push.consume", "git.push.upstream", "git_gateway.started", "git_gateway.stopped"} {
@@ -307,9 +351,18 @@ func integrationServerCertificate(t *testing.T, root string, certificate *x509.C
 }
 
 func buildHostBinary(t *testing.T, ctx context.Context, tempDir, name, pkg string) string {
+	return buildHostBinaryWithLDFlags(t, ctx, tempDir, name, pkg, "")
+}
+
+func buildHostBinaryWithLDFlags(t *testing.T, ctx context.Context, tempDir, name, pkg, ldflags string) string {
 	t.Helper()
 	output := filepath.Join(tempDir, name)
-	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", output, pkg)
+	arguments := []string{"build", "-trimpath"}
+	if ldflags != "" {
+		arguments = append(arguments, "-ldflags", ldflags)
+	}
+	arguments = append(arguments, "-o", output, pkg)
+	build := exec.CommandContext(ctx, "go", arguments...)
 	build.Dir = repositoryRoot(t)
 	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOCACHE="+filepath.Join(tempDir, "host-go-cache"))
 	if out, err := build.CombinedOutput(); err != nil {

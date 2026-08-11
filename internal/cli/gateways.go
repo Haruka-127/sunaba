@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -27,26 +28,53 @@ import (
 
 type configuredGateways struct {
 	gitHandler http.Handler
-	gitToken   string
+	gitRemotes []session.GitRemote
 	gitClose   func() error
-	gitBroker  *gitgateway.HookBroker
+	gitBroker  pushApprovalBroker
 	webHandler http.Handler
 	webToken   string
 	webClose   func() error
 }
 
+type configuredGitRemote struct {
+	handler http.Handler
+	remote  session.GitRemote
+	close   func() error
+	broker  *gitgateway.HookBroker
+}
+
+type multiPushBroker struct {
+	brokers []*gitgateway.HookBroker
+}
+
+func (b *multiPushBroker) Pending() []gitgateway.PushRequest {
+	var pending []gitgateway.PushRequest
+	for _, broker := range b.brokers {
+		pending = append(pending, broker.Pending()...)
+	}
+	return pending
+}
+
+func (b *multiPushBroker) Confirm(nonce string, binding gitgateway.PushBinding) error {
+	for _, broker := range b.brokers {
+		for _, pending := range broker.Pending() {
+			if pending.Nonce == nonce {
+				return broker.Confirm(nonce, binding)
+			}
+		}
+	}
+	return fmt.Errorf("Git push approval is not pending")
+}
+
 func (a *app) configureGateways(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState, runtimeBase, vmID, sessionID string, expiresAt time.Time, recorder *audit.Recorder) (configuredGateways, error) {
 	var configured configuredGateways
-	if len(projectPolicy.Git.Remotes) > 1 {
-		return configuredGateways{}, fmt.Errorf("the MVP Git Gateway supports exactly one fixed remote per Project")
-	}
-	if len(projectPolicy.Git.Remotes) == 1 {
-		gitConfigured, err := a.configureGitGateway(ctx, projectPolicy, projectState, runtimeBase, vmID, sessionID, expiresAt, recorder)
+	if len(projectPolicy.Git.Remotes) > 0 {
+		gitConfigured, err := a.configureGitGateways(ctx, projectPolicy, projectState, runtimeBase, vmID, sessionID, expiresAt, recorder)
 		if err != nil {
 			return configuredGateways{}, err
 		}
 		configured.gitHandler = gitConfigured.gitHandler
-		configured.gitToken = gitConfigured.gitToken
+		configured.gitRemotes = gitConfigured.gitRemotes
 		configured.gitClose = gitConfigured.gitClose
 		configured.gitBroker = gitConfigured.gitBroker
 	}
@@ -65,53 +93,95 @@ func (a *app) configureGateways(ctx context.Context, projectPolicy policy.Projec
 	return configured, nil
 }
 
-func (a *app) configureGitGateway(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState, runtimeBase, vmID, sessionID string, expiresAt time.Time, recorder *audit.Recorder) (configuredGateways, error) {
-	remote := projectPolicy.Git.Remotes[0]
-	authorization, err := hostGitAuthorization(ctx, remote)
+func (a *app) configureGitGateways(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState, runtimeBase, vmID, sessionID string, expiresAt time.Time, recorder *audit.Recorder) (configuredGateways, error) {
+	configuredRemotes := make([]configuredGitRemote, 0, len(projectPolicy.Git.Remotes))
+	routes := make(map[string]http.Handler, len(projectPolicy.Git.Remotes))
+	brokers := make([]*gitgateway.HookBroker, 0, len(projectPolicy.Git.Remotes))
+	guestRemotes := make([]session.GitRemote, 0, len(projectPolicy.Git.Remotes))
+	closeConfigured := func() error {
+		var closeErr error
+		for index := len(configuredRemotes) - 1; index >= 0; index-- {
+			if configuredRemotes[index].close != nil {
+				closeErr = errors.Join(closeErr, configuredRemotes[index].close())
+			}
+		}
+		return closeErr
+	}
+	for _, remote := range projectPolicy.Git.Remotes {
+		configured, err := a.configureGitRemoteGateway(ctx, projectPolicy, remote, projectState, runtimeBase, vmID, sessionID, expiresAt, recorder)
+		if err != nil {
+			_ = closeConfigured()
+			return configuredGateways{}, err
+		}
+		configuredRemotes = append(configuredRemotes, configured)
+		routes["/"+remote.Name+".git"] = configured.handler
+		guestRemotes = append(guestRemotes, configured.remote)
+		brokers = append(brokers, configured.broker)
+	}
+	return configuredGateways{
+		gitHandler: newGitGatewayMux(routes), gitRemotes: guestRemotes, gitClose: closeConfigured,
+		gitBroker: &multiPushBroker{brokers: brokers},
+	}, nil
+}
+
+func newGitGatewayMux(routes map[string]http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		for guestPath, route := range routes {
+			if strings.HasPrefix(request.URL.Path, guestPath+"/") {
+				route.ServeHTTP(response, request)
+				return
+			}
+		}
+		http.NotFound(response, request)
+	})
+}
+
+func (a *app) configureGitRemoteGateway(ctx context.Context, projectPolicy policy.ProjectPolicy, remote policy.GitRemotePolicy, projectState, runtimeBase, vmID, sessionID string, expiresAt time.Time, recorder *audit.Recorder) (configuredGitRemote, error) {
+	authorization, err := hostGitAuthorization(ctx, remote.URL)
 	if err != nil {
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
-		return configuredGateways{}, fmt.Errorf("host Git is required for the configured Git Gateway")
+		return configuredGitRemote{}, fmt.Errorf("host Git is required for the configured Git Gateway")
 	}
 	gitPath, err = filepath.Abs(gitPath)
 	if err != nil {
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
-	repository, err := ensureGitQuarantine(ctx, gitPath, projectState, remote)
+	repository, err := ensureGitQuarantine(ctx, gitPath, projectState, remote.Name, remote.URL)
 	if err != nil {
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	approvals, err := gitgateway.NewPushApprovalManager(nil, recorder, vmID, sessionID)
 	if err != nil {
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	resolver := gitgateway.RepositoryResolver{
 		GitPath: gitPath, RepositoryPath: repository, ProjectID: projectPolicy.ProjectID,
-		Repository: "repository", RemoteName: "origin", RemoteURL: remote,
+		Repository: remote.Name, RemoteName: remote.Name, RemoteURL: remote.URL,
 	}
 	executor := gitgateway.PushExecutor{
 		Resolver: resolver, Approvals: approvals, AuthorizationHeader: authorization,
 		Audit: recorder, VMID: vmID, SessionID: sessionID,
 	}
 	if err := executor.Sync(ctx); err != nil {
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	hookToken, err := session.NewSecret()
 	if err != nil {
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	hookHelper, err := siblingExecutable("sunaba-git-hook")
 	if err != nil {
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
-	hookSocket := filepath.Join(runtimeBase, "git-hook.sock")
+	hookSocket := filepath.Join(runtimeBase, "git-hook-"+remote.Name+".sock")
 	brokerContext, cancelBroker := context.WithCancel(context.Background())
 	broker, err := gitgateway.StartHookBroker(brokerContext, hookSocket, hookToken, approvals, executor, 5*time.Minute, nil)
 	if err != nil {
 		cancelBroker()
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	closeBroker := func() error {
 		cancelBroker()
@@ -120,12 +190,12 @@ func (a *app) configureGitGateway(ctx context.Context, projectPolicy policy.Proj
 	gitToken, err := session.NewSecret()
 	if err != nil {
 		_ = closeBroker()
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	capability, err := gitgateway.NewReadCapability(gitToken, projectPolicy.ProjectID, vmID, sessionID, expiresAt)
 	if err != nil {
 		_ = closeBroker()
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	auditGit := func(event gitgateway.ReadAuditEvent) {
 		outcome := "success"
@@ -137,27 +207,27 @@ func (a *app) configureGitGateway(ctx context.Context, projectPolicy policy.Proj
 			ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID,
 			Details: map[string]string{
 				"status": strconv.Itoa(event.Status), "request_bytes": strconv.FormatInt(event.RequestBytes, 10),
-				"response_bytes": strconv.FormatInt(event.ResponseBytes, 10), "reason": event.Reason,
+				"response_bytes": strconv.FormatInt(event.ResponseBytes, 10), "reason": event.Reason, "remote": remote.Name,
 			},
 		})
 	}
 	readGateway, err := gitgateway.NewReadGateway(gitgateway.ReadConfig{
-		UpstreamURL: remote, GuestRepositoryPath: "/repository.git", AuthorizationHeader: authorization,
+		UpstreamURL: remote.URL, GuestRepositoryPath: "/" + remote.Name + ".git", AuthorizationHeader: authorization,
 		Capability: capability, Audit: auditGit,
 	})
 	if err != nil {
 		_ = closeBroker()
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	receiveGateway, err := gitgateway.NewReceiveGateway(gitgateway.ReceiveConfig{
-		GitPath: gitPath, RepositoryPath: repository, GuestRepositoryPath: "/repository.git",
+		GitPath: gitPath, RepositoryPath: repository, GuestRepositoryPath: "/" + remote.Name + ".git",
 		HookHelperPath: hookHelper, HookSocketPath: hookSocket, HookToken: hookToken, Capability: capability,
 		MaxRequestBytes: 64 << 20, MaxResponseBytes: 4 << 20, MaxConcurrent: 1,
 		BeforeAdvertise: executor.Sync, Audit: auditGit,
 	})
 	if err != nil {
 		_ = closeBroker()
-		return configuredGateways{}, err
+		return configuredGitRemote{}, err
 	}
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if strings.Contains(request.URL.RawQuery, "git-receive-pack") || strings.HasSuffix(request.URL.Path, "/git-receive-pack") {
@@ -166,13 +236,16 @@ func (a *app) configureGitGateway(ctx context.Context, projectPolicy policy.Proj
 		}
 		readGateway.ServeHTTP(response, request)
 	})
-	return configuredGateways{gitHandler: handler, gitToken: gitToken, gitClose: closeBroker, gitBroker: broker}, nil
+	return configuredGitRemote{
+		handler: handler, remote: session.GitRemote{Name: remote.Name, Token: gitToken},
+		close: closeBroker, broker: broker,
+	}, nil
 }
 
 func hostGitAuthorization(ctx context.Context, remote string) (string, error) {
 	parsed, err := url.Parse(remote)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || !strings.HasSuffix(parsed.Path, ".git") {
-		return "", fmt.Errorf("the production Git Gateway requires one credential-free fixed HTTPS remote ending in .git")
+		return "", fmt.Errorf("the production Git Gateway requires a credential-free fixed HTTPS remote ending in .git")
 	}
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
@@ -228,13 +301,26 @@ func (w *boundedStringWriter) Write(data []byte) (int, error) {
 	return w.builder.Write(data)
 }
 
-func ensureGitQuarantine(ctx context.Context, gitPath, projectState, remote string) (string, error) {
-	digest := fileNameDigest(remote)
+func ensureGitQuarantine(ctx context.Context, gitPath, projectState, remoteName, remoteURL string) (string, error) {
+	if err := policy.ValidateGitRemote(policy.GitRemotePolicy{Name: remoteName, URL: remoteURL}); err != nil {
+		return "", err
+	}
+	digest := fileNameDigest(remoteURL)
 	root := filepath.Join(projectState, "git")
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return "", err
 	}
-	repository := filepath.Join(root, "repository-"+digest[:16]+".git")
+	remoteRoot := filepath.Join(root, "remote-"+digest[:16])
+	if err := os.MkdirAll(remoteRoot, 0700); err != nil {
+		return "", err
+	}
+	for _, directory := range []string{root, remoteRoot} {
+		info, err := os.Lstat(directory)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+			return "", fmt.Errorf("host Git quarantine directory is unsafe")
+		}
+	}
+	repository := filepath.Join(remoteRoot, remoteName+".git")
 	if info, err := os.Lstat(repository); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
 			return "", fmt.Errorf("host Git quarantine is unsafe")

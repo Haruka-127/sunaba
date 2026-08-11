@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,13 +28,23 @@ func (f *stringFlags) Set(value string) error {
 
 func (a *app) gitPolicy(_ context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sunaba git set --remote <https-url> [--dir <path>] | sunaba git disable [--dir <path>]")
+		return fmt.Errorf("%s", gitPolicyUsage())
 	}
-	fs := flag.NewFlagSet("git "+args[0], flag.ContinueOnError)
+	action := args[0]
+	flagArguments := args[1:]
+	if action == "remote" {
+		if len(args) < 2 {
+			return fmt.Errorf("%s", gitPolicyUsage())
+		}
+		action = "remote-" + args[1]
+		flagArguments = args[2:]
+	}
+	fs := flag.NewFlagSet("git "+action, flag.ContinueOnError)
 	fs.SetOutput(a.errors)
 	dir := fs.String("dir", ".", "Project directory")
-	remote := fs.String("remote", "", "credential-free fixed HTTPS .git URL")
-	if err := fs.Parse(args[1:]); err != nil {
+	name := fs.String("name", "", "fixed remote name")
+	remoteURL := fs.String("url", "", "credential-free fixed HTTPS .git URL")
+	if err := fs.Parse(flagArguments); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -43,23 +54,63 @@ func (a *app) gitPolicy(_ context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if action == "remote-list" {
+		if *name != "" || *remoteURL != "" {
+			return fmt.Errorf("git remote list does not accept remote changes")
+		}
+		if len(projectPolicy.Git.Remotes) == 0 {
+			fmt.Fprintln(a.output, "No Git Gateway remotes are configured.")
+			return nil
+		}
+		for _, configured := range sortedGitRemotes(projectPolicy.Git.Remotes) {
+			fmt.Fprintf(a.output, "%s\t%s\n", configured.Name, configured.URL)
+		}
+		return nil
+	}
 	if err := refuseActivePolicyChange(projectState); err != nil {
 		return err
 	}
-	switch args[0] {
-	case "set":
-		if err := validateGitRemote(*remote); err != nil {
+	switch action {
+	case "remote-add":
+		configured := policy.GitRemotePolicy{Name: *name, URL: *remoteURL}
+		if err := policy.ValidateGitRemote(configured); err != nil {
 			return err
 		}
-		projectPolicy.Git.Remotes = []string{*remote}
+		for _, existing := range projectPolicy.Git.Remotes {
+			if existing.Name == configured.Name {
+				return fmt.Errorf("Git remote name %q is already configured; remove it before changing its URL", configured.Name)
+			}
+			if existing.URL == configured.URL {
+				return fmt.Errorf("Git remote URL is already configured as %q", existing.Name)
+			}
+		}
+		projectPolicy.Git.Remotes = append(projectPolicy.Git.Remotes, configured)
+	case "remote-remove":
+		if *name == "" || *remoteURL != "" {
+			return fmt.Errorf("git remote remove requires only --name")
+		}
+		removed := false
+		kept := make([]policy.GitRemotePolicy, 0, len(projectPolicy.Git.Remotes))
+		for _, configured := range projectPolicy.Git.Remotes {
+			if configured.Name == *name {
+				removed = true
+				continue
+			}
+			kept = append(kept, configured)
+		}
+		if !removed {
+			return fmt.Errorf("Git remote %q is not configured", *name)
+		}
+		projectPolicy.Git.Remotes = kept
 	case "disable":
-		if *remote != "" {
-			return fmt.Errorf("git disable does not accept --remote")
+		if *name != "" || *remoteURL != "" {
+			return fmt.Errorf("git disable does not accept remote options")
 		}
 		projectPolicy.Git.Remotes = nil
 	default:
-		return fmt.Errorf("unknown git action %q", args[0])
+		return fmt.Errorf("%s", gitPolicyUsage())
 	}
+	projectPolicy.Git.Remotes = sortedGitRemotes(projectPolicy.Git.Remotes)
 	projectPolicy.UpdatedAt = time.Now().UTC()
 	if err := policy.Save(path, projectPolicy); err != nil {
 		return err
@@ -67,23 +118,19 @@ func (a *app) gitPolicy(_ context.Context, args []string) error {
 	if len(projectPolicy.Git.Remotes) == 0 {
 		fmt.Fprintln(a.output, "Disabled the Project Git Gateway. Existing host quarantine data was retained and is inactive.")
 	} else {
-		fmt.Fprintf(a.output, "Configured Git Gateway remote %s. Host credential lookup occurs only when an Agent Session starts.\n", projectPolicy.Git.Remotes[0])
+		fmt.Fprintf(a.output, "Configured %d fixed Git Gateway remote(s). Host credential lookup occurs only when an Agent Session starts.\n", len(projectPolicy.Git.Remotes))
 	}
 	return nil
 }
 
-func validateGitRemote(raw string) error {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || !strings.HasSuffix(parsed.Path, ".git") || parsed.Path == ".git" {
-		return fmt.Errorf("Git remote must be a credential-free fixed HTTPS URL ending in .git")
-	}
-	if parsed.Port() != "" && parsed.Port() != "443" {
-		return fmt.Errorf("Git remote must use the standard HTTPS port")
-	}
-	if strings.ContainsAny(raw, "\x00\r\n") {
-		return fmt.Errorf("Git remote contains control characters")
-	}
-	return nil
+func gitPolicyUsage() string {
+	return "usage: sunaba git remote add --name <name> --url <https-url> [--dir <path>] | remote remove --name <name> | remote list | disable"
+}
+
+func sortedGitRemotes(remotes []policy.GitRemotePolicy) []policy.GitRemotePolicy {
+	sorted := append([]policy.GitRemotePolicy(nil), remotes...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	return sorted
 }
 
 func (a *app) webPolicy(ctx context.Context, args []string) error {

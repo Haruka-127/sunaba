@@ -1,6 +1,6 @@
 # Phase 3: Git Gateway
 
-状態: 完了。HTTPS smart HTTP、object-bound one-shot push approval、host quarantine resolver、credential終端、read/receive relay、Trusted UI、secure session lifecycleを実装し、実Agent VM gateを通過した。
+状態: 完了。HTTPS smart HTTP、object-bound one-shot push approval、remote別host quarantine resolver、credential終端、read/receive relay、Trusted UI、secure session lifecycleを実装し、実Agent VM gateを通過した。policy schema v3と公開CLIは最大16件のnamed remoteを扱い、各remoteの固定URL、quarantine、capability token、hook broker、approval bindingを分離する。
 
 ## push approval binding
 
@@ -34,6 +34,8 @@ host UIはProject、repository、remote名、固定送信先、push digest、期
 
 Git Gatewayはmodel channelと別のProject/VM専用mode `0600` Unix socketとしてsecure session policy digestへ含める。VMへはsocket mount、guest loopback relay、実credentialではない短命Git capabilityだけを渡す。OpenCodeのGit subprocessには固定loopback repositoryだけへ送るcapability headerをprocess environmentで設定し、guest repositoryのremote URLにはcredentialを含めない。pause中は永続leaseとin-process gateの双方で`503`にし、resume時は同一VM/socket relayで再開する。session endではHTTP handlerに加えてapproval hook channelのclose callbackを一度だけ実行する。
 
+複数remoteは単一のProject Git socket上で`/<remote>.git`へ明示routeするが、認証headerはURL scopeごとの別tokenとする。別remote tokenの流用、未登録route、guest指定upstreamを拒否する。legacy policy schema v2のURL配列はv3 load時に`origin`、`remote-2`以降へ決定的にmigrationする。
+
 receive advertisement前にhost bare quarantineを固定upstreamへatomic fetch/pruneし、guestがpullした後もapprovalのold refをupstream currentへ一致させる。retry時は同じmirrorを再検証し、exact leaseでそれ以降の競合も拒否する。clone/fetch/pull/pushの各request、mirror sync、approval、consume、upstream結果、session start/stopをhost JSONL auditへ記録し、audit sinkなしのGateway生成を拒否する。
 
 実Agent VM gate:
@@ -42,7 +44,7 @@ receive advertisement前にhost bare quarantineを固定upstreamへatomic fetch/
 SUNABA_PHASE3_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase3GitGatewayInAgentVM$' -count=1 -v
 ```
 
-このgateはVM内の実`git clone`、pause/resume、upstream更新後の`pull --ff-only`、未承認push拒否、Trusted UI confirm、同一retry成功、host credential非混入、Destroy後のsocket失効、監査event完全性とsecret非混入を検証する。通常/force/deleteのstandard Git retryはhost smart HTTP統合試験で別途固定する。
+このgateは2つのHTTPS upstreamと別々のhost credential/capabilityを使い、VM内で両remoteの実`git clone`、cross-remote token拒否、pause/resume、upstream更新後の`pull --ff-only`、未承認push拒否、Trusted UI confirm、同一retry成功、host credential非混入、Destroy後のsocket失効、監査event完全性とsecret非混入を検証する。通常/force/deleteのstandard Git retryはhost smart HTTP統合試験で別途固定する。2026-08-11のnamed multiple remote対応後の実機再実行は29.40秒でPASSし、終了後にテスト所有container/network/volumeが残っていないことを確認した。
 
 再現コマンド:
 

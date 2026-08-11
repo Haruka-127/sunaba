@@ -31,6 +31,12 @@ import (
 
 var sessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{5,63}$`)
 var secretPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{32,256}$`)
+var gitRemoteNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+type GitRemote struct {
+	Name  string
+	Token string
+}
 
 type Event struct {
 	Type      string
@@ -63,7 +69,7 @@ type Config struct {
 	ModelGateway      http.Handler
 	ModelToken        string
 	GitGateway        http.Handler
-	GitToken          string
+	GitRemotes        []GitRemote
 	GitGatewayClose   func() error
 	WebGateway        http.Handler
 	WebToken          string
@@ -300,10 +306,10 @@ func validateConfig(cfg Config) error {
 	if !secretPattern.MatchString(cfg.ModelToken) || !secretPattern.MatchString(cfg.ServerPassword) || cfg.ModelToken == cfg.ServerPassword {
 		return fmt.Errorf("session secrets must be distinct high-entropy URL-safe values")
 	}
-	if (cfg.GitGateway == nil) != (cfg.GitToken == "") || (cfg.GitGateway == nil) != (cfg.GitGatewayClose == nil) || (cfg.GitGateway != nil && (!secretPattern.MatchString(cfg.GitToken) || cfg.GitToken == cfg.ModelToken || cfg.GitToken == cfg.ServerPassword)) {
+	if (cfg.GitGateway == nil) != (len(cfg.GitRemotes) == 0) || (cfg.GitGateway == nil) != (cfg.GitGatewayClose == nil) || !validGitRemoteConfig(cfg.GitRemotes, cfg.ModelToken, cfg.ServerPassword) {
 		return fmt.Errorf("optional Git Gateway requires a distinct high-entropy capability")
 	}
-	if (cfg.WebGateway == nil) != (cfg.WebToken == "") || (cfg.WebGateway == nil) != (cfg.WebGatewayClose == nil) || (cfg.WebGateway != nil && (!secretPattern.MatchString(cfg.WebToken) || cfg.WebToken == cfg.ModelToken || cfg.WebToken == cfg.ServerPassword || cfg.WebToken == cfg.GitToken)) {
+	if (cfg.WebGateway == nil) != (cfg.WebToken == "") || (cfg.WebGateway == nil) != (cfg.WebGatewayClose == nil) || (cfg.WebGateway != nil && (!secretPattern.MatchString(cfg.WebToken) || cfg.WebToken == cfg.ModelToken || cfg.WebToken == cfg.ServerPassword || gitTokenExists(cfg.GitRemotes, cfg.WebToken))) {
 		return fmt.Errorf("optional Web Gateway requires a distinct high-entropy capability")
 	}
 	if cfg.Audit == nil || filepath.Clean(cfg.Audit.Root) != filepath.Join(filepath.Clean(cfg.Store.Root), "audit") {
@@ -313,6 +319,37 @@ func validateConfig(cfg Config) error {
 		return fmt.Errorf("secure session requires a bounded lease lifetime")
 	}
 	return nil
+}
+
+func validGitRemoteConfig(remotes []GitRemote, modelToken, serverPassword string) bool {
+	if len(remotes) > 16 {
+		return false
+	}
+	names := make(map[string]struct{}, len(remotes))
+	tokens := make(map[string]struct{}, len(remotes))
+	for _, remote := range remotes {
+		if !gitRemoteNamePattern.MatchString(remote.Name) || !secretPattern.MatchString(remote.Token) || remote.Token == modelToken || remote.Token == serverPassword {
+			return false
+		}
+		if _, exists := names[remote.Name]; exists {
+			return false
+		}
+		if _, exists := tokens[remote.Token]; exists {
+			return false
+		}
+		names[remote.Name] = struct{}{}
+		tokens[remote.Token] = struct{}{}
+	}
+	return true
+}
+
+func gitTokenExists(remotes []GitRemote, token string) bool {
+	for _, remote := range remotes {
+		if remote.Token == token {
+			return true
+		}
+	}
+	return false
 }
 
 func NewSecret() (string, error) {
@@ -551,7 +588,9 @@ func (s *Session) configureGuest(ctx context.Context) error {
 	envPath := filepath.Join(s.Root, "session.env")
 	environment := "OPENCODE_SERVER_PASSWORD=" + s.cfg.ServerPassword + "\nSUNABA_MODEL_GATEWAY_TOKEN=" + s.cfg.ModelToken + "\n"
 	if s.cfg.GitGateway != nil {
-		environment += "SUNABA_GIT_GATEWAY_TOKEN=" + s.cfg.GitToken + "\n"
+		for index, remote := range s.cfg.GitRemotes {
+			environment += fmt.Sprintf("SUNABA_GIT_GATEWAY_TOKEN_%d=%s\n", index, remote.Token)
+		}
 	}
 	if s.cfg.WebGateway != nil {
 		environment += "SUNABA_WEB_GATEWAY_TOKEN=" + s.cfg.WebToken + "\n"
@@ -616,10 +655,10 @@ func (s *Session) configureGuest(ctx context.Context) error {
 		"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4141 --unix-target /run/sunaba/model-gateway.sock >/run/sunaba/model-relay.log 2>&1 &",
 	}
 	if s.cfg.GitGateway != nil {
-		commands = append(commands,
-			"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository config remote.origin.url http://127.0.0.1:4242/repository.git",
-			"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4242 --unix-target /run/sunaba/git-gateway.sock >/run/sunaba/git-relay.log 2>&1 &",
-		)
+		for _, remote := range s.cfg.GitRemotes {
+			commands = append(commands, "runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository config remote."+remote.Name+".url http://127.0.0.1:4242/"+remote.Name+".git")
+		}
+		commands = append(commands, "nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4242 --unix-target /run/sunaba/git-gateway.sock >/run/sunaba/git-relay.log 2>&1 &")
 	}
 	if s.cfg.WebGateway != nil {
 		commands = append(commands,
@@ -640,10 +679,7 @@ func (s *Session) configureGuest(ctx context.Context) error {
 }
 
 func (s *Session) guestServerCommand() string {
-	gitEnvironment := ""
-	if s.cfg.GitGateway != nil {
-		gitEnvironment = " GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.http://127.0.0.1:4242/.extraHeader GIT_CONFIG_VALUE_0=\"Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN\""
-	}
+	gitEnvironment := s.guestGitEnvironment()
 	webEnvironment := ""
 	if s.cfg.WebGateway != nil {
 		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
@@ -652,15 +688,23 @@ func (s *Session) guestServerCommand() string {
 }
 
 func (s *Session) guestShellWrapper() string {
-	gitEnvironment := ""
-	if s.cfg.GitGateway != nil {
-		gitEnvironment = " GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.http://127.0.0.1:4242/.extraHeader GIT_CONFIG_VALUE_0=\"Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN\""
-	}
+	gitEnvironment := s.guestGitEnvironment()
 	webEnvironment := ""
 	if s.cfg.WebGateway != nil {
 		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
 	}
 	return "#!/bin/bash\nset -eu\nset -a\n. /run/sunaba/session.env\nset +a\ncd " + s.WorkspacePath + "\nexec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " /bin/bash -lc \"$1\"\n"
+}
+
+func (s *Session) guestGitEnvironment() string {
+	if s.cfg.GitGateway == nil {
+		return ""
+	}
+	environment := fmt.Sprintf(" GIT_CONFIG_COUNT=%d", len(s.cfg.GitRemotes))
+	for index, remote := range s.cfg.GitRemotes {
+		environment += fmt.Sprintf(" GIT_CONFIG_KEY_%d=http.http://127.0.0.1:4242/%s.git.extraHeader GIT_CONFIG_VALUE_%d=\"Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN_%d\"", index, remote.Name, index, index)
+	}
+	return environment
 }
 
 func (s *Session) verifyGuestResources(ctx context.Context) error {

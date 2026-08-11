@@ -11,7 +11,7 @@ import (
 	"sunaba/internal/state"
 )
 
-func TestPolicyV2RoundTripAndIdentityBinding(t *testing.T) {
+func TestPolicyV3RoundTripAndIdentityBinding(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	policy, err := New(project, strings.Repeat("a", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now)
@@ -38,7 +38,7 @@ func TestPolicyV2RoundTripAndIdentityBinding(t *testing.T) {
 	}
 }
 
-func TestLegacyV1MigratesAtomicallyToStrictV2(t *testing.T) {
+func TestLegacyV1MigratesAtomicallyToStrictV3(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	legacy := legacyPolicyV1{
@@ -62,11 +62,40 @@ func TestLegacyV1MigratesAtomicallyToStrictV2(t *testing.T) {
 		t.Fatalf("migrated=%+v changed=%v error=%v", migrated, changed, err)
 	}
 	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), `"schema_version": 2`) || strings.Contains(string(data), `"web_origins"`) {
-		t.Fatalf("policy file was not atomically replaced with v2: %s", data)
+	if !strings.Contains(string(data), `"schema_version": 3`) || strings.Contains(string(data), `"web_origins"`) {
+		t.Fatalf("policy file was not atomically replaced with v3: %s", data)
 	}
 	if leftovers, _ := filepath.Glob(filepath.Join(directory, ".sunaba-policy-*.tmp")); len(leftovers) != 0 {
 		t.Fatalf("migration temporary files remained: %v", leftovers)
+	}
+}
+
+func TestLegacyV2MigratesStringRemotesToNamedV3Remotes(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
+	current, err := New(project, strings.Repeat("c", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := legacyPolicyV2{
+		SchemaVersion: 2, ProjectID: current.ProjectID, ProjectRoot: current.ProjectRoot, Mode: current.Mode,
+		Dependency: current.Dependency, Resources: current.Resources, Session: current.Session, Model: current.Model,
+		Git: legacyGitV2{Remotes: []string{"https://git.example/one.git", "https://git.example/two.git"}, PushApprovalRequired: true},
+		Web: current.Web, Export: current.Export, Audit: current.Audit, ProtectedPaths: current.ProtectedPaths,
+		CreatedAt: current.CreatedAt, UpdatedAt: current.UpdatedAt,
+	}
+	encoded, _ := json.Marshal(legacy)
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	path := filepath.Join(root, "state", "policy.json")
+	if err := os.Mkdir(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, changed, err := LoadAndMigrate(path, now)
+	if err != nil || !changed || len(migrated.Git.Remotes) != 2 || migrated.Git.Remotes[0].Name != "origin" || migrated.Git.Remotes[1].Name != "remote-2" {
+		t.Fatalf("migrated=%+v changed=%v error=%v", migrated.Git, changed, err)
 	}
 }
 

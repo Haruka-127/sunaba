@@ -80,4 +80,4 @@ control locator、Unix socket、startup logはcurrent user所有のprivate direc
 SUNABA_CLI_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPublicCLI' -count=1 -v
 ```
 
-このgateは公開`project init`/`up`からpaused VMを作成し、shellで作ったfileがpause/resume後も残ること、悪意あるOSC/BELが可視化されること、停止VMのOverlayFSを再構成したexport後に正しいChange Setが得られ、supervisor/VM/Project stateをexact cleanupできることを検証する。2026-08-11の最新HEAD実機再実行でPASSした。
+このgateは公開`project init`/`up`からpaused VMを作成し、shellで作ったfileがpause/resume後も残ること、悪意あるOSC/BELが可視化されること、停止VMのOverlayFSを再構成したexport後に正しいChange Setが得られ、supervisor/VM/Project stateをexact cleanupできることを検証する。OpenAI credential取得はlink-time fakeのlogin Keychainへ差し替えるため、実credentialや環境変数へ依存しない。2026-08-11の最新HEAD実機再実行で44.42秒でPASSした。

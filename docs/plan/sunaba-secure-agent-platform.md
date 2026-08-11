@@ -663,7 +663,7 @@ pushとChange Set applyの承認はOpenCode TUIへ表示された文字列やser
 
 LLMアクセスは、エージェントへ公開する明示的なtool callではない。OpenCode runtime自身がprovider通信としてModel Gatewayを呼び、エージェントは通常どおりモデル上で動作する。Agent VMからModel Gatewayのupstream設定や実credentialを参照・変更する経路は設けない。
 
-実APIキーはホストのSecret StoreからModel Gatewayだけが読む。Agent VMへは次だけを渡す。
+実APIキーはmacOS login Keychainの固定generic password（service `dev.sunaba.openai`、account `openai-api-key`）からModel Gatewayだけが`/usr/bin/security`の固定queryで読む。login Keychain pathも同じ固定commandから取得し、quoted absolute clean pathとして検証して各item操作へ明示する。登録はKeychain自身の対話promptを使い、secretをargvやenvironmentへ載せない。Agent VMへは次だけを渡す。
 
 - VMから到達できるModel Gatewayのbase URL
 - セッション限定のsunaba gateway token
@@ -959,12 +959,15 @@ Phase 1は内部vertical sliceであり、untrusted Projectを扱う一般利用
 
 ### Phase 3: Git Gateway
 
-- HTTPSまたはSSH upstream認証のhost終端
+- HTTPS upstream認証のhost終端。SSH transportはMVP対象外
 - standard Git UXを保つremote/relay方式
 - clone/fetch/pull
 - object IDへ束縛したone-shot push承認
 - force/deleteの明示表示
 - session終了後と承認期限切れの拒否
+- 最大16件のnamed remoteごとに固定送信先、host quarantine、capability、approval bindingを分離
+
+実装状態: 完了。policy schema v3でnamed remoteを保持し、legacy v2のURL配列を`origin`、`remote-2`以降へ決定的にmigrationする。公開CLIはremoteのadd/remove/listを提供し、Agent VMへはremote URLごとの短命headerだけを注入する。
 
 ### Phase 4: Web Gatewayの設計と実装
 
@@ -984,7 +987,7 @@ Phase 1は内部vertical sliceであり、untrusted Projectを扱う一般利用
 - image provenanceとdependency更新
 - セキュリティレビューと公開前の残余リスク整理
 
-実装状態: 完了。dependency manifest schema v2、build input provenance、全証拠を要求するversion更新contract、Project policy v2 migration、audit retention/redaction、Gateway fuzz/property、ENOSPC、guardを失ったhost reboot、Git partial failureのfault injectionを自動testへ固定した。通常verifyは旧prototype gateを廃止してformat、unit、race、vet、固定helper build、CLI/static boundaryを実行する。詳細な証拠と再現コマンドは[`../implementation/phase-5.md`](../implementation/phase-5.md)を正とする。
+実装状態: 完了。dependency manifest schema v2、build input provenance、全証拠を要求するversion更新contract、Project policy v1/v2からv3へのmigration、audit retention/redaction、Gateway fuzz/property、ENOSPC、guardを失ったhost reboot、Git partial failureのfault injectionを自動testへ固定した。通常verifyは旧prototype gateを廃止してformat、unit、race、vet、固定helper build、CLI/static boundaryを実行する。詳細な証拠と再現コマンドは[`../implementation/phase-5.md`](../implementation/phase-5.md)を正とする。
 
 ---
 
@@ -1062,6 +1065,7 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 基本操作は次のような責務を持つ。CLI名は実装時に既存CLIとの整合を確認する。
 
 ```text
+sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登録・確認・削除
 sunaba project init <path>       Project登録と初期snapshot
 sunaba up [--mode secure|dev]    secure VMを作成してpause、devはforeground session用artifactだけ準備
 sunaba agent                     server、relay、Host TUIを起動してAgent Session開始
@@ -1073,6 +1077,7 @@ sunaba approvals                 pending push/apply requestをhost側で確認�
 sunaba recreate                  optional export後にclean VM再生成
 sunaba down                      VM停止（状態保持）
 sunaba destroy                   対象Project VMと隔離状態の破棄
+sunaba git remote add/remove/list named fixed HTTPS remoteの構成
 ```
 
 期待する通常体験は次である。
@@ -1215,6 +1220,7 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 - 固定dependency: OpenCode `v1.18.16`のhost TUI / guest server同一version
 - 完了段階: Phase 0〜5の実装、Decision Gate、mock/実VM contract gate
 - 最終統合: CLI/README/通常verifyを現行境界へ更新済み。dev pf実機gateと全resource cleanupを最終確認する
+- 明示的live gate: `SUNABA_LIVE_OPENAI=1`の場合だけlogin Keychainのcredentialで実Agent VMから従量課金Responses requestを送る。通常verifyは実行しない
 - 別承認: `allowed-host-operations.md`の範囲外となるホスト操作
 
 Phase 0でsecure networkまたはOverlayFS/exportの中核不変条件を実現できないと判明した場合は、見かけ上の実装を続けず、アーキテクチャ判断を更新する。
