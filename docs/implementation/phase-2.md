@@ -68,7 +68,7 @@ SUNABA_PHASE2_INTEGRATION=1 go test -tags=integration -run TestPhase2ActualOrpha
 
 secureの`sunaba up`はowner-only detached supervisorを起動し、VMを作成後にGateway/leaseをinactiveへしてpausedで返す。`agent`/`shell`は期限内の同じVMとupperをresumeし、終了時に再びpauseする。`changes export`は停止VMをexportしてChange Setを永続化し、ownership再検証後にVMをdestroyする。`down`、`recreate`、`destroy`も同じcontrol socketを使い、stale locatorはexact ownership/lease orphan cleanup後だけ除去する。
 
-control locator、Unix socket、startup logはcurrent user所有のprivate directoryへ置き、locator/socketはmode `0600`で検証する。OpenCode server passwordはsocket応答以外へ永続化しない。TTL到達時はVMをpauseし、それ以降のresume/shellを拒否する。active Host TUIはpolicyのidle timeoutより短い間隔でowner-only heartbeatを送り、client消失後にidle deadlineへ到達するとSupervisorがGatewayをinactive化してVMをpauseする。Git push承認も同じowner-only control socket上のhost Trusted UIからだけ処理する。
+control locator、Unix socket、startup logはcurrent user所有のprivate directoryへ置き、locator/socketはmode `0600`で検証する。OpenCode server passwordとGateway capabilityを含むcopy元はmode `0600`で作り、guest `/run/sunaba/session.env`へcopy完了直後にhost filesystemから削除する。passwordをhost clientへ渡す経路はowner-only control socket応答だけとし、guest credential fileはexport前に削除する。TTL到達時はVMをpauseし、それ以降のresume/shellを拒否する。active Host TUIはpolicyのidle timeoutより短い間隔でowner-only heartbeatを送り、client消失後にidle deadlineへ到達するとSupervisorがGatewayをinactive化してVMをpauseする。Git push承認も同じowner-only control socket上のhost Trusted UIからだけ処理する。
 
 `sunaba shell`は16 KiB以下の1行command、commandごとの2分timeout、1 MiB出力上限を持つ。guestのUID 1000、Overlay workspace、同じGateway policyで実行し、host表示前にESC/OSC/BEL/C0/C1/bidi/invalid UTF-8を必ずescapeする。未検証PTYとraw `container exec`は公開しない。
 

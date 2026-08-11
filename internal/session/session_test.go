@@ -42,10 +42,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 			t.Fatalf("guest setup missing %q: %s", expected, fake.setup)
 		}
 	}
-	shellWrapper, err := os.ReadFile(filepath.Join(s.Root, "shell-wrapper"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	shellWrapper := fake.copies["/run/sunaba/shell-wrapper"]
 	for _, expected := range []string{"/run/sunaba/session.env", "cd " + s.WorkspacePath, "GIT_DIR=/var/lib/sunaba/repository", `/bin/bash -lc "$1"`} {
 		if !strings.Contains(string(shellWrapper), expected) {
 			t.Fatalf("guest shell wrapper missing %q: %s", expected, shellWrapper)
@@ -54,8 +51,17 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if strings.Contains(string(shellWrapper), cfg.ModelToken) || strings.Contains(string(shellWrapper), cfg.ServerPassword) {
 		t.Fatal("guest shell wrapper contained a concrete capability")
 	}
-	if output, err := exec.Command("/bin/bash", "-n", filepath.Join(s.Root, "shell-wrapper")).CombinedOutput(); err != nil {
+	wrapper := filepath.Join(t.TempDir(), "shell-wrapper")
+	if err := os.WriteFile(wrapper, shellWrapper, 0500); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("/bin/bash", "-n", wrapper).CombinedOutput(); err != nil {
 		t.Fatalf("guest shell wrapper syntax: %v: %s", err, output)
+	}
+	for _, name := range []string{"session.env", "opencode.json", "shell-wrapper"} {
+		if _, err := os.Lstat(filepath.Join(s.Root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("copied host session input %s remained: %v", name, err)
+		}
 	}
 	if err := s.Close(); err == nil {
 		t.Fatal("Close released a live session without owned VM cleanup")
@@ -297,9 +303,12 @@ func TestSessionBindsOptionalWebGatewayAndProxyEnvironmentToLifecycle(t *testing
 	if strings.Contains(fake.setup, cfg.WebToken) {
 		t.Fatal("guest setup command leaked Web capability")
 	}
-	aptConfig, err := os.ReadFile(filepath.Join(s.Root, "apt-proxy.conf"))
-	if err != nil || !strings.Contains(string(aptConfig), cfg.WebToken) {
-		t.Fatalf("bounded apt config was not created: error=%v data=%q", err, aptConfig)
+	aptConfig := fake.copies["/run/sunaba/apt-proxy.conf"]
+	if !strings.Contains(string(aptConfig), cfg.WebToken) {
+		t.Fatalf("bounded apt config was not copied into the guest: data=%q", aptConfig)
+	}
+	if _, err := os.Lstat(filepath.Join(s.Root, "apt-proxy.conf")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("host Web capability file remained after guest copy: %v", err)
 	}
 	client := sessionUnixHTTPClient(filepath.Join(s.Root, "web-gateway.sock"))
 	request, _ := http.NewRequest(http.MethodGet, "http://sunaba/test", nil)
@@ -449,6 +458,7 @@ type fakeRuntime struct {
 	listener   net.Listener
 	server     *http.Server
 	removed    bool
+	copies     map[string][]byte
 }
 
 func (f *fakeRuntime) ImageExists(context.Context, string) (bool, error) { return true, nil }
@@ -512,7 +522,20 @@ func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) 
 	f.setup = joined
 	return "", f.setupError
 }
-func (f *fakeRuntime) CopyTo(context.Context, string, string, string) error { return nil }
+func (f *fakeRuntime) CopyTo(_ context.Context, _ string, source, target string) error {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		if info, statErr := os.Stat(source); statErr == nil && info.IsDir() {
+			return nil
+		}
+		return err
+	}
+	if f.copies == nil {
+		f.copies = make(map[string][]byte)
+	}
+	f.copies[target] = append([]byte(nil), data...)
+	return nil
+}
 func (f *fakeRuntime) Export(context.Context, string, string) error {
 	return errors.New("not implemented")
 }

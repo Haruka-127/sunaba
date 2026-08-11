@@ -570,6 +570,7 @@ func (s *Session) configureGuest(ctx context.Context) error {
 		{envPath, "/run/sunaba/session.env"},
 		{shellWrapperPath, "/run/sunaba/shell-wrapper"},
 	}
+	ephemeralHostFiles := []string{providerPath, envPath, shellWrapperPath}
 	if s.cfg.WebGateway != nil {
 		aptConfigPath := filepath.Join(s.Root, "apt-proxy.conf")
 		proxyURL := "http://sunaba:" + s.cfg.WebToken + "@127.0.0.1:4343"
@@ -578,10 +579,16 @@ func (s *Session) configureGuest(ctx context.Context) error {
 			return err
 		}
 		copies = append(copies, [2]string{aptConfigPath, "/run/sunaba/apt-proxy.conf"})
+		ephemeralHostFiles = append(ephemeralHostFiles, aptConfigPath)
 	}
 	for _, copy := range copies {
 		if err := s.cfg.Runtime.CopyTo(ctx, s.Container, copy[0], copy[1]); err != nil {
 			return err
+		}
+	}
+	for _, path := range ephemeralHostFiles {
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove copied host session input: %w", err)
 		}
 	}
 	commands := []string{
