@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "apple_container": {
     "version": "1.2.2",
     "commit": "0190097d06df0b9065f4c2d2c7873c649d81d493"
@@ -30,6 +30,27 @@
       "artifact": "opencode-linux-arm64.tar.gz",
       "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.16/opencode-linux-arm64.tar.gz",
       "sha256": "4fdce5f9bc877d977304d71c0c90ad6e83efa381fe0edf0a61e6142a625e1c41"
+    }
+  },
+  "provenance": {
+    "apple_container": {
+      "repository": "https://github.com/apple/container",
+      "tag": "1.2.2",
+      "commit": "0190097d06df0b9065f4c2d2c7873c649d81d493"
+    },
+    "opencode": {
+      "repository": "https://github.com/anomalyco/opencode",
+      "tag": "v1.18.16",
+      "commit": "a3647eb025c7615159d417dcc49fc39fdaeba65b"
+    },
+    "base_image": {
+      "registry": "docker.io",
+      "repository": "library/debian",
+      "digest": "sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df"
+    },
+    "build_inputs": {
+      "assets/Containerfile": "0eafeb17833254001d0962679d489ba15c4c5849021b4148c98a852d33d3f273",
+      "assets/entrypoint.sh": "5ac778fff0f962f1530d94ec4c0631ca2609a80b5d40c318eed1731f4f3f9236"
     }
   }
 }

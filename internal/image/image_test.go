@@ -30,3 +30,17 @@ func TestContainerfileVerifiesGuestArtifactDigest(t *testing.T) {
 		t.Fatal("guest digest is empty")
 	}
 }
+
+func TestBuildInputProvenanceRejectsRecipeDrift(t *testing.T) {
+	manifest := dependency.MustPinned()
+	containerfile, _ := sunabaassets.FS.ReadFile("Containerfile")
+	entrypoint, _ := sunabaassets.FS.ReadFile("entrypoint.sh")
+	inputs := map[string][]byte{"Containerfile": containerfile, "entrypoint.sh": entrypoint}
+	if err := verifyBuildInputProvenance(manifest, inputs); err != nil {
+		t.Fatal(err)
+	}
+	inputs["Containerfile"] = append(append([]byte(nil), containerfile...), []byte("\nRUN unpinned-command\n")...)
+	if err := verifyBuildInputProvenance(manifest, inputs); err == nil {
+		t.Fatal("modified image recipe was accepted by provenance gate")
+	}
+}

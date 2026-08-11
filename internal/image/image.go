@@ -2,6 +2,8 @@ package image
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,16 +59,24 @@ func Build(ctx context.Context, rt runtime.Runtime, version string) error {
 	if version != pinned.OpenCode.Version {
 		return fmt.Errorf("refusing to build unpinned OpenCode version %q; expected %s", version, pinned.OpenCode.Version)
 	}
+	buildInputs := make(map[string][]byte, 2)
+	for _, name := range []string{"Containerfile", "entrypoint.sh"} {
+		data, err := sunabaassets.FS.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		buildInputs[name] = data
+	}
+	if err := verifyBuildInputProvenance(pinned, buildInputs); err != nil {
+		return err
+	}
 	dir, err := os.MkdirTemp("", "sunaba-image-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(dir)
 	for _, name := range []string{"Containerfile", "entrypoint.sh"} {
-		b, err := sunabaassets.FS.ReadFile(name)
-		if err != nil {
-			return err
-		}
+		b := buildInputs[name]
 		mode := os.FileMode(0644)
 		if strings.HasSuffix(name, ".sh") {
 			mode = 0755
@@ -79,4 +89,17 @@ func Build(ctx context.Context, rt runtime.Runtime, version string) error {
 		"OPENCODE_VERSION": version,
 		"OPENCODE_SHA256":  pinned.OpenCode.Guest.SHA256,
 	})
+}
+
+func verifyBuildInputProvenance(manifest dependency.Manifest, inputs map[string][]byte) error {
+	if len(inputs) != 2 {
+		return fmt.Errorf("Agent image build requires exactly two pinned inputs")
+	}
+	for name, data := range inputs {
+		digest := sha256.Sum256(data)
+		if manifest.Provenance.BuildInputs["assets/"+name] != hex.EncodeToString(digest[:]) {
+			return fmt.Errorf("Agent image build input %q does not match dependency provenance", name)
+		}
+	}
+	return nil
 }
