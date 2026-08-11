@@ -90,3 +90,40 @@ func TestRecorderRejectsSensitiveKeysAndUnsafeFilesystemObjects(t *testing.T) {
 		t.Fatal("symlink audit log was accepted")
 	}
 }
+
+func TestRecorderRedactsCredentialShapesInOtherwiseAllowedValues(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "audit")
+	recorder, err := NewRecorder(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "sk-this_should_never_reach_the_log"
+	err = recorder.Append(BoundaryEvent{
+		Category: "gateway", Action: "request", Outcome: "rejected", ProjectID: "project",
+		Details: map[string]string{"reason": "Bearer abcdefghijklmnop " + secret + " https://user:password@example.com/path token=abcdefghijklmnop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(root, "project", "audit-*.jsonl"))
+	encoded, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "abcdefghijklmnop") || strings.Contains(string(encoded), "user:password") || !strings.Contains(string(encoded), "REDACTED") {
+		t.Fatalf("credential redaction failed: %s", encoded)
+	}
+}
+
+func TestRecorderRejectsSensitiveKeyFragments(t *testing.T) {
+	recorder, err := NewRecorder(filepath.Join(t.TempDir(), "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"proxy_token_hash", "search_query", "session_secret", "request_body_bytes"} {
+		err := recorder.Append(BoundaryEvent{Category: "gateway", Action: "request", Outcome: "rejected", ProjectID: "project", Details: map[string]string{key: "value"}})
+		if err == nil {
+			t.Fatalf("sensitive audit detail key accepted: %s", key)
+		}
+	}
+}

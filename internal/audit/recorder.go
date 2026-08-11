@@ -22,6 +22,15 @@ var forbiddenDetailKeys = map[string]struct{}{
 	"api_key": {}, "authorization": {}, "body": {}, "content": {}, "password": {}, "prompt": {}, "token": {},
 }
 
+var sensitiveKeyFragments = []string{"authorization", "body", "content", "cookie", "credential", "password", "prompt", "query", "secret", "token"}
+
+var redactionPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(bearer|basic)[ \t]+[a-z0-9._~+/=-]{8,}`),
+	regexp.MustCompile(`(?i)\b(sk-[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9_]{8,})\b`),
+	regexp.MustCompile(`(?i)(api[_-]?key|password|secret|token)=([^&\s]+)`),
+	regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^/@\s]+@`),
+}
+
 type BoundaryEvent struct {
 	Version   int               `json:"version"`
 	At        time.Time         `json:"at"`
@@ -63,10 +72,11 @@ func (r *Recorder) Append(event BoundaryEvent) error {
 	if len(event.Details) > 0 {
 		sanitized := make(map[string]string, len(event.Details))
 		for key, value := range event.Details {
-			if _, forbidden := forbiddenDetailKeys[strings.ToLower(key)]; forbidden {
+			lowerKey := strings.ToLower(key)
+			if _, forbidden := forbiddenDetailKeys[lowerKey]; forbidden || containsSensitiveKeyFragment(lowerKey) {
 				return fmt.Errorf("audit detail key %q may contain sensitive content", key)
 			}
-			value = sanitizeText(value)
+			value = redactText(sanitizeText(value))
 			if len(value) > 4096 {
 				value = value[:4096] + "<TRUNCATED>"
 			}
@@ -87,6 +97,31 @@ func (r *Recorder) Append(event BoundaryEvent) error {
 	}
 	filename := filepath.Join(projectDir, "audit-"+event.At.Format("20060102")+".jsonl")
 	return appendDurable(filename, append(encoded, '\n'))
+}
+
+func containsSensitiveKeyFragment(key string) bool {
+	for _, fragment := range sensitiveKeyFragments {
+		if strings.Contains(key, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func redactText(value string) string {
+	for index, pattern := range redactionPatterns {
+		switch index {
+		case 0:
+			value = pattern.ReplaceAllString(value, "$1 <REDACTED>")
+		case 1:
+			value = pattern.ReplaceAllString(value, "<REDACTED>")
+		case 2:
+			value = pattern.ReplaceAllString(value, "$1=<REDACTED>")
+		case 3:
+			value = pattern.ReplaceAllString(value, "https://<REDACTED>@")
+		}
+	}
+	return value
 }
 
 func sanitizeText(value string) string {
