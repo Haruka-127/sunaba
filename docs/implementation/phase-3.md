@@ -30,6 +30,10 @@ hostが固定したpre-receive helperはGit自身のobject quarantine pathとold
 
 host UIはProject、repository、remote名、固定送信先、push digest、期限、各refのold/new object IDとforce/deleteを構造化表示する。表示したbindingとdigestの整合性を再検証してから、host生成nonceの完全一致入力だけを受理する。OpenCode、guest terminal、hook messageだけではconfirmを呼べず、force/deleteを通常pushとして表示できない。
 
+## secure session lifecycle
+
+Git Gatewayはmodel channelと別のProject/VM専用mode `0600` Unix socketとしてsecure session policy digestへ含める。VMへはsocket mount、guest loopback relay、実credentialではない短命Git capabilityだけを渡す。OpenCodeのGit subprocessには固定loopback repositoryだけへ送るcapability headerをprocess environmentで設定し、guest repositoryのremote URLにはcredentialを含めない。pause中は永続leaseとin-process gateの双方で`503`にし、resume時は同一VM/socket relayで再開する。session endではHTTP handlerに加えてapproval hook channelのclose callbackを一度だけ実行する。
+
 再現コマンド:
 
 ```sh
@@ -38,7 +42,7 @@ go test -race -v ./internal/gitgateway
 
 ## 残件
 
-- Agent VMのProject専用socket relayへGit read/receive handlerを統合する
-- session pause/end、expiry、別Project/VM、object/ref差し替えのVM実統合試験
+- 実Agent VMでclone/fetch/pull/push、pause/end、credential非混入を統合試験する
+- expiry、別Project/VM、object/ref差し替えのVM攻撃試験
 
 これらを完了するまでPhase 3を完了扱いにしない。

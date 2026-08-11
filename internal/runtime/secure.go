@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	SecureGatewayGuestPath = "/run/sunaba/model-gateway.sock"
-	SecureAttachGuestPath  = "/run/sunaba/attach.sock"
+	SecureGatewayGuestPath    = "/run/sunaba/model-gateway.sock"
+	SecureGitGatewayGuestPath = "/run/sunaba/git-gateway.sock"
+	SecureAttachGuestPath     = "/run/sunaba/attach.sock"
 )
 
 var secureIdentityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
@@ -30,6 +31,7 @@ type SecureSessionPolicy struct {
 	ProcessMax  int64  `json:"process_max"`
 	FileSizeMax int64  `json:"file_size_max"`
 	OpenFileMax int64  `json:"open_file_max"`
+	GitGateway  bool   `json:"git_gateway"`
 }
 
 func (p SecureSessionPolicy) Digest() (string, error) {
@@ -116,8 +118,12 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	if spec.Entrypoint != "/bin/bash" || len(spec.Args) != 2 || spec.Args[0] != "-lc" || spec.Args[1] != "exec tail -f /dev/null" || spec.Workdir != "" || spec.ReadOnly {
 		return fmt.Errorf("secure session bootstrap command does not match host policy")
 	}
-	if len(spec.Mounts) != 1 {
-		return fmt.Errorf("secure session requires exactly one Project-bound Gateway socket mount")
+	wantMounts := 1
+	if canonical.GitGateway {
+		wantMounts = 2
+	}
+	if len(spec.Mounts) != wantMounts {
+		return fmt.Errorf("secure session Gateway socket mount count does not match policy")
 	}
 	gatewayPath := filepath.Join(canonical.SessionRoot, "model-gateway.sock")
 	mount := spec.Mounts[0]
@@ -126,6 +132,16 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	}
 	if err := validateHostUnixSocket(gatewayPath); err != nil {
 		return err
+	}
+	if canonical.GitGateway {
+		gitGatewayPath := filepath.Join(canonical.SessionRoot, "git-gateway.sock")
+		gitMount := spec.Mounts[1]
+		if gitMount.Type != "socket" || gitMount.Source != gitGatewayPath || gitMount.Target != SecureGitGatewayGuestPath || gitMount.ReadOnly {
+			return fmt.Errorf("secure session Git Gateway mount does not match Project/session policy")
+		}
+		if err := validateHostUnixSocket(gitGatewayPath); err != nil {
+			return err
+		}
 	}
 	if len(spec.Sockets) != 1 {
 		return fmt.Errorf("secure session requires exactly one Project-bound attach socket")

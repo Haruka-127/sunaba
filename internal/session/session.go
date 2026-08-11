@@ -57,6 +57,9 @@ type Config struct {
 	ProviderConfig   []byte
 	ModelGateway     http.Handler
 	ModelToken       string
+	GitGateway       http.Handler
+	GitToken         string
+	GitGatewayClose  func() error
 	ServerPassword   string
 	LeaseTTL         time.Duration
 	Audit            *audit.Recorder
@@ -74,20 +77,23 @@ type Session struct {
 	Baseline      workspace.SnapshotManifest
 	SnapshotRoot  string
 
-	cfg           Config
-	projectLock   *state.ProjectLock
-	leaseRegistry *lease.Registry
-	leaseGuard    *lease.Guard
-	leaseCreated  bool
-	gatewayServer *http.Server
-	gatewayDone   chan error
-	gatewayActive atomic.Bool
-	attachCancel  context.CancelFunc
-	attachDone    <-chan error
-	vmCreated     bool
-	paused        bool
-	closeOnce     sync.Once
-	closeErr      error
+	cfg              Config
+	projectLock      *state.ProjectLock
+	leaseRegistry    *lease.Registry
+	leaseGuard       *lease.Guard
+	leaseCreated     bool
+	gatewayServer    *http.Server
+	gatewayDone      chan error
+	gitGatewayServer *http.Server
+	gitGatewayDone   chan error
+	gatewayActive    atomic.Bool
+	attachCancel     context.CancelFunc
+	attachDone       <-chan error
+	vmCreated        bool
+	paused           bool
+	closeOnce        sync.Once
+	gitCloseOnce     sync.Once
+	closeErr         error
 }
 
 type ExportResult struct {
@@ -153,11 +159,15 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	policy := runtime.SecureSessionPolicy{
 		ProjectID: s.ProjectID, SessionID: s.SessionID, Image: cfg.Image, SessionRoot: s.Root,
 		CPUs: cfg.CPUs, Memory: cfg.Memory, DiskBytes: cfg.DiskBytes,
-		ProcessMax: cfg.ProcessMax, FileSizeMax: cfg.FileSizeMax, OpenFileMax: cfg.OpenFileMax,
+		ProcessMax: cfg.ProcessMax, FileSizeMax: cfg.FileSizeMax, OpenFileMax: cfg.OpenFileMax, GitGateway: cfg.GitGateway != nil,
 	}
 	policyDigest, err := policy.Digest()
 	if err != nil {
 		return nil, err
+	}
+	mounts := []runtime.Mount{{Type: "socket", Source: filepath.Join(s.Root, "model-gateway.sock"), Target: runtime.SecureGatewayGuestPath}}
+	if cfg.GitGateway != nil {
+		mounts = append(mounts, runtime.Mount{Type: "socket", Source: filepath.Join(s.Root, "git-gateway.sock"), Target: runtime.SecureGitGatewayGuestPath})
 	}
 	spec := runtime.ContainerSpec{
 		Name: s.Container, Image: cfg.Image, CPUs: cfg.CPUs, Memory: cfg.Memory,
@@ -168,7 +178,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		},
 		Networks: []string{"none"}, NoDNS: true, CapAdd: []string{"SYS_ADMIN"},
 		Entrypoint: "/bin/bash", Args: []string{"-lc", "exec tail -f /dev/null"},
-		Mounts:  []runtime.Mount{{Type: "socket", Source: filepath.Join(s.Root, "model-gateway.sock"), Target: runtime.SecureGatewayGuestPath}},
+		Mounts:  mounts,
 		Sockets: []runtime.PublishedSocket{{HostPath: filepath.Join(s.Root, "attach.sock"), GuestPath: runtime.SecureAttachGuestPath}},
 		Labels: map[string]string{
 			"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": s.ProjectID,
@@ -205,6 +215,11 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	}
 	if err := s.emit("capability.activated", "model"); err != nil {
 		return nil, err
+	}
+	if cfg.GitGateway != nil {
+		if err := s.emit("capability.activated", "git"); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.emit("session.ready", health.Version); err != nil {
 		return nil, err
@@ -243,6 +258,9 @@ func validateConfig(cfg Config) error {
 	if !secretPattern.MatchString(cfg.ModelToken) || !secretPattern.MatchString(cfg.ServerPassword) || cfg.ModelToken == cfg.ServerPassword {
 		return fmt.Errorf("session secrets must be distinct high-entropy URL-safe values")
 	}
+	if (cfg.GitGateway == nil) != (cfg.GitToken == "") || (cfg.GitGateway == nil) != (cfg.GitGatewayClose == nil) || (cfg.GitGateway != nil && (!secretPattern.MatchString(cfg.GitToken) || cfg.GitToken == cfg.ModelToken || cfg.GitToken == cfg.ServerPassword)) {
+		return fmt.Errorf("optional Git Gateway requires a distinct high-entropy capability")
+	}
 	if cfg.Audit == nil || filepath.Clean(cfg.Audit.Root) != filepath.Join(filepath.Clean(cfg.Store.Root), "audit") {
 		return fmt.Errorf("secure session requires its host audit recorder under the state store")
 	}
@@ -261,24 +279,46 @@ func NewSecret() (string, error) {
 }
 
 func (s *Session) startGateway() error {
-	path := filepath.Join(s.Root, "model-gateway.sock")
-	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSocket == 0 {
-			return fmt.Errorf("Model Gateway path was replaced with a non-socket")
-		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	listener, err := net.Listen("unix", path)
+	server, done, err := s.startUnixGateway("model-gateway.sock", s.cfg.ModelGateway)
 	if err != nil {
 		return err
 	}
+	s.gatewayServer, s.gatewayDone = server, done
+	if err := s.emit("model_gateway.started", ""); err != nil {
+		return err
+	}
+	if s.cfg.GitGateway != nil {
+		server, done, err = s.startUnixGateway("git-gateway.sock", s.cfg.GitGateway)
+		if err != nil {
+			return err
+		}
+		s.gitGatewayServer, s.gitGatewayDone = server, done
+		if err := s.emit("git_gateway.started", ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Session) startUnixGateway(name string, handler http.Handler) (*http.Server, chan error, error) {
+	path := filepath.Join(s.Root, name)
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, nil, fmt.Errorf("Gateway path was replaced with a non-socket")
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := os.Chmod(path, 0600); err != nil {
 		listener.Close()
-		return err
+		return nil, nil, err
 	}
 	s.gatewayActive.Store(false)
 	gatedGateway := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -286,12 +326,10 @@ func (s *Session) startGateway() error {
 			http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 			return
 		}
-		s.cfg.ModelGateway.ServeHTTP(response, request)
+		handler.ServeHTTP(response, request)
 	})
-	s.gatewayServer = &http.Server{Handler: gatedGateway, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
+	server := &http.Server{Handler: gatedGateway, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 1)
-	server := s.gatewayServer
-	s.gatewayDone = done
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {
@@ -300,7 +338,7 @@ func (s *Session) startGateway() error {
 		done <- err
 		close(done)
 	}()
-	return s.emit("model_gateway.started", "")
+	return server, done, nil
 }
 
 func (s *Session) Pause(ctx context.Context) error {
@@ -316,6 +354,11 @@ func (s *Session) Pause(ctx context.Context) error {
 	s.paused = true
 	if err := s.emit("capability.paused", "model"); err != nil {
 		pauseErr = errors.Join(pauseErr, err)
+	}
+	if s.cfg.GitGateway != nil {
+		if err := s.emit("capability.paused", "git"); err != nil {
+			pauseErr = errors.Join(pauseErr, err)
+		}
 	}
 	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
 		return errors.Join(pauseErr, err)
@@ -379,6 +422,11 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 	if err := s.emit("capability.activated", "model"); err != nil {
 		return err
 	}
+	if s.cfg.GitGateway != nil {
+		if err := s.emit("capability.activated", "git"); err != nil {
+			return err
+		}
+	}
 	if err := s.emit("session.resumed", health.Version); err != nil {
 		return err
 	}
@@ -389,15 +437,21 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 }
 
 func (s *Session) resumeGuest(ctx context.Context) error {
-	resume := strings.Join([]string{
+	commands := []string{
 		"set -eu",
 		"if ! grep -Fqs ' /var/lib/sunaba/overlay ' /proc/mounts; then mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay; fi",
 		"if ! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/overlay/upper,workdir=/var/lib/sunaba/overlay/work " + s.WorkspacePath + "; fi",
 		"test -d /var/lib/sunaba/repository",
 		"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4141 --unix-target /run/sunaba/model-gateway.sock >/run/sunaba/model-relay.log 2>&1 &",
+	}
+	if s.cfg.GitGateway != nil {
+		commands = append(commands, "nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4242 --unix-target /run/sunaba/git-gateway.sock >/run/sunaba/git-relay.log 2>&1 &")
+	}
+	commands = append(commands,
 		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
 		s.guestServerCommand(),
-	}, "\n")
+	)
+	resume := strings.Join(commands, "\n")
 	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", resume}); err != nil {
 		return fmt.Errorf("resume secure guest services: %w: %s", err, out)
 	}
@@ -414,6 +468,9 @@ func (s *Session) configureGuest(ctx context.Context) error {
 	}
 	envPath := filepath.Join(s.Root, "session.env")
 	environment := "OPENCODE_SERVER_PASSWORD=" + s.cfg.ServerPassword + "\nSUNABA_MODEL_GATEWAY_TOKEN=" + s.cfg.ModelToken + "\n"
+	if s.cfg.GitGateway != nil {
+		environment += "SUNABA_GIT_GATEWAY_TOKEN=" + s.cfg.GitToken + "\n"
+	}
 	if err := os.WriteFile(envPath, []byte(environment), 0600); err != nil {
 		return err
 	}
@@ -427,7 +484,7 @@ func (s *Session) configureGuest(ctx context.Context) error {
 			return err
 		}
 	}
-	setup := strings.Join([]string{
+	commands := []string{
 		"set -eu",
 		"chmod 0700 /run/sunaba/guest-relay",
 		"getent group sunaba-agent >/dev/null || groupadd -g 1000 sunaba-agent",
@@ -449,9 +506,18 @@ func (s *Session) configureGuest(ctx context.Context) error {
 		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config core.hooksPath /dev/null",
 		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " add -A && runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " commit -qm 'sunaba synthetic baseline' --no-verify || true",
 		"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4141 --unix-target /run/sunaba/model-gateway.sock >/run/sunaba/model-relay.log 2>&1 &",
+	}
+	if s.cfg.GitGateway != nil {
+		commands = append(commands,
+			"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository config remote.origin.url http://127.0.0.1:4242/repository.git",
+			"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4242 --unix-target /run/sunaba/git-gateway.sock >/run/sunaba/git-relay.log 2>&1 &",
+		)
+	}
+	commands = append(commands,
 		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
 		s.guestServerCommand(),
-	}, "\n")
+	)
+	setup := strings.Join(commands, "\n")
 	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", setup}); err != nil {
 		return fmt.Errorf("configure secure guest: %w: %s", err, out)
 	}
@@ -459,7 +525,11 @@ func (s *Session) configureGuest(ctx context.Context) error {
 }
 
 func (s *Session) guestServerCommand() string {
-	return "nohup runuser -u sunaba-agent -- /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
+	gitEnvironment := ""
+	if s.cfg.GitGateway != nil {
+		gitEnvironment = " GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.http://127.0.0.1:4242/.extraHeader GIT_CONFIG_VALUE_0=\"Authorization: Bearer $SUNABA_GIT_GATEWAY_TOKEN\""
+	}
+	return "nohup runuser -u sunaba-agent -- /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
 }
 
 func (s *Session) verifyGuestResources(ctx context.Context) error {
@@ -685,22 +755,27 @@ func (s *Session) stopChannels(ctx context.Context) error {
 	var stopErr error
 	stopErr = errors.Join(stopErr, s.stopAttach(ctx))
 	s.gatewayActive.Store(false)
-	if s.gatewayServer != nil {
-		shutdown, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err := s.gatewayServer.Shutdown(shutdown)
-		cancel()
-		if err != nil {
-			stopErr = errors.Join(stopErr, err)
-		}
-		if s.gatewayDone != nil {
-			if err := <-s.gatewayDone; err != nil {
-				stopErr = errors.Join(stopErr, err)
-			}
-		}
-		s.gatewayServer, s.gatewayDone = nil, nil
-		stopErr = errors.Join(stopErr, s.emit("model_gateway.stopped", ""))
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.gitGatewayServer, &s.gitGatewayDone, "git_gateway.stopped"))
+	if s.cfg.GitGatewayClose != nil {
+		s.gitCloseOnce.Do(func() { stopErr = errors.Join(stopErr, s.cfg.GitGatewayClose()) })
 	}
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.gatewayServer, &s.gatewayDone, "model_gateway.stopped"))
 	return stopErr
+}
+
+func (s *Session) stopUnixGateway(ctx context.Context, server **http.Server, done *chan error, event string) error {
+	if *server == nil {
+		return nil
+	}
+	var stopErr error
+	shutdown, cancel := context.WithTimeout(ctx, 3*time.Second)
+	stopErr = errors.Join(stopErr, (*server).Shutdown(shutdown))
+	cancel()
+	if *done != nil {
+		stopErr = errors.Join(stopErr, <-*done)
+	}
+	*server, *done = nil, nil
+	return errors.Join(stopErr, s.emit(event, ""))
 }
 
 func (s *Session) stopAttach(ctx context.Context) error {

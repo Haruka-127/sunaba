@@ -25,7 +25,6 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Destroy(context.Background())
 	if fake.spec.Image != dependency.MustPinned().AgentImage.Tag || len(fake.spec.Networks) != 1 || fake.spec.Networks[0] != "none" || !fake.spec.NoDNS {
 		t.Fatalf("secure spec=%+v", fake.spec)
 	}
@@ -116,6 +115,62 @@ func TestPauseFailsClosedWhenAuditCannotAppend(t *testing.T) {
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestSessionBindsOptionalGitGatewayToLifecycle(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	closed := false
+	cfg.GitToken = strings.Repeat("g", 43)
+	cfg.GitGateway = http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(response, "git-gateway")
+	})
+	cfg.GitGatewayClose = func() error { closed = true; return nil }
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.spec.Mounts) != 2 || fake.spec.Mounts[1].Target != runtime.SecureGitGatewayGuestPath {
+		t.Fatalf("Git Gateway mount=%+v", fake.spec.Mounts)
+	}
+	if !strings.Contains(fake.setup, "127.0.0.1:4242") || !strings.Contains(fake.setup, "remote.origin.url") || strings.Contains(fake.setup, cfg.GitToken) {
+		t.Fatalf("Git guest setup is incomplete or leaked capability: %s", fake.setup)
+	}
+	client := sessionUnixHTTPClient(filepath.Join(s.Root, "git-gateway.sock"))
+	request, _ := http.NewRequest(http.MethodGet, "http://sunaba/repository.git/info/refs?service=git-upload-pack", nil)
+	response, err := client.Do(request)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("active Git Gateway response=%v error=%v", response, err)
+	}
+	_ = response.Body.Close()
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response, err = client.Do(request.Clone(context.Background()))
+	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("paused Git Gateway response=%v error=%v", response, err)
+	}
+	_ = response.Body.Close()
+	if err := s.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	response, err = client.Do(request.Clone(context.Background()))
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("resumed Git Gateway response=%v error=%v", response, err)
+	}
+	_ = response.Body.Close()
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !closed {
+		t.Fatal("session end did not close the Git approval channel")
+	}
+}
+
+func sessionUnixHTTPClient(socketPath string) *http.Client {
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	}}
+	return &http.Client{Transport: transport, Timeout: 2 * time.Second}
 }
 
 func TestStartFailureRemovesOwnedVMAndReleasesProjectLock(t *testing.T) {
