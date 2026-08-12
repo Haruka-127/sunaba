@@ -27,6 +27,8 @@ const (
 	deviceVerifyURL     = "https://auth.openai.com/codex/device"
 	deviceRedirectURI   = "https://auth.openai.com/deviceauth/callback"
 	maximumResponseSize = 64 << 10
+	defaultTokenTTL     = time.Hour
+	maximumTokenTTL     = 24 * time.Hour
 )
 
 type credentialStore interface {
@@ -134,10 +136,10 @@ type deviceTokenResponse struct {
 }
 
 type oauthTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	IDToken      string `json:"id_token"`
-	ExpiresIn    int64  `json:"expires_in"`
+	AccessToken  *string `json:"access_token"`
+	RefreshToken *string `json:"refresh_token"`
+	IDToken      *string `json:"id_token"`
+	ExpiresIn    *int64  `json:"expires_in"`
 }
 
 func (c *Client) deviceLogin(ctx context.Context, output io.Writer) (secretstore.CodexOAuthCredential, error) {
@@ -192,7 +194,7 @@ func (c *Client) deviceLogin(ctx context.Context, output io.Writer) (secretstore
 	if err != nil {
 		return secretstore.CodexOAuthCredential{}, err
 	}
-	return c.credential(token, "")
+	return c.initialCredential(token)
 }
 
 func (c *Client) refresh(ctx context.Context, previous secretstore.CodexOAuthCredential) (secretstore.CodexOAuthCredential, error) {
@@ -204,7 +206,7 @@ func (c *Client) refresh(ctx context.Context, previous secretstore.CodexOAuthCre
 	if err != nil {
 		return secretstore.CodexOAuthCredential{}, fmt.Errorf("refresh Codex OAuth token: %w", err)
 	}
-	return c.credential(token, previous.AccountID)
+	return c.refreshedCredential(token, previous)
 }
 
 func (c *Client) exchange(ctx context.Context, form url.Values) (oauthTokenResponse, error) {
@@ -229,21 +231,86 @@ func (c *Client) exchange(ctx context.Context, form url.Values) (oauthTokenRespo
 	return token, nil
 }
 
-func (c *Client) credential(token oauthTokenResponse, fallbackAccount string) (secretstore.CodexOAuthCredential, error) {
-	if !safeValue(token.AccessToken, 8, 32<<10) || !safeValue(token.RefreshToken, 8, 32<<10) || !safeValue(token.IDToken, 8, 32<<10) || token.ExpiresIn <= 0 || token.ExpiresIn > 86400 {
-		return secretstore.CodexOAuthCredential{}, fmt.Errorf("Codex OAuth token response is invalid")
-	}
-	accountID, err := accountIDFromJWT(token.IDToken)
+func (c *Client) initialCredential(token oauthTokenResponse) (secretstore.CodexOAuthCredential, error) {
+	accessToken, err := requiredTokenValue("access_token", token.AccessToken)
 	if err != nil {
-		accountID = fallbackAccount
+		return secretstore.CodexOAuthCredential{}, err
+	}
+	refreshToken, err := requiredTokenValue("refresh_token", token.RefreshToken)
+	if err != nil {
+		return secretstore.CodexOAuthCredential{}, err
+	}
+	idToken, err := requiredTokenValue("id_token", token.IDToken)
+	if err != nil {
+		return secretstore.CodexOAuthCredential{}, err
+	}
+	expiresAt, err := c.tokenExpiresAt(token.ExpiresIn)
+	if err != nil {
+		return secretstore.CodexOAuthCredential{}, err
+	}
+	accountID, err := accountIDFromJWT(idToken)
+	if err != nil || !safeValue(accountID, 8, 1024) {
+		return secretstore.CodexOAuthCredential{}, fmt.Errorf("Codex OAuth account identity is unavailable")
+	}
+	return secretstore.CodexOAuthCredential{
+		AccessToken: accessToken, RefreshToken: refreshToken, IDToken: idToken,
+		AccountID: accountID, ExpiresAt: expiresAt,
+	}, nil
+}
+
+func (c *Client) refreshedCredential(token oauthTokenResponse, previous secretstore.CodexOAuthCredential) (secretstore.CodexOAuthCredential, error) {
+	accessToken, err := refreshedTokenValue("access_token", token.AccessToken, previous.AccessToken)
+	if err != nil {
+		return secretstore.CodexOAuthCredential{}, err
+	}
+	refreshToken, err := refreshedTokenValue("refresh_token", token.RefreshToken, previous.RefreshToken)
+	if err != nil {
+		return secretstore.CodexOAuthCredential{}, err
+	}
+	idToken, err := refreshedTokenValue("id_token", token.IDToken, previous.IDToken)
+	if err != nil {
+		return secretstore.CodexOAuthCredential{}, err
+	}
+	expiresAt, err := c.tokenExpiresAt(token.ExpiresIn)
+	if err != nil {
+		return secretstore.CodexOAuthCredential{}, err
+	}
+	accountID, err := accountIDFromJWT(idToken)
+	if err != nil {
+		accountID = previous.AccountID
 	}
 	if !safeValue(accountID, 8, 1024) {
 		return secretstore.CodexOAuthCredential{}, fmt.Errorf("Codex OAuth account identity is unavailable")
 	}
 	return secretstore.CodexOAuthCredential{
-		AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, IDToken: token.IDToken,
-		AccountID: accountID, ExpiresAt: c.now().Add(time.Duration(token.ExpiresIn) * time.Second).Unix(),
+		AccessToken: accessToken, RefreshToken: refreshToken, IDToken: idToken,
+		AccountID: accountID, ExpiresAt: expiresAt,
 	}, nil
+}
+
+func requiredTokenValue(field string, value *string) (string, error) {
+	if value == nil || !safeValue(*value, 8, 32<<10) {
+		return "", fmt.Errorf("Codex OAuth token response has invalid %s", field)
+	}
+	return *value, nil
+}
+
+func refreshedTokenValue(field string, value *string, previous string) (string, error) {
+	if value == nil {
+		value = &previous
+	}
+	return requiredTokenValue(field, value)
+}
+
+func (c *Client) tokenExpiresAt(expiresIn *int64) (int64, error) {
+	ttl := defaultTokenTTL
+	if expiresIn != nil {
+		if *expiresIn <= 0 || *expiresIn > int64(maximumTokenTTL/time.Second) {
+			return 0, fmt.Errorf("Codex OAuth token response has invalid expires_in")
+		}
+		ttl = time.Duration(*expiresIn) * time.Second
+	}
+	return c.now().Add(ttl).Unix(), nil
 }
 
 func (c *Client) doJSON(ctx context.Context, endpoint string, body io.Reader, destination any) error {
