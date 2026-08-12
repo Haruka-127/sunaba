@@ -11,16 +11,30 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
+const (
+	DefaultMaxRequests      = 1_000
+	DefaultMaxConcurrent    = 4
+	DefaultMaxRequestBytes  = 32 << 20
+	DefaultMaxResponseBytes = 64 << 20
+	MaximumMaxRequests      = 100_000
+	MaximumMaxConcurrent    = 32
+	MaximumMaxRequestBytes  = 128 << 20
+	MaximumMaxResponseBytes = 256 << 20
+)
+
+var modelIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,255}$`)
+
 type Capability struct {
 	ProjectID        string
 	VMID             string
 	SessionID        string
-	Model            string
+	AllowedModels    []string
 	ExpiresAt        time.Time
 	MaxRequests      int
 	MaxConcurrent    int
@@ -29,15 +43,41 @@ type Capability struct {
 	tokenHash        [sha256.Size]byte
 }
 
-func NewCapability(token, projectID, vmID, sessionID, model string, expiresAt time.Time) (Capability, error) {
-	if len(token) < 32 || projectID == "" || vmID == "" || sessionID == "" || model == "" || expiresAt.IsZero() {
+func NewCapability(token, projectID, vmID, sessionID string, allowedModels []string, expiresAt time.Time) (Capability, error) {
+	models, err := validateAllowedModels(allowedModels)
+	if len(token) < 32 || projectID == "" || vmID == "" || sessionID == "" || err != nil || expiresAt.IsZero() {
 		return Capability{}, fmt.Errorf("Model Gateway capability requires a high-entropy token and bound identities")
 	}
 	return Capability{
-		ProjectID: projectID, VMID: vmID, SessionID: sessionID, Model: model, ExpiresAt: expiresAt,
-		MaxRequests: 100, MaxConcurrent: 2, MaxRequestBytes: 4 << 20, MaxResponseBytes: 16 << 20,
+		ProjectID: projectID, VMID: vmID, SessionID: sessionID, AllowedModels: models, ExpiresAt: expiresAt,
+		MaxRequests: DefaultMaxRequests, MaxConcurrent: DefaultMaxConcurrent,
+		MaxRequestBytes: DefaultMaxRequestBytes, MaxResponseBytes: DefaultMaxResponseBytes,
 		tokenHash: sha256.Sum256([]byte(token)),
 	}, nil
+}
+
+func validateAllowedModels(models []string) ([]string, error) {
+	if len(models) == 0 || len(models) > 32 {
+		return nil, fmt.Errorf("Model Gateway requires between 1 and 32 allowed models")
+	}
+	result := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if !modelIDPattern.MatchString(model) {
+			return nil, fmt.Errorf("Model Gateway model ID is invalid")
+		}
+		if _, exists := seen[model]; exists {
+			return nil, fmt.Errorf("Model Gateway model allowlist contains a duplicate")
+		}
+		seen[model] = struct{}{}
+		result = append(result, model)
+	}
+	return result, nil
+}
+
+func ValidateAllowedModels(models []string) error {
+	_, err := validateAllowedModels(models)
+	return err
 }
 
 type AuditEvent struct {
@@ -69,6 +109,7 @@ type Gateway struct {
 	audit      func(AuditEvent)
 	now        func() time.Time
 	semaphore  chan struct{}
+	models     map[string]struct{}
 	mu         sync.Mutex
 	requests   int
 }
@@ -82,8 +123,14 @@ func New(config Config) (*Gateway, error) {
 		return nil, fmt.Errorf("Model Gateway upstream API key is required")
 	}
 	capability := config.Capability
-	if capability.MaxRequests <= 0 || capability.MaxConcurrent <= 0 || capability.MaxRequestBytes <= 0 || capability.MaxResponseBytes <= 0 || capability.Model == "" || capability.ExpiresAt.IsZero() {
+	models, err := validateAllowedModels(capability.AllowedModels)
+	if err != nil || capability.MaxRequests <= 0 || capability.MaxRequests > MaximumMaxRequests || capability.MaxConcurrent <= 0 || capability.MaxConcurrent > MaximumMaxConcurrent || capability.MaxRequestBytes <= 0 || capability.MaxRequestBytes > MaximumMaxRequestBytes || capability.MaxResponseBytes <= 0 || capability.MaxResponseBytes > MaximumMaxResponseBytes || capability.ExpiresAt.IsZero() {
 		return nil, fmt.Errorf("Model Gateway capability limits are invalid")
+	}
+	capability.AllowedModels = models
+	modelSet := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		modelSet[model] = struct{}{}
 	}
 	client := config.HTTPClient
 	if client == nil {
@@ -100,14 +147,14 @@ func New(config Config) (*Gateway, error) {
 	return &Gateway{
 		upstream: upstream, apiKey: config.UpstreamAPIKey, capability: capability,
 		client: &clientCopy, audit: config.Audit, now: now,
-		semaphore: make(chan struct{}, capability.MaxConcurrent),
+		semaphore: make(chan struct{}, capability.MaxConcurrent), models: modelSet,
 	}, nil
 }
 
 func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	event := AuditEvent{
 		ProjectID: g.capability.ProjectID, VMID: g.capability.VMID,
-		SessionID: g.capability.SessionID, Model: g.capability.Model, At: g.now().UTC(),
+		SessionID: g.capability.SessionID, At: g.now().UTC(),
 	}
 	defer func() {
 		if g.audit != nil {
@@ -160,7 +207,12 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		Model  string `json:"model"`
 		Stream bool   `json:"stream"`
 	}
-	if !json.Valid(body) || json.Unmarshal(body, &envelope) != nil || envelope.Model != g.capability.Model {
+	if !json.Valid(body) || json.Unmarshal(body, &envelope) != nil {
+		reject(http.StatusBadRequest, "invalid_request")
+		return
+	}
+	event.Model = envelope.Model
+	if _, allowed := g.models[envelope.Model]; !allowed {
 		reject(http.StatusForbidden, "model_not_allowed")
 		return
 	}

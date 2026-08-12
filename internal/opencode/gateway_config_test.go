@@ -6,22 +6,27 @@ import (
 	"testing"
 )
 
-func TestBuildModelGatewayConfigPinsResponsesProviderAndTokenEnvironment(t *testing.T) {
+func TestBuildModelGatewayConfigOverridesBuiltInOpenAIProviderWithoutDefiningModels(t *testing.T) {
 	encoded, err := BuildModelGatewayConfig(ModelGatewayProviderConfig{
-		BaseURL: "http://127.0.0.1:4141/v1", Model: "gpt-sunaba", TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
-		ContextLimit: 200_000, OutputLimit: 32_000,
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: []string{"gpt-5", "gpt-5-mini"},
+		DefaultModel: "gpt-5", TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(encoded)
 	for _, expected := range []string{
-		`"npm": "@ai-sdk/openai"`, `"enabled_providers": [`, `"sunaba"`,
+		`"enabled_providers": [`, `"openai"`, `"gpt-5-mini"`,
 		`"whitelist": [`, `"baseURL": "http://127.0.0.1:4141/v1"`,
-		`"apiKey": "{env:SUNABA_MODEL_GATEWAY_TOKEN}"`, `"model": "sunaba/gpt-sunaba"`,
+		`"apiKey": "{env:SUNABA_MODEL_GATEWAY_TOKEN}"`, `"model": "openai/gpt-5"`,
 	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("config=%s missing %s", text, expected)
+		}
+	}
+	for _, forbidden := range []string{`"npm"`, `"models"`, `"limit"`, `"context"`, `"output"`} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("config defines OpenCode-owned model metadata %s: %s", forbidden, text)
 		}
 	}
 	if strings.Contains(text, "gateway-token-") || !json.Valid(encoded) {
@@ -29,16 +34,18 @@ func TestBuildModelGatewayConfigPinsResponsesProviderAndTokenEnvironment(t *test
 	}
 }
 
-func TestBuildModelGatewayConfigRejectsNonLoopbackAndInvalidLimits(t *testing.T) {
+func TestBuildModelGatewayConfigRejectsNonLoopbackAndInvalidModelSelection(t *testing.T) {
 	base := ModelGatewayProviderConfig{
-		BaseURL: "http://127.0.0.1:4141/v1", Model: "gpt-sunaba", TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
-		ContextLimit: 100, OutputLimit: 50,
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: []string{"gpt-5", "gpt-5-mini"},
+		DefaultModel: "gpt-5", TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
 	}
 	for _, mutate := range []func(*ModelGatewayProviderConfig){
 		func(config *ModelGatewayProviderConfig) { config.BaseURL = "https://api.openai.com/v1" },
 		func(config *ModelGatewayProviderConfig) { config.BaseURL = "http://0.0.0.0:4141/v1" },
 		func(config *ModelGatewayProviderConfig) { config.TokenEnv = "bad-token" },
-		func(config *ModelGatewayProviderConfig) { config.OutputLimit = 101 },
+		func(config *ModelGatewayProviderConfig) { config.AllowedModels = nil },
+		func(config *ModelGatewayProviderConfig) { config.AllowedModels = []string{"gpt-5", "gpt-5"} },
+		func(config *ModelGatewayProviderConfig) { config.DefaultModel = "gpt-not-allowed" },
 	} {
 		config := base
 		mutate(&config)

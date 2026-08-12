@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"sunaba/internal/modelgateway"
 )
 
 const maxPolicyBytes = 1 << 20
@@ -54,6 +55,8 @@ type legacyPolicyV2 struct {
 	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
+type legacyPolicyV3 ProjectPolicy
+
 type legacyGitV2 struct {
 	Remotes              []string `json:"remotes"`
 	PushApprovalRequired bool     `json:"push_approval_required"`
@@ -77,6 +80,19 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 			return ProjectPolicy{}, false, err
 		}
 		return current, false, current.Validate()
+	case 3:
+		var legacy legacyPolicyV3
+		if err := decodeStrict(data, &legacy); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		migrated, err := migrateV3(legacy, now)
+		if err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		if err := Save(path, migrated); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		return migrated, true, nil
 	case 2:
 		var legacy legacyPolicyV2
 		if err := decodeStrict(data, &legacy); err != nil {
@@ -108,6 +124,24 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 	}
 }
 
+func migrateV3(legacy legacyPolicyV3, now time.Time) (ProjectPolicy, error) {
+	policy := ProjectPolicy(legacy)
+	policy.SchemaVersion = CurrentSchemaVersion
+	upgradeLegacyModelDefaults(&policy.Model)
+	policy.UpdatedAt = now.UTC()
+	return policy, policy.Validate()
+}
+
+func upgradeLegacyModelDefaults(model *ModelPolicy) {
+	if model.MaxRequests != 100 || model.MaxConcurrent != 2 || model.MaxRequestBytes != 4<<20 || model.MaxResponseBytes != 16<<20 {
+		return
+	}
+	model.MaxRequests = modelgateway.DefaultMaxRequests
+	model.MaxConcurrent = modelgateway.DefaultMaxConcurrent
+	model.MaxRequestBytes = modelgateway.DefaultMaxRequestBytes
+	model.MaxResponseBytes = modelgateway.DefaultMaxResponseBytes
+}
+
 func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
 	remotes := make([]GitRemotePolicy, 0, len(legacy.Git.Remotes))
 	for index, remoteURL := range legacy.Git.Remotes {
@@ -124,6 +158,7 @@ func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
 		Web: legacy.Web, Export: legacy.Export, Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
 		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
 	}
+	upgradeLegacyModelDefaults(&policy.Model)
 	return policy, policy.Validate()
 }
 
@@ -229,11 +264,15 @@ func migrateV1(legacy legacyPolicyV1, now time.Time) (ProjectPolicy, error) {
 		Dependency: DependencyPolicy{ManifestSHA256: legacy.ManifestSHA256, OpenCode: legacy.OpenCode, AppleContainer: legacy.AppleContainer, AgentImage: legacy.AgentImage},
 		Resources:  ResourcePolicy{CPUs: legacy.CPUs, Memory: legacy.Memory, DiskBytes: legacy.DiskBytes, ProcessMax: 512, FileSizeMax: legacy.DiskBytes, OpenFileMax: 4096},
 		Session:    SessionPolicy{TTLSeconds: legacy.SessionTTLSeconds, IdleSeconds: min(legacy.SessionTTLSeconds, 900)},
-		Model:      ModelPolicy{AllowedModels: legacy.AllowedModels, MaxRequests: 100, MaxConcurrent: 2, MaxRequestBytes: 4 << 20, MaxResponseBytes: 16 << 20},
-		Git:        GitPolicy{PushApprovalRequired: true},
-		Web:        WebPolicy{Enabled: false, MaxRequests: 500, MaxConcurrent: 4, MaxConnectSeconds: 120, MaxUploadBytes: 1 << 20, MaxDownloadBytes: 64 << 20, MaxTotalBytes: 256 << 20},
-		Export:     ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30},
-		Audit:      AuditPolicy{RetentionDays: legacy.AuditRetentionDays}, ProtectedPaths: []string{".git"},
+		Model: ModelPolicy{
+			AllowedModels: legacy.AllowedModels, MaxRequests: modelgateway.DefaultMaxRequests,
+			MaxConcurrent: modelgateway.DefaultMaxConcurrent, MaxRequestBytes: modelgateway.DefaultMaxRequestBytes,
+			MaxResponseBytes: modelgateway.DefaultMaxResponseBytes,
+		},
+		Git:    GitPolicy{PushApprovalRequired: true},
+		Web:    WebPolicy{Enabled: false, MaxRequests: 500, MaxConcurrent: 4, MaxConnectSeconds: 120, MaxUploadBytes: 1 << 20, MaxDownloadBytes: 64 << 20, MaxTotalBytes: 256 << 20},
+		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30},
+		Audit:  AuditPolicy{RetentionDays: legacy.AuditRetentionDays}, ProtectedPaths: []string{".git"},
 		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
 	}
 	if policy.CreatedAt.IsZero() {

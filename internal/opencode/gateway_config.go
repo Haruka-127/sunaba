@@ -8,17 +8,16 @@ import (
 	"regexp"
 )
 
-const ModelGatewayProviderID = "sunaba"
+const ModelGatewayProviderID = "openai"
 
 var modelIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,255}$`)
 var environmentNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,127}$`)
 
 type ModelGatewayProviderConfig struct {
-	BaseURL      string
-	Model        string
-	TokenEnv     string
-	ContextLimit int64
-	OutputLimit  int64
+	BaseURL       string
+	AllowedModels []string
+	DefaultModel  string
+	TokenEnv      string
 }
 
 func BuildModelGatewayConfig(config ModelGatewayProviderConfig) ([]byte, error) {
@@ -30,30 +29,34 @@ func BuildModelGatewayConfig(config ModelGatewayProviderConfig) ([]byte, error) 
 	if err != nil || host != "127.0.0.1" || port == "" {
 		return nil, fmt.Errorf("Model Gateway base URL must use 127.0.0.1 and an explicit port")
 	}
-	if !modelIDPattern.MatchString(config.Model) || !environmentNamePattern.MatchString(config.TokenEnv) {
-		return nil, fmt.Errorf("Model Gateway model and token environment name are invalid")
+	if len(config.AllowedModels) == 0 || len(config.AllowedModels) > 32 || !environmentNamePattern.MatchString(config.TokenEnv) {
+		return nil, fmt.Errorf("Model Gateway model allowlist and token environment name are invalid")
 	}
-	if config.ContextLimit <= 0 || config.OutputLimit <= 0 || config.OutputLimit > config.ContextLimit {
-		return nil, fmt.Errorf("Model Gateway model limits are invalid")
+	allowed := make([]string, 0, len(config.AllowedModels))
+	seen := make(map[string]struct{}, len(config.AllowedModels))
+	for _, modelID := range config.AllowedModels {
+		if !modelIDPattern.MatchString(modelID) {
+			return nil, fmt.Errorf("Model Gateway model allowlist and token environment name are invalid")
+		}
+		if _, exists := seen[modelID]; exists {
+			return nil, fmt.Errorf("Model Gateway model allowlist contains a duplicate")
+		}
+		seen[modelID] = struct{}{}
+		allowed = append(allowed, modelID)
 	}
-	type limit struct {
-		Context int64 `json:"context"`
-		Output  int64 `json:"output"`
+	if !modelIDPattern.MatchString(config.DefaultModel) {
+		return nil, fmt.Errorf("Model Gateway default model is invalid")
 	}
-	type model struct {
-		Name  string `json:"name"`
-		Limit limit  `json:"limit"`
+	if _, exists := seen[config.DefaultModel]; !exists {
+		return nil, fmt.Errorf("Model Gateway default model is not allowed")
 	}
 	type options struct {
 		BaseURL string `json:"baseURL"`
 		APIKey  string `json:"apiKey"`
 	}
 	type provider struct {
-		NPM       string           `json:"npm"`
-		Name      string           `json:"name"`
-		Whitelist []string         `json:"whitelist"`
-		Options   options          `json:"options"`
-		Models    map[string]model `json:"models"`
+		Whitelist []string `json:"whitelist"`
+		Options   options  `json:"options"`
 	}
 	payload := struct {
 		Schema           string              `json:"$schema"`
@@ -62,14 +65,13 @@ func BuildModelGatewayConfig(config ModelGatewayProviderConfig) ([]byte, error) 
 		EnabledProviders []string            `json:"enabled_providers"`
 		Providers        map[string]provider `json:"provider"`
 	}{
-		Schema: "https://opencode.ai/config.json", Model: ModelGatewayProviderID + "/" + config.Model,
-		SmallModel:       ModelGatewayProviderID + "/" + config.Model,
+		Schema: "https://opencode.ai/config.json", Model: ModelGatewayProviderID + "/" + config.DefaultModel,
+		SmallModel:       ModelGatewayProviderID + "/" + config.DefaultModel,
 		EnabledProviders: []string{ModelGatewayProviderID},
 		Providers: map[string]provider{
 			ModelGatewayProviderID: {
-				NPM: "@ai-sdk/openai", Name: "sunaba Model Gateway", Whitelist: []string{config.Model},
-				Options: options{BaseURL: config.BaseURL, APIKey: "{env:" + config.TokenEnv + "}"},
-				Models:  map[string]model{config.Model: {Name: config.Model, Limit: limit{Context: config.ContextLimit, Output: config.OutputLimit}}},
+				Whitelist: allowed,
+				Options:   options{BaseURL: config.BaseURL, APIKey: "{env:" + config.TokenEnv + "}"},
 			},
 		},
 	}

@@ -124,14 +124,14 @@ Local Attach Relayは次を強制する。
 - JSONとSSEに含まれるESC、OSC構成文字、BEL、C0/C1制御文字、双方向制御文字、不正UTF-8を可視表現へ変換する。
 - `tui.command.execute`は安全側の最小command allowlistとし、`editor.open`等のhost作用を持つeventをTUIへ渡さない。
 
-Model GatewayはProject、VM、session、固定model、期限へ束縛した短命tokenをhashで保持し、guestへはloopback `/v1/responses`のbase URL、短命token、固定provider/model設定だけを渡す。upstream URLと実API keyはhost側Gatewayだけが持ち、redirectと環境proxyを使わない。request回数、並行数、request/response sizeを制限し、本文やcredentialを含めないmetadataを監査callbackへ渡す。Responsesのstream、tool event、upstream error、downstream cancelを保持するunit/race testを通した。
+Model GatewayはProject、VM、session、Project policy由来のmodel allowlist、期限へ束縛した短命tokenをhashで保持し、guestへはloopback `/v1/responses`のbase URL、短命token、組み込み`openai` providerへのoverride設定だけを渡す。upstream URLと実API keyはhost側Gatewayだけが持ち、redirectと環境proxyを使わない。request回数、並行数、request/response sizeを制限し、本文やcredentialを含めないmetadataを監査callbackへ渡す。Responsesのstream、tool event、upstream error、downstream cancelを保持するunit/race testを通した。
 
 実Apple Container probeでは次を確認した。
 
 - guestのOpenCode 1.18.16をloopback、Basic認証、mDNS無効、auto update/models fetch/LSP download無効で起動した。
 - `/global/health`のguest versionが固定versionと一致し、認証なしのhealth requestを拒否した。
 - 公式macOS artifactのHost TUI 1.18.16がHTTP-aware Local Attach Relay経由で実際に`attach`し、event streamを開始した。
-- guest OpenCode sessionが`@ai-sdk/openai` custom providerから固定Model GatewayへResponses requestを送り、host側mock upstreamのstreaming応答を受け取った。upstreamにはhost側実credentialだけが届いた。
+- guest OpenCode sessionが組み込み`openai` providerのmodel metadataを使い、base URLと短命tokenだけをoverrideして固定Model GatewayへResponses requestを送り、host側mock upstreamのstreaming応答を受け取った。upstreamにはhost側実credentialだけが届いた。
 - guestがOpenCode APIから`editor.open` eventを発生させてもrelayが拒否し、Host TUIは外部editorを起動せず継続した。
 - probe終了後にLocal Attach Relay、Host TUI、guest server、短命capabilityを終了し、所有labelとrun IDを確認したprobe containerだけを削除した。
 
@@ -142,7 +142,7 @@ SUNABA_PHASE0_INTEGRATION=1 \
 go test -tags=integration -run TestPhase0SecureNetworkAndGatewayTransport -v ./test/integration
 ```
 
-attack/unit testは認証なし、管理path、許可外model、別token、並行数超過、悪意あるSSE TUI command、ANSI/OSC/BEL、双方向文字、不正UTF-8、悪意あるdiff/file名を拒否または無害化する。これによりDG-03の固定artifact、serve/attach/health契約、Host TUI分離、terminal境界、Responses subset、stream/tool/error/cancel、短命token、provider/model固定を満たす。
+attack/unit testは認証なし、管理path、許可外model、別token、並行数超過、悪意あるSSE TUI command、ANSI/OSC/BEL、双方向文字、不正UTF-8、悪意あるdiff/file名を拒否または無害化する。これによりDG-03の固定artifact、serve/attach/health契約、Host TUI分離、terminal境界、Responses subset、stream/tool/error/cancel、短命token、provider固定とmodel allowlistを満たす。
 
 ## Project lock probe
 

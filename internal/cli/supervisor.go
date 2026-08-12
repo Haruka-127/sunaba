@@ -73,7 +73,7 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	}
 	expiresAt := time.Now().Add(time.Duration(projectPolicy.Session.TTLSeconds) * time.Second)
 	modelID := projectPolicy.Model.AllowedModels[0]
-	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, vmID, sessionID, modelID, expiresAt)
+	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, vmID, sessionID, projectPolicy.Model.AllowedModels, expiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +92,10 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if err != nil {
 		return nil, err
 	}
-	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{BaseURL: "http://127.0.0.1:4141/v1", Model: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", ContextLimit: 200_000, OutputLimit: 32_000})
+	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: projectPolicy.Model.AllowedModels,
+		DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
+	})
 	if err != nil {
 		return nil, err
 	}

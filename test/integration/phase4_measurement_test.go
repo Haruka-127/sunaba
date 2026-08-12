@@ -82,7 +82,7 @@ func TestPhase4MeasureWebClients(t *testing.T) {
 	})
 	var toolMu sync.Mutex
 	desiredTool := ""
-	modelID := "gpt-sunaba-measure"
+	modelID := "gpt-5"
 	modelUpstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
 		if strings.Contains(string(body), `"type":"function_call_output"`) || strings.Contains(string(body), `"type": "function_call_output"`) {
@@ -109,7 +109,7 @@ func TestPhase4MeasureWebClients(t *testing.T) {
 	modelToken, _ := session.NewSecret()
 	serverPassword, _ := session.NewSecret()
 	proxyToken, _ := session.NewSecret()
-	modelCapability, err := modelgateway.NewCapability(modelToken, projectID, vmID, sessionID, modelID, time.Now().Add(4*time.Minute))
+	modelCapability, err := modelgateway.NewCapability(modelToken, projectID, vmID, sessionID, []string{modelID}, time.Now().Add(4*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,8 @@ func TestPhase4MeasureWebClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
-		BaseURL: "http://127.0.0.1:4141/v1", Model: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", ContextLimit: 200_000, OutputLimit: 32_000,
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: []string{modelID},
+		DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +197,7 @@ func runMeasuredOpenCode(t *testing.T, ctx context.Context, runtime sunabaruntim
 	if enableSearch {
 		searchEnvironment = " OPENCODE_ENABLE_EXA=1 OPENCODE_WEBSEARCH_PROVIDER=exa"
 	}
-	command := "set -a; . /run/sunaba/session.env; set +a; exec env HOME=" + directory + "/home XDG_CONFIG_HOME=" + directory + "/config XDG_DATA_HOME=" + directory + "/data HTTP_PROXY=http://127.0.0.1:4242 HTTPS_PROXY=http://127.0.0.1:4242 http_proxy=http://127.0.0.1:4242 https_proxy=http://127.0.0.1:4242 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1" + searchEnvironment + " opencode run --model sunaba/gpt-sunaba-measure 'run the " + tool + " tool once'"
+	command := "set -a; . /run/sunaba/session.env; set +a; exec env HOME=" + directory + "/home XDG_CONFIG_HOME=" + directory + "/config XDG_DATA_HOME=" + directory + "/data HTTP_PROXY=http://127.0.0.1:4242 HTTPS_PROXY=http://127.0.0.1:4242 http_proxy=http://127.0.0.1:4242 https_proxy=http://127.0.0.1:4242 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1" + searchEnvironment + " opencode run --model openai/gpt-5 'run the " + tool + " tool once'"
 	_, _ = runtime.ExecOutput(ctx, container, []string{"runuser", "-u", "sunaba-agent", "--", "/bin/bash", "-lc", "cd " + workspace + "; " + command})
 }
 

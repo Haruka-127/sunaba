@@ -58,7 +58,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		t.Fatal(err)
 	}
 	relay := buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
-	modelID := "gpt-sunaba-test"
+	modelID := "gpt-5"
 	upstreamKey := "upstream-" + runID
 	firstSessionID := "p1a" + runID
 	modelEditPath := "/workspace/sunaba-" + firstSessionID + "/model-edit.txt"
@@ -111,7 +111,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 			t.Fatal(err)
 		}
 		projectID := state.ProjectID(projectRoot)
-		capability, err := modelgateway.NewCapability(modelToken, projectID, "sunaba-"+projectID+"-"+sessionID, sessionID, modelID, time.Now().Add(3*time.Minute))
+		capability, err := modelgateway.NewCapability(modelToken, projectID, "sunaba-"+projectID+"-"+sessionID, sessionID, []string{modelID}, time.Now().Add(3*time.Minute))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,8 +139,8 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 			t.Fatal(err)
 		}
 		provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
-			BaseURL: "http://127.0.0.1:4141/v1", Model: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
-			ContextLimit: 200_000, OutputLimit: 32_000,
+			BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: []string{modelID},
+			DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
 		})
 		if err != nil {
 			t.Fatal(err)

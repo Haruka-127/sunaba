@@ -182,7 +182,8 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	})
 	modelToken, _ := session.NewSecret()
 	serverPassword, _ := session.NewSecret()
-	modelCapability, err := modelgateway.NewCapability(modelToken, projectID, vmID, sessionID, "gpt-sunaba-test", time.Now().Add(5*time.Minute))
+	modelID := "gpt-5"
+	modelCapability, err := modelgateway.NewCapability(modelToken, projectID, vmID, sessionID, []string{modelID}, time.Now().Add(5*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,8 +194,8 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
-		BaseURL: "http://127.0.0.1:4141/v1", Model: "gpt-sunaba-test", TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
-		ContextLimit: 200_000, OutputLimit: 32_000,
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: []string{modelID},
+		DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
 	})
 	if err != nil {
 		t.Fatal(err)

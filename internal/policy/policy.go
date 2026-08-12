@@ -13,11 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"sunaba/internal/modelgateway"
 	"sunaba/internal/state"
 	"sunaba/internal/webgateway"
 )
 
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -114,11 +115,15 @@ func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentIm
 		Dependency: DependencyPolicy{ManifestSHA256: manifestDigest, OpenCode: openCodeVersion, AppleContainer: containerVersion, AgentImage: agentImage},
 		Resources:  ResourcePolicy{CPUs: 2, Memory: "2G", DiskBytes: 512 << 20, ProcessMax: 512, FileSizeMax: 512 << 20, OpenFileMax: 4096},
 		Session:    SessionPolicy{TTLSeconds: 3600, IdleSeconds: 900},
-		Model:      ModelPolicy{AllowedModels: []string{"gpt-5"}, MaxRequests: 100, MaxConcurrent: 2, MaxRequestBytes: 4 << 20, MaxResponseBytes: 16 << 20},
-		Git:        GitPolicy{PushApprovalRequired: true},
-		Web:        WebPolicy{Enabled: false, MaxRequests: 500, MaxConcurrent: 4, MaxConnectSeconds: 120, MaxUploadBytes: 1 << 20, MaxDownloadBytes: 64 << 20, MaxTotalBytes: 256 << 20},
-		Export:     ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30},
-		Audit:      AuditPolicy{RetentionDays: 30}, ProtectedPaths: []string{".git"}, CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
+		Model: ModelPolicy{
+			AllowedModels: []string{"gpt-5"}, MaxRequests: modelgateway.DefaultMaxRequests,
+			MaxConcurrent: modelgateway.DefaultMaxConcurrent, MaxRequestBytes: modelgateway.DefaultMaxRequestBytes,
+			MaxResponseBytes: modelgateway.DefaultMaxResponseBytes,
+		},
+		Git:    GitPolicy{PushApprovalRequired: true},
+		Web:    WebPolicy{Enabled: false, MaxRequests: 500, MaxConcurrent: 4, MaxConnectSeconds: 120, MaxUploadBytes: 1 << 20, MaxDownloadBytes: 64 << 20, MaxTotalBytes: 256 << 20},
+		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30},
+		Audit:  AuditPolicy{RetentionDays: 30}, ProtectedPaths: []string{".git"}, CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
 	}
 	return policy, policy.Validate()
 }
@@ -141,10 +146,14 @@ func (p ProjectPolicy) Validate() error {
 	if p.Session.TTLSeconds <= 0 || p.Session.TTLSeconds > 86400 || p.Session.IdleSeconds <= 0 || p.Session.IdleSeconds > p.Session.TTLSeconds {
 		return fmt.Errorf("Project session policy is invalid")
 	}
-	if len(p.Model.AllowedModels) == 0 || len(p.Model.AllowedModels) > 32 || p.Model.MaxRequests <= 0 || p.Model.MaxConcurrent <= 0 || p.Model.MaxRequestBytes <= 0 || p.Model.MaxResponseBytes <= 0 {
+	if len(p.Model.AllowedModels) == 0 || len(p.Model.AllowedModels) > 32 ||
+		p.Model.MaxRequests <= 0 || p.Model.MaxRequests > modelgateway.MaximumMaxRequests ||
+		p.Model.MaxConcurrent <= 0 || p.Model.MaxConcurrent > modelgateway.MaximumMaxConcurrent ||
+		p.Model.MaxRequestBytes <= 0 || p.Model.MaxRequestBytes > modelgateway.MaximumMaxRequestBytes ||
+		p.Model.MaxResponseBytes <= 0 || p.Model.MaxResponseBytes > modelgateway.MaximumMaxResponseBytes {
 		return fmt.Errorf("Project Model Gateway policy is invalid")
 	}
-	if !uniqueSafeStrings(p.Model.AllowedModels, 128) || !validGitRemotes(p.Git.Remotes) || !p.Git.PushApprovalRequired {
+	if !uniqueSafeStrings(p.Model.AllowedModels, 128) || modelgateway.ValidateAllowedModels(p.Model.AllowedModels) != nil || !validGitRemotes(p.Git.Remotes) || !p.Git.PushApprovalRequired {
 		return fmt.Errorf("Project Model/Git policy is invalid")
 	}
 	if p.Web.Enabled {

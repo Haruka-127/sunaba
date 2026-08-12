@@ -25,11 +25,11 @@ func FuzzResponsesEnvelope(f *testing.F) {
 	}))
 	defer upstream.Close()
 	token := strings.Repeat("m", 32)
-	capability, err := NewCapability(token, "project", "vm", "session", "gpt-test", time.Now().Add(time.Hour))
+	capability, err := NewCapability(token, "project", "vm", "session", []string{"gpt-test"}, time.Now().Add(time.Hour))
 	if err != nil {
 		f.Fatal(err)
 	}
-	capability.MaxRequests = 1_000_000
+	capability.MaxRequests = MaximumMaxRequests
 	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: "host-only", Capability: capability})
 	if err != nil {
 		f.Fatal(err)

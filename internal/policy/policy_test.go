@@ -4,19 +4,24 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"sunaba/internal/modelgateway"
 	"sunaba/internal/state"
 )
 
-func TestPolicyV3RoundTripAndIdentityBinding(t *testing.T) {
+func TestPolicyV4RoundTripIdentityBindingAndModelDefaults(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	policy, err := New(project, strings.Repeat("a", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if policy.Model.MaxRequests != modelgateway.DefaultMaxRequests || policy.Model.MaxConcurrent != modelgateway.DefaultMaxConcurrent || policy.Model.MaxRequestBytes != modelgateway.DefaultMaxRequestBytes || policy.Model.MaxResponseBytes != modelgateway.DefaultMaxResponseBytes {
+		t.Fatalf("unexpected Model Gateway defaults: %+v", policy.Model)
 	}
 	policyRoot, _ := filepath.EvalSymlinks(t.TempDir())
 	path := filepath.Join(policyRoot, "state", "policy.json")
@@ -38,7 +43,7 @@ func TestPolicyV3RoundTripAndIdentityBinding(t *testing.T) {
 	}
 }
 
-func TestLegacyV1MigratesAtomicallyToStrictV3(t *testing.T) {
+func TestLegacyV1MigratesAtomicallyToStrictV4(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	legacy := legacyPolicyV1{
@@ -62,15 +67,15 @@ func TestLegacyV1MigratesAtomicallyToStrictV3(t *testing.T) {
 		t.Fatalf("migrated=%+v changed=%v error=%v", migrated, changed, err)
 	}
 	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), `"schema_version": 3`) || strings.Contains(string(data), `"web_origins"`) {
-		t.Fatalf("policy file was not atomically replaced with v3: %s", data)
+	if !strings.Contains(string(data), `"schema_version": 4`) || strings.Contains(string(data), `"web_origins"`) {
+		t.Fatalf("policy file was not atomically replaced with v4: %s", data)
 	}
 	if leftovers, _ := filepath.Glob(filepath.Join(directory, ".sunaba-policy-*.tmp")); len(leftovers) != 0 {
 		t.Fatalf("migration temporary files remained: %v", leftovers)
 	}
 }
 
-func TestLegacyV2MigratesStringRemotesToNamedV3Remotes(t *testing.T) {
+func TestLegacyV2MigratesStringRemotesToNamedV4Remotes(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	current, err := New(project, strings.Repeat("c", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now.Add(-time.Hour))
@@ -97,6 +102,48 @@ func TestLegacyV2MigratesStringRemotesToNamedV3Remotes(t *testing.T) {
 	if err != nil || !changed || len(migrated.Git.Remotes) != 2 || migrated.Git.Remotes[0].Name != "origin" || migrated.Git.Remotes[1].Name != "remote-2" {
 		t.Fatalf("migrated=%+v changed=%v error=%v", migrated.Git, changed, err)
 	}
+}
+
+func TestLegacyV3MigratesOnlyOldDefaultModelLimits(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	now := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	current, err := New(project, strings.Repeat("d", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAndMigrate := func(t *testing.T, model ModelPolicy) ProjectPolicy {
+		t.Helper()
+		legacy := current
+		legacy.SchemaVersion = 3
+		legacy.Model = model
+		encoded, _ := json.Marshal(legacy)
+		root, _ := filepath.EvalSymlinks(t.TempDir())
+		path := filepath.Join(root, "state", "policy.json")
+		if err := os.Mkdir(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoded, 0600); err != nil {
+			t.Fatal(err)
+		}
+		migrated, changed, err := LoadAndMigrate(path, now)
+		if err != nil || !changed || migrated.SchemaVersion != CurrentSchemaVersion {
+			t.Fatalf("migrated=%+v changed=%v error=%v", migrated, changed, err)
+		}
+		return migrated
+	}
+	t.Run("old defaults", func(t *testing.T) {
+		migrated := writeAndMigrate(t, ModelPolicy{AllowedModels: []string{"gpt-5"}, MaxRequests: 100, MaxConcurrent: 2, MaxRequestBytes: 4 << 20, MaxResponseBytes: 16 << 20})
+		if migrated.Model.MaxRequests != modelgateway.DefaultMaxRequests || migrated.Model.MaxConcurrent != modelgateway.DefaultMaxConcurrent || migrated.Model.MaxRequestBytes != modelgateway.DefaultMaxRequestBytes || migrated.Model.MaxResponseBytes != modelgateway.DefaultMaxResponseBytes {
+			t.Fatalf("old defaults were not upgraded: %+v", migrated.Model)
+		}
+	})
+	t.Run("custom limits", func(t *testing.T) {
+		custom := ModelPolicy{AllowedModels: []string{"gpt-5"}, MaxRequests: 250, MaxConcurrent: 3, MaxRequestBytes: 8 << 20, MaxResponseBytes: 24 << 20}
+		migrated := writeAndMigrate(t, custom)
+		if !reflect.DeepEqual(migrated.Model, custom) {
+			t.Fatalf("custom limits changed: got=%+v want=%+v", migrated.Model, custom)
+		}
+	})
 }
 
 func TestPolicyMigrationRejectsUnknownFieldsAndUnsafeOrigin(t *testing.T) {

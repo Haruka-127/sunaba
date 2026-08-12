@@ -631,7 +631,7 @@ OpenCodeはv1系の最新stable releaseを互換試験後に固定して使う�
 
 ### 12.2 OpenCode serverとHost TUI
 
-Agent VMでは`opencode serve`をmerged workspaceで動かす。Projectの`opencode.json`、`.opencode/`、plugin、hook、MCP、AGENTS.md等はVM内serverだけが読み込み、VM内で自由に実行できる。serverは`OPENCODE_DISABLE_AUTOUPDATE=1`と`OPENCODE_DISABLE_MODELS_FETCH=1`を設定し、Model Gateway用のmodel metadataをsunabaが明示的に与える。secureモードでModels.devやupdate endpointへの直接通信を前提にしない。
+Agent VMでは`opencode serve`をmerged workspaceで動かす。Projectの`opencode.json`、`.opencode/`、plugin、hook、MCP、AGENTS.md等はVM内serverだけが読み込み、VM内で自由に実行できる。serverは`OPENCODE_DISABLE_AUTOUPDATE=1`と`OPENCODE_DISABLE_MODELS_FETCH=1`を設定する。model metadata、context/output上限、capability、variantは固定OpenCode artifactに組み込まれたmodel catalogを使い、sunabaはmodel metadataを複製しない。secureモードでModels.devやupdate endpointへの直接通信を前提にしない。
 
 Project設定はuntrustedであり、OpenCode v1では`server.hostname`、`server.port`、`server.mdns`、`server.cors`も設定できる。したがって、listen先とmDNSはSupervisorがCLI引数`--hostname`、`--port`、`--mdns=false`で上書きし、CORS設定の有無をnetwork boundaryや認証の根拠にしない。v1.18.16のboolean flagは`--mdns`であり`--no-mdns`は存在しない。Local Attach RelayはOpenCodeのCORS応答とは独立して、許可したTUI接続、HTTP method/path、basic auth、Project/VM channelだけを受け付ける。
 
@@ -669,7 +669,9 @@ LLMアクセスは、エージェントへ公開する明示的なtool callで�
 - セッション限定のsunaba gateway token
 - 許可されたprovider/modelを指すOpenCode設定
 
-OpenCode側では、OpenAI Responses互換endpointを持つcustom providerとして設定する。採用するOpenCodeバージョンの公式仕様に合わせ、`/v1/responses`を使うproviderには`@ai-sdk/openai`を指定し、`options.baseURL`をModel Gatewayへ向け、`options.apiKey`には環境変数参照の短命gateway tokenを設定する。設定ファイルやOpenCodeのcredential storeへ実OpenAI API keyを書かない。
+OpenCode側では組み込みの`openai` providerを使う。sunabaが生成する設定は`enabled_providers`を`openai`へ限定し、`options.baseURL`をModel Gatewayへ向け、`options.apiKey`には環境変数参照の短命gateway tokenを設定する。Project policyの`allowed_models`は`whitelist`として渡すが、`npm`、`models`、modelごとのcontext/output上限は生成しない。これによりモデルの意味とmetadataはOpenCode側に置き、利用可否だけをsunaba policyとGatewayが決める。設定ファイルやOpenCodeのcredential storeへ実OpenAI API keyを書かない。
+
+Model GatewayはOpenAIへモデル一覧を問い合わせない。セッション開始時の許可集合はProject policyの`allowed_models`をそのままsnapshotし、先頭要素を既定modelとしてOpenCodeへ渡す。固定OpenCode artifactが定義を持たないmodel名はOpenCode側で選択できないため、OpenCode更新時にpolicyのmodel名と組み込みcatalogの整合をintegration testで確認する。
 
 Project configや侵害済みserverが`baseURL`、provider、modelを変更すること自体は防御境界にしない。secure networkはModel Gateway以外への接続を許さず、Model Gatewayがhost policyのprovider/model allowlistを最終的に強制する。
 
@@ -677,13 +679,15 @@ Project configや侵害済みserverが`baseURL`、provider、modelを変更す�
 
 - OpenAI Responses互換の必要最小限のrequest/streaming responseを中継する
 - 利用者が設定したupstream以外を選択させない
-- provider/model allowlistを強制する
+- Project policyからsnapshotした1から32件のmodel allowlistを強制し、OpenAIのmodel discovery APIを認可判断に使わない
 - request size、output、token、cost、concurrency、rateを制限する
 - session失効後のリクエストを拒否する
 - upstreamの実認証情報を注入し、VMへ返さない
 - tool call、streaming event、error、cancelの互換性を保つ
 - request metadata、利用量、結果、拒否理由をホスト側へ監査記録する
 - ログにソース本文や秘密を残すかは明示設定とし、既定で必要最小限にする
+
+1時間の既定sessionに対するModel Gatewayの既定値は、request 1,000回、同時4回、request body 32 MiB、response body 64 MiBとする。Project policyで縮小または拡大できるが、上限はそれぞれ100,000回、同時32回、request body 128 MiB、response body 256 MiBとし、無制限値は認めない。size制限はmodelのcontext/output token定義とは独立したtransport上限である。
 
 ### 12.5 CLIProxyAPIとの関係
 
@@ -967,7 +971,7 @@ Phase 1は内部vertical sliceであり、untrusted Projectを扱う一般利用
 - session終了後と承認期限切れの拒否
 - 最大16件のnamed remoteごとに固定送信先、host quarantine、capability、approval bindingを分離
 
-実装状態: 完了。policy schema v3でnamed remoteを保持し、legacy v2のURL配列を`origin`、`remote-2`以降へ決定的にmigrationする。公開CLIはremoteのadd/remove/listを提供し、Agent VMへはremote URLごとの短命headerだけを注入する。
+実装状態: 完了。policy schema v3で導入したnamed remoteをv4でも保持し、legacy v2のURL配列を`origin`、`remote-2`以降へ決定的にmigrationする。公開CLIはremoteのadd/remove/listを提供し、Agent VMへはremote URLごとの短命headerだけを注入する。
 
 ### Phase 4: Web Gatewayの設計と実装
 
@@ -987,7 +991,7 @@ Phase 1は内部vertical sliceであり、untrusted Projectを扱う一般利用
 - image provenanceとdependency更新
 - セキュリティレビューと公開前の残余リスク整理
 
-実装状態: 完了。dependency manifest schema v2、build input provenance、全証拠を要求するversion更新contract、Project policy v1/v2からv3へのmigration、audit retention/redaction、Gateway fuzz/property、ENOSPC、guardを失ったhost reboot、Git partial failureのfault injectionを自動testへ固定した。通常verifyは旧prototype gateを廃止してformat、unit、race、vet、固定helper build、CLI/static boundaryを実行する。詳細な証拠と再現コマンドは[`../implementation/phase-5.md`](../implementation/phase-5.md)を正とする。
+実装状態: 完了。dependency manifest schema v2、build input provenance、全証拠を要求するversion更新contract、Project policy v1/v2/v3からv4へのmigration、audit retention/redaction、Gateway fuzz/property、ENOSPC、guardを失ったhost reboot、Git partial failureのfault injectionを自動testへ固定した。通常verifyは旧prototype gateを廃止してformat、unit、race、vet、固定helper build、CLI/static boundaryを実行する。詳細な証拠と再現コマンドは[`../implementation/phase-5.md`](../implementation/phase-5.md)を正とする。
 
 ---
 

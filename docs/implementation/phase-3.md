@@ -1,6 +1,6 @@
 # Phase 3: Git Gateway
 
-状態: 完了。HTTPS smart HTTP、object-bound one-shot push approval、remote別host quarantine resolver、credential終端、read/receive relay、Trusted UI、secure session lifecycleを実装し、実Agent VM gateを通過した。policy schema v3と公開CLIは最大16件のnamed remoteを扱い、各remoteの固定URL、quarantine、capability token、hook broker、approval bindingを分離する。
+状態: 完了。HTTPS smart HTTP、object-bound one-shot push approval、remote別host quarantine resolver、credential終端、read/receive relay、Trusted UI、secure session lifecycleを実装し、実Agent VM gateを通過した。policy schema v3で導入しv4へ継承した形式と公開CLIは最大16件のnamed remoteを扱い、各remoteの固定URL、quarantine、capability token、hook broker、approval bindingを分離する。
 
 ## push approval binding
 

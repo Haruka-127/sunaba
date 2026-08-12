@@ -63,7 +63,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	nonce := "gateway-" + runID
-	modelID := "gpt-sunaba-test"
+	modelID := "gpt-5"
 	modelToken := "model-" + runID + "-" + strings.Repeat("t", 32)
 	upstreamKey := "upstream-" + runID
 	upstreamRequest := make(chan struct{}, 1)
@@ -79,7 +79,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		writeResponsesTextStream(w, modelID, "hello from gateway")
 	}))
 	defer upstream.Close()
-	capability, err := modelgateway.NewCapability(modelToken, "phase0-project-a", name, runID, modelID, time.Now().Add(time.Minute))
+	capability, err := modelgateway.NewCapability(modelToken, "phase0-project-a", name, runID, []string{modelID}, time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,8 +194,8 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerConfig, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
-		BaseURL: "http://127.0.0.1:4141/v1", Model: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
-		ContextLimit: 200_000, OutputLimit: 32_000,
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: []string{modelID},
+		DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
 	})
 	if err != nil {
 		t.Fatal(err)

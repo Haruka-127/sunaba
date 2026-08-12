@@ -25,7 +25,7 @@ session終了はLocal Attach RelayとModel Gatewayを先に閉じ、VMを停止�
 
 VM削除は`dev.sunaba.owner`、Project ID、session IDの完全一致をinspectしてから行う。短命Gateway serverとattach endpointは停止後に到達不能となり、同じhost baselineから作る次のVMに未承認upperは再利用されない。
 
-Model Gatewayは期限、request回数、並行数、request/response size、固定modelを強制し、期限切れ、別token、quota超過、過大bodyをupstream到達前に拒否する。CPU/memoryはApple Container、server childのprocess/file上限はguest bootstrapで設定する。
+Model Gatewayは期限、request回数、並行数、request/response size、Project policy由来のmodel allowlistを強制し、期限切れ、別token、許可外model、quota超過、過大bodyをupstream到達前に拒否する。既定値は1,000回、同時4回、request 32 MiB、response 64 MiBで、policy validationが過大な上限を拒否する。CPU/memoryはApple Container、server childのprocess/file上限はguest bootstrapで設定する。
 
 ## 実機証跡
 

@@ -86,6 +86,30 @@ func TestGatewayPreservesUpstreamErrorWithoutLeakingKey(t *testing.T) {
 	}
 }
 
+func TestCapabilityUsesBoundedSessionDefaults(t *testing.T) {
+	models := []string{testModel}
+	capability, err := NewCapability(testToken, "project", "vm", "session", models, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	models[0] = "mutated"
+	if capability.AllowedModels[0] != testModel || capability.MaxRequests != DefaultMaxRequests || capability.MaxConcurrent != DefaultMaxConcurrent || capability.MaxRequestBytes != DefaultMaxRequestBytes || capability.MaxResponseBytes != DefaultMaxResponseBytes {
+		t.Fatalf("unexpected capability defaults: %+v", capability)
+	}
+	for _, mutate := range []func(*Capability){
+		func(value *Capability) { value.MaxRequests = MaximumMaxRequests + 1 },
+		func(value *Capability) { value.MaxConcurrent = MaximumMaxConcurrent + 1 },
+		func(value *Capability) { value.MaxRequestBytes = MaximumMaxRequestBytes + 1 },
+		func(value *Capability) { value.MaxResponseBytes = MaximumMaxResponseBytes + 1 },
+	} {
+		invalid := capability
+		mutate(&invalid)
+		if _, err := New(Config{UpstreamBaseURL: "https://api.openai.com", UpstreamAPIKey: testKey, Capability: invalid}); err == nil {
+			t.Fatalf("overlarge capability was accepted: %+v", invalid)
+		}
+	}
+}
+
 func TestGatewayRejectsTokenAndModelBeforeUpstream(t *testing.T) {
 	var calls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
@@ -108,6 +132,36 @@ func TestGatewayRejectsTokenAndModelBeforeUpstream(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("rejected requests reached upstream %d times", calls)
+	}
+}
+
+func TestGatewayAllowsEveryConfiguredModelAndAuditsRequestedModel(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		_, _ = io.WriteString(response, `{}`)
+	}))
+	defer upstream.Close()
+	capability, err := NewCapability(testToken, "project", "vm", "session", []string{testModel, "gpt-sunaba-small"}, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []AuditEvent
+	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: capability, Audit: func(event AuditEvent) { events = append(events, event) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+	for _, model := range capability.AllowedModels {
+		response := gatewayRequest(t, context.Background(), server.URL, testToken, model)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("model=%q status=%d", model, response.StatusCode)
+		}
+	}
+	if calls != 2 || len(events) != 2 || events[0].Model != testModel || events[1].Model != "gpt-sunaba-small" {
+		t.Fatalf("calls=%d events=%+v", calls, events)
 	}
 }
 
@@ -272,7 +326,7 @@ func testGateway(t *testing.T, upstream string, audit func(AuditEvent)) *Gateway
 
 func testCapability(t *testing.T) Capability {
 	t.Helper()
-	capability, err := NewCapability(testToken, "project", "vm", "session", testModel, time.Now().Add(time.Minute))
+	capability, err := NewCapability(testToken, "project", "vm", "session", []string{testModel}, time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
