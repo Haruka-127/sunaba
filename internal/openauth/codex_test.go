@@ -126,6 +126,31 @@ func TestInitialCredentialRejectsExplicitInvalidExpiry(t *testing.T) {
 	}
 }
 
+func TestInitialCredentialAcceptsExpiryBeyondOneDay(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	accessToken, refreshToken, idToken := "access-token", "refresh-token", testIDToken(t, "account-id")
+	expiresIn := int64((7 * 24 * time.Hour) / time.Second)
+	client := &Client{now: func() time.Time { return now }}
+	credential, err := client.initialCredential(oauthTokenResponse{AccessToken: &accessToken, RefreshToken: &refreshToken, IDToken: &idToken, ExpiresIn: &expiresIn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.ExpiresAt != now.Add(7*24*time.Hour).Unix() {
+		t.Fatalf("ExpiresAt = %d, want %d", credential.ExpiresAt, now.Add(7*24*time.Hour).Unix())
+	}
+}
+
+func TestInitialCredentialRejectsExpiryThatOverflowsDuration(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	accessToken, refreshToken, idToken := "access-token", "refresh-token", testIDToken(t, "account-id")
+	expiresIn := int64(maximumTTLSeconds + 1)
+	client := &Client{now: func() time.Time { return now }}
+	_, err := client.initialCredential(oauthTokenResponse{AccessToken: &accessToken, RefreshToken: &refreshToken, IDToken: &idToken, ExpiresIn: &expiresIn})
+	if err == nil || !strings.Contains(err.Error(), "expires_in") {
+		t.Fatalf("expected an expires_in overflow error, got %v", err)
+	}
+}
+
 func testIDToken(t *testing.T, account string) string {
 	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))

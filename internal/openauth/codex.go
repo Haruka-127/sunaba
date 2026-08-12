@@ -28,7 +28,7 @@ const (
 	deviceRedirectURI   = "https://auth.openai.com/deviceauth/callback"
 	maximumResponseSize = 64 << 10
 	defaultTokenTTL     = time.Hour
-	maximumTokenTTL     = 24 * time.Hour
+	maximumTTLSeconds   = (1<<63 - 1) / int64(time.Second)
 )
 
 type credentialStore interface {
@@ -305,7 +305,7 @@ func refreshedTokenValue(field string, value *string, previous string) (string, 
 func (c *Client) tokenExpiresAt(expiresIn *int64) (int64, error) {
 	ttl := defaultTokenTTL
 	if expiresIn != nil {
-		if *expiresIn <= 0 || *expiresIn > int64(maximumTokenTTL/time.Second) {
+		if *expiresIn <= 0 || *expiresIn > maximumTTLSeconds {
 			return 0, fmt.Errorf("Codex OAuth token response has invalid expires_in")
 		}
 		ttl = time.Duration(*expiresIn) * time.Second
