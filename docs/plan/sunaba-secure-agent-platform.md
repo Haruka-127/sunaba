@@ -860,7 +860,15 @@ Phase 0のprobeで既存許可範囲にない操作が必要になった場合�
 
 ## 16. ポリシーとリソース制御
 
-Project policyはホスト側に保存し、VMから変更できないようにする。最低限、次を含める。
+Projectの利用者設定は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/`を正本とし、Project worktree外のhost-only領域へ保存する。Project directory、Snapshot、VM、session input、exportへこの設定directoryをmountまたはcopyせず、VMから参照・変更できる経路を作らない。directoryはcurrent user所有のmode `0700`、`project.json`と`web-origins.txt`はmode `0600`の通常fileに限定し、symlink、未知field、trailing data、上限超過を拒否する。
+
+`project.json`にはmode、resource、session、Model、Git remote、Web quota、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
+
+Web allowlistは同じhost-only directoryの固定名`web-origins.txt`で管理する。空行と`#`で始まるcommentを除き、各行は`http://host`または`https://host`と、任意の第2token `include-subdomains`だけを受け付ける。path、query、fragment、userinfo、非標準port、IP literal、重複rule、未知optionを1件でも含む場合はfile全体を拒否する。sizeは64 KiB、rule数は1024件を上限とする。
+
+設定変更は`config validate`と`config diff`で検査し、active/paused Agent Session、pending Change Setがない状態で`config apply`により実効policyへ明示適用する。未適用または不正な設定がある場合、`up`、`agent`、`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
+
+実効Project policyはホスト側に保存し、VMから変更できないようにする。最低限、次を含める。
 
 - `mode`: `secure`または`dev`
 - Apple Container image/version
@@ -1087,6 +1095,10 @@ sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登
 sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
 sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
 sunaba project init <path>       Project登録と初期snapshot
+sunaba config path               host-only Project設定fileのpath表示
+sunaba config validate/diff      declarative設定の厳格検証と実効policyとの差分表示
+sunaba config apply              停止状態で設定を実効Project policyへcompile
+sunaba config show [--effective] declarative設定または内部の実効policyを表示
 sunaba up [--mode secure|dev]    secure VMを作成してpause、devはforeground session用artifactだけ準備
 sunaba agent                     server、relay、Host TUIを起動してAgent Session開始
 sunaba shell                     bounded line commandをterminal sanitizer経由で実行

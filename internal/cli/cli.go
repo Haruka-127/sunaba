@@ -28,6 +28,7 @@ import (
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
+	"sunaba/internal/projectconfig"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/trustedui"
@@ -37,6 +38,7 @@ import (
 type app struct {
 	verbose bool
 	store   *state.Store
+	configs *projectconfig.Store
 	runtime runtime.Runtime
 	input   io.Reader
 	output  io.Writer
@@ -68,10 +70,16 @@ func Run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	a := &app{verbose: verbose, store: store, runtime: runtime.NewAppleContainer(verbose), input: os.Stdin, output: os.Stdout, errors: os.Stderr}
+	configs, err := projectconfig.NewStore()
+	if err != nil {
+		return err
+	}
+	a := &app{verbose: verbose, store: store, configs: configs, runtime: runtime.NewAppleContainer(verbose), input: os.Stdin, output: os.Stdout, errors: os.Stderr}
 	switch filtered[0] {
 	case "project":
 		return a.project(ctx, filtered[1:])
+	case "config":
+		return a.config(ctx, filtered[1:])
 	case "credentials":
 		return a.credentials(ctx, filtered[1:])
 	case "model":
@@ -120,6 +128,7 @@ Usage:
   sunaba model set --model <id>... [--dir <path>]
   sunaba model list [--dir <path>]
   sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]
+  sunaba config path|validate|diff|apply|show [--effective] [--dir <path>]
   sunaba up [--dir <path>] [--mode secure|dev]
   sunaba agent [--dir <path>]
   sunaba shell [--dir <path>]
@@ -176,7 +185,7 @@ func (a *app) project(_ context.Context, args []string) error {
 	stateWasAbsent := errors.Is(stateStatErr, os.ErrNotExist)
 	policyPath := filepath.Join(projectState, "policy.json")
 	if _, err := os.Lstat(policyPath); err == nil {
-		return fmt.Errorf("Project is already registered; use 'sunaba up --mode %s' to change its mode", *mode)
+		return fmt.Errorf("Project is already registered; edit its host configuration and run 'sunaba config apply'")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -203,6 +212,30 @@ func (a *app) project(_ context.Context, args []string) error {
 		projectPolicy.Model.AuthMode = modelcatalog.AuthOAuth
 		projectPolicy.Model.AllowedModels = defaultModels
 	}
+	configStore, err := a.projectConfigStore()
+	if err != nil {
+		return err
+	}
+	configPaths, err := configStore.ProjectPaths(projectPolicy.ProjectID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(configPaths.Directory); err == nil {
+		return fmt.Errorf("Project host configuration already exists at %s", configPaths.Directory)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	projectConfig, originRules := projectconfig.FromPolicy(projectPolicy)
+	createdConfig := false
+	defer func() {
+		if createdConfig {
+			_ = os.RemoveAll(configPaths.Directory)
+		}
+	}()
+	createdConfig = true
+	if err := configStore.Save(projectPolicy.ProjectID, projectConfig, originRules); err != nil {
+		return err
+	}
 	if err := policy.Save(policyPath, projectPolicy); err != nil {
 		return err
 	}
@@ -216,7 +249,8 @@ func (a *app) project(_ context.Context, args []string) error {
 		return err
 	}
 	createdState = false
-	fmt.Fprintf(a.output, "Registered Project %s (%s) in %s mode.\n", projectPolicy.ProjectID, root, projectPolicy.Mode)
+	createdConfig = false
+	fmt.Fprintf(a.output, "Registered Project %s (%s) in %s mode. Host configuration: %s\n", projectPolicy.ProjectID, root, projectPolicy.Mode, configPaths.Project)
 	return nil
 }
 
@@ -251,7 +285,7 @@ func (a *app) up(ctx context.Context, args []string) error {
 			}
 			projectPolicy.Mode = *mode
 			projectPolicy.UpdatedAt = time.Now().UTC()
-			if err := policy.Save(path, projectPolicy); err != nil {
+			if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
 				return err
 			}
 		}
@@ -480,7 +514,7 @@ func (a *app) status(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
 	if err != nil {
 		return err
 	}
@@ -530,8 +564,28 @@ func (a *app) status(ctx context.Context, args []string) error {
 	if projectPolicy.Web.Enabled {
 		webState = fmt.Sprintf("enabled (%d origin rules, pinned blocklist %s)", len(projectPolicy.Web.Rules), projectPolicy.Web.BlocklistSHA256)
 	}
-	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
+	configState := "invalid"
+	configPath := "unavailable"
+	configStore, configStoreErr := a.projectConfigStore()
+	if configStoreErr == nil {
+		if paths, pathErr := configStore.ProjectPaths(projectPolicy.ProjectID); pathErr == nil {
+			configPath = paths.Project
+		}
+		config, rules, configErr := configStore.Load(projectPolicy.ProjectID)
+		if configErr == nil {
+			configState = "unapplied"
+			if config.ProjectRoot == projectPolicy.ProjectRoot && projectconfig.Matches(config, rules, projectPolicy) {
+				configState = "applied"
+			}
+		} else {
+			configState = "invalid: " + configErr.Error()
+		}
+	} else {
+		configState = "invalid: " + configStoreErr.Error()
+	}
+	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
 		projectPolicy.ProjectRoot, projectPolicy.ProjectID, projectPolicy.Mode, projectPolicy.SchemaVersion,
+		configPath, configState,
 		projectPolicy.Dependency.OpenCode, projectPolicy.Dependency.AppleContainer, projectPolicy.Dependency.AgentImage,
 		sessionVMs, sessionExpiry, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, pending,
 		projectPolicy.Resources.CPUs, projectPolicy.Resources.Memory, projectPolicy.Resources.DiskBytes, projectPolicy.Resources.ProcessMax, projectPolicy.Resources.FileSizeMax, projectPolicy.Resources.OpenFileMax,
@@ -551,7 +605,7 @@ func (a *app) changes(ctx context.Context, args []string) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
-	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
 	if err != nil {
 		return err
 	}
@@ -646,7 +700,7 @@ func (a *app) approvals(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
 	if err != nil {
 		return err
 	}
@@ -676,7 +730,7 @@ func (a *app) recreate(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
 	if err != nil {
 		return err
 	}
@@ -726,7 +780,7 @@ func (a *app) down(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	_, _, projectState, err := a.loadPolicy(*dir)
+	_, _, projectState, err := a.loadEffectivePolicy(*dir)
 	if err != nil {
 		return err
 	}
@@ -765,7 +819,7 @@ func (a *app) destroy(ctx context.Context, args []string) error {
 	if !*yes {
 		return fmt.Errorf("destroy requires --yes")
 	}
-	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
 	if err != nil {
 		return err
 	}
@@ -821,7 +875,14 @@ func (a *app) destroy(ctx context.Context, args []string) error {
 	if err := os.RemoveAll(projectState); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Destroyed Project state %s. Host Project files were not removed.\n", projectPolicy.ProjectID)
+	configStore, err := a.projectConfigStore()
+	if err != nil {
+		return err
+	}
+	if err := configStore.Remove(projectPolicy.ProjectID); err != nil {
+		return fmt.Errorf("Project state was removed, but its host configuration could not be removed: %w", err)
+	}
+	fmt.Fprintf(a.output, "Destroyed Project state and host configuration %s. Host Project files were not removed.\n", projectPolicy.ProjectID)
 	return nil
 }
 
@@ -868,6 +929,25 @@ func (a *app) firewall(ctx context.Context, args []string) error {
 }
 
 func (a *app) loadPolicy(directory string) (policy.ProjectPolicy, string, string, error) {
+	loaded, path, projectState, err := a.loadEffectivePolicy(directory)
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", err
+	}
+	configStore, err := a.projectConfigStore()
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", err
+	}
+	config, rules, err := configStore.Load(loaded.ProjectID)
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", fmt.Errorf("load host Project configuration: %w", err)
+	}
+	if config.ProjectRoot != loaded.ProjectRoot || !projectconfig.Matches(config, rules, loaded) {
+		return policy.ProjectPolicy{}, "", "", fmt.Errorf("host Project configuration has unapplied changes; run 'sunaba config diff --dir %s' and 'sunaba config apply --dir %s'", loaded.ProjectRoot, loaded.ProjectRoot)
+	}
+	return loaded, path, projectState, nil
+}
+
+func (a *app) loadEffectivePolicy(directory string) (policy.ProjectPolicy, string, string, error) {
 	root, err := state.ResolveProjectPath(directory)
 	if err != nil {
 		return policy.ProjectPolicy{}, "", "", err
@@ -888,6 +968,31 @@ func (a *app) loadPolicy(directory string) (policy.ProjectPolicy, string, string
 		fmt.Fprintf(a.errors, "Migrated Project policy to schema %d.\n", policy.CurrentSchemaVersion)
 	}
 	return loaded, path, projectState, nil
+}
+
+func (a *app) projectConfigStore() (*projectconfig.Store, error) {
+	if a.configs != nil {
+		return a.configs, nil
+	}
+	if a.store == nil || !filepath.IsAbs(a.store.Root) {
+		return nil, fmt.Errorf("Project configuration store is unavailable")
+	}
+	// Tests and embedded callers that inject a state store get an isolated sibling
+	// configuration root. The public CLI always supplies the XDG configuration root.
+	a.configs = &projectconfig.Store{Root: filepath.Join(filepath.Dir(a.store.Root), "config", "sunaba")}
+	return a.configs, nil
+}
+
+func (a *app) savePolicyAndConfig(policyPath string, effective policy.ProjectPolicy) error {
+	configStore, err := a.projectConfigStore()
+	if err != nil {
+		return err
+	}
+	config, rules := projectconfig.FromPolicy(effective)
+	if err := configStore.Save(effective.ProjectID, config, rules); err != nil {
+		return err
+	}
+	return policy.Save(policyPath, effective)
 }
 
 func (a *app) projectState(root string) string {

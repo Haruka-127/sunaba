@@ -34,7 +34,7 @@ func TestLiveOpenAIThroughAgentVM(t *testing.T) {
 	sunaba := buildHostBinary(t, ctx, runtimeBase, "sunaba", "./cmd/sunaba")
 	_ = buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
 	_ = buildHostBinary(t, ctx, runtimeBase, "sunaba-git-hook", "./cmd/sunaba-git-hook")
-	environment := append(os.Environ(), "XDG_DATA_HOME="+filepath.Join(runtimeBase, "data"))
+	environment := append(os.Environ(), "XDG_DATA_HOME="+filepath.Join(runtimeBase, "data"), "XDG_CONFIG_HOME="+filepath.Join(runtimeBase, "config"))
 	runSunaba := func(input string, args ...string) (string, error) {
 		command := exec.CommandContext(ctx, sunaba, args...)
 		command.Env = environment

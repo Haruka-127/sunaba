@@ -18,6 +18,7 @@ import (
 	"sunaba/internal/gitgateway"
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
+	"sunaba/internal/projectconfig"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
 	"sunaba/internal/workspace"
@@ -28,7 +29,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 	a := &app{output: &output}
 	usage(a.output)
 	text := output.String()
-	for _, expected := range []string{"credentials openai", "project init", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
+	for _, expected := range []string{"credentials openai", "project init", "config path|validate|diff|apply|show", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -134,6 +135,14 @@ func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *te
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
 	if err != nil || len(loaded.Git.Remotes) != 2 || loaded.Git.Remotes[0].Name != "origin" || loaded.Git.Remotes[1].Name != "upstream" {
 		t.Fatalf("policy=%+v error=%v", loaded.Git, err)
+	}
+	configStore, err := a.projectConfigStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, rules, err := configStore.Load(loaded.ProjectID)
+	if err != nil || !projectconfig.Matches(config, rules, loaded) {
+		t.Fatalf("Git CLI did not synchronize host configuration: config=%+v error=%v", config.Git, err)
 	}
 	output.Reset()
 	if err := a.gitPolicy(context.Background(), []string{"remote", "list", "--dir", project}); err != nil || !strings.Contains(output.String(), "origin\thttps://git.example/team/repository.git") || !strings.Contains(output.String(), "upstream\thttps://git.example/team/upstream.git") {
@@ -666,5 +675,60 @@ func TestProjectInitCreatesPinnedPolicyAndSafeInitialSnapshot(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(store.Root, "projects", state.ProjectID(project), "initial-snapshot", "after.txt")); !os.IsNotExist(err) {
 		t.Fatalf("initial snapshot was not immutable: %v", err)
+	}
+}
+
+func TestHostProjectConfigurationMustBeAppliedBeforeUse(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	var output bytes.Buffer
+	a := &app{store: store, configs: configs, output: &output, errors: &output}
+	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	config, rules, err := configs.Load(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Mode = "dev"
+	encoded, err := projectconfig.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := configs.ProjectPaths(projectID)
+	if err := os.WriteFile(paths.Project, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := a.loadPolicy(project); err == nil || !strings.Contains(err.Error(), "unapplied") {
+		t.Fatalf("unapplied configuration was usable: %v", err)
+	}
+	output.Reset()
+	if err := a.config(context.Background(), []string{"validate", "--dir", project}); err != nil || !strings.Contains(output.String(), "Valid host Project configuration") {
+		t.Fatalf("validate output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	if err := a.config(context.Background(), []string{"diff", "--dir", project}); err != nil || !strings.Contains(output.String(), "unapplied changes") {
+		t.Fatalf("diff output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	if err := a.config(context.Background(), []string{"apply", "--dir", project}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, err := a.loadPolicy(project)
+	if err != nil || loaded.Mode != "dev" || !projectconfig.Matches(config, rules, loaded) {
+		t.Fatalf("effective=%+v error=%v", loaded, err)
+	}
+	output.Reset()
+	if err := a.config(context.Background(), []string{"path", "--dir", project}); err != nil || !strings.Contains(output.String(), paths.WebOrigins) {
+		t.Fatalf("path output=%q error=%v", output.String(), err)
 	}
 }

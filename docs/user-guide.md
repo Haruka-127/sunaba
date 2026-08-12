@@ -70,7 +70,26 @@ bin/sunaba up --dir "$PROJECT"
 bin/sunaba agent --dir "$PROJECT"
 ```
 
-`project init`はProject policyを作る。`up`はhost worktreeの安全なSnapshotからnetworkなしのVMを準備し、検証後にpauseして返す。`agent`は同じVMをresumeし、VM内rootかつOpenCode tool確認を全許可したOpenCode serverへ、隔離済みhost TUIを接続する。TUIを終了するとGatewayをinactiveにしてVMを再びpauseする。期限内の次回`agent`は同じVMと編集状態を再利用する。root権限はVM内に限定され、host Project、直接network、Gateway quota、Git pushとChange Set適用のHost承認は迂回できない。
+`project init`はhost-onlyなProject設定と、そこからcompileした実効policyを作る。`up`はhost worktreeの安全なSnapshotからnetworkなしのVMを準備し、検証後にpauseして返す。`agent`は同じVMをresumeし、VM内rootかつOpenCode tool確認を全許可したOpenCode serverへ、隔離済みhost TUIを接続する。TUIを終了するとGatewayをinactiveにしてVMを再びpauseする。期限内の次回`agent`は同じVMと編集状態を再利用する。root権限はVM内に限定され、host Project、直接network、Gateway quota、Git pushとChange Set適用のHost承認は迂回できない。
+
+Projectごとの起動設定はProject folder内ではなく、`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/project.json`に置かれる。実際のpathは次で確認できる。
+
+```sh
+bin/sunaba config path --dir "$PROJECT"
+bin/sunaba config show --dir "$PROJECT"
+bin/sunaba config show --effective --dir "$PROJECT"
+```
+
+`project.json`ではmode、CPU/memory/disk/process上限、session TTL/idle、Model allowlist/quota、Git remote、Web quota、export上限、audit retentionを管理する。dependency digest、credential、capability、blocklist digest、push承認必須、Protected Pathはsunabaが生成するため記述できない。設定directoryはmode `0700`、fileはmode `0600`であり、VMにはmount/copyされない。
+
+編集後は次の順序で明示適用する。未適用または不正な設定がある間、`up`、`agent`、`shell`は起動を拒否する。`status`と停止・export・recreate・destroyは復旧のため引き続き使用できる。active/paused VMまたはpending Change Setがある場合は、先に`changes export`または`recreate`を行う。
+
+```sh
+chmod 600 /path/shown/by/config/path/project.json
+bin/sunaba config validate --dir "$PROJECT"
+bin/sunaba config diff --dir "$PROJECT"
+bin/sunaba config apply --dir "$PROJECT"
+```
 
 OAuthを使うProjectは初期化時に認証方式を指定する。OAuthの既定allowlistには認証別catalogの全モデルが入り、先頭の推奨モデルがOpenCodeの既定modelになる。既存Projectはactive sessionを終了した後に切り替えられる。認証方式を変えたとき、現在のmodel allowlistが移行先で使えなければ同じ認証別既定allowlistへ置き換わる。既存Projectで明示済みの有効なallowlistは自動拡張しない。
 
@@ -162,7 +181,20 @@ Git LFS endpointとSSH transportは対象外である。submoduleは親remoteの
 
 ## 8. Web Gatewayを使う
 
-secure modeの一般Web通信は既定で拒否される。必要なoriginだけをhost policyへ登録する。
+secure modeの一般Web通信は既定で拒否される。必要なoriginだけをhost設定directoryの`web-origins.txt`へ登録できる。
+
+```text
+# exact HTTPS origin
+https://docs.example
+
+# 明示した場合だけsubdomainを含める
+https://packages.example include-subdomains
+http://archive.example
+```
+
+`project.json`の`web.enabled`を`true`にし、両fileをmode `0600`にしたうえで`config validate`、`config diff`、`config apply`を実行する。各行はHTTP(S) originだけを許可し、path、query、userinfo、非標準port、IP literal、未知option、重複ruleが1件でもあればfile全体を拒否する。上限は64 KiB、1024 ruleである。
+
+既存のCLIでも同じhost設定と実効policyを同期して更新できる。
 
 ```sh
 bin/sunaba web enable --origin https://docs.example \
@@ -170,7 +202,7 @@ bin/sunaba web enable --origin https://docs.example \
 bin/sunaba web refresh --dir "$PROJECT"
 ```
 
-`enable`と`refresh`はhostで固定blocklist sourceを取得し、digestと期限へ束縛したsnapshotを保存する。期限切れや取得・検証失敗時はfail closedとなる。policy変更はactive/paused VMがある間は拒否される。
+`enable`と`refresh`はhostで固定blocklist sourceを取得し、digestと期限へ束縛したsnapshotを保存する。`config apply`もWebの新規有効化時または有効なsnapshotがない場合だけ取得する。期限切れや取得・検証失敗時はfail closedとなる。設定変更はactive/paused VMがある間は拒否される。
 
 HTTPはallowlist originへのGET/HEADだけを許し、body/uploadを拒否する。HTTPSは443へのTLS非終端CONNECTなので、送信先origin、解決後IP、時間、byte量は制限するが、暗号化されたtunnel内部のmethod、path、upload内容は識別・保証しない。
 
@@ -203,9 +235,9 @@ bin/sunaba destroy --dir "$PROJECT" --yes --discard-pending
 - `status`: mode、VM状態、期限、resource、quota、Git/Web policy、pending Change Setを表示する
 - `down`: secure VMをpauseし、隔離されたupperを保持する
 - `recreate`: VMがあれば原則exportし、次回をclean host Snapshotから開始する。pending Change Setはapplyまたは明示破棄が必要
-- `destroy`: sunabaのProject stateと所有確認済みVMを削除する。host Project自体は削除しない。未export/pending変更の破棄には`--discard-pending`が必要
+- `destroy`: sunabaのProject state、host-only Project設定、所有確認済みVMを削除する。host Project自体は削除しない。未export/pending変更の破棄には`--discard-pending`が必要
 
-既定stateは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`に置かれる。内部stateを手作業で編集・削除せず、公開CLIを使う。
+既定の利用者設定は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/`、内部stateは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`に置かれる。利用者設定は`config` commandで検証・適用し、内部stateを手作業で編集・削除しない。
 
 ## 11. 障害時
 

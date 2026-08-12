@@ -45,6 +45,16 @@ Project policy schema v5はProject identity/root、mode、dependency、resource�
 - v1/v2/v3/v4からv5へのmigrationをprivate temporary file + fsync + atomic renameで行う。v2のGit URL配列はnamed remoteへ変換し、v3のModel Gateway値は旧既定値と完全一致する場合だけ新既定値へ更新し、既存policyの認証方式は`api_key`とする
 - legacy Web originがあるpolicyは、blocklist snapshot/digestを推測せずmigrationを拒否
 
+## Host-only Project configuration
+
+Projectの利用者設定を内部stateから分離し、`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/project.json`を起動設定、同directoryの`web-origins.txt`をWeb allowlistの正本とした。両fileはcurrent user所有のmode `0600`、directoryはmode `0700`とし、symlink、未知JSON field、trailing data、oversize、不正originを拒否する。Project worktreeとVMには設定directoryを公開しない。
+
+- `config path|validate|diff|apply|show`でpath確認、厳格検証、実効policyとの差分、停止状態でのcompile、declarative/effective表示を行う
+- dependency、blocklist binding、push承認必須、Protected Path、runtime identity、credential/capabilityはdeclarative設定から除外し、host側で生成する
+- 未適用設定がある場合は`up`、`agent`、`shell`、Supervisor起動を拒否する一方、`status`、`down`、export、recreate、destroyは復旧経路として維持する
+- `web-origins.txt`は64 KiB/1024 ruleを上限とし、HTTP(S) root originと任意の`include-subdomains`だけを行単位で受理する
+- Model/Git/Webの既存設定CLIはhost設定と実効policyを同時更新し、一方だけが古くなる経路を残さない
+
 ## Audit retention / redaction
 
 auditはmetadata-onlyのhost JSONLであり、sensitive key名、credentialに似た値、URL userinfo、Bearer/Basic、API key形式を拒否またはredactする。保持期間は1〜365日に制限し、exactな`audit-YYYYMMDD.jsonl`だけを対象にmode、owner、symlinkを再検証して削除する。directory fsync前の失敗を成功扱いしない。

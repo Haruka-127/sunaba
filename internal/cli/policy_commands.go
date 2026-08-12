@@ -5,8 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +13,7 @@ import (
 
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
+	"sunaba/internal/projectconfig"
 	"sunaba/internal/webgateway"
 )
 
@@ -100,7 +99,7 @@ func (a *app) modelPolicy(_ context.Context, args []string) error {
 		return fmt.Errorf("%s", modelPolicyUsage())
 	}
 	projectPolicy.UpdatedAt = time.Now().UTC()
-	if err := policy.Save(path, projectPolicy); err != nil {
+	if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.output, "Configured Project Model Gateway authentication=%s with models=%s.\n", projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","))
@@ -204,7 +203,7 @@ func (a *app) gitPolicy(_ context.Context, args []string) error {
 	}
 	projectPolicy.Git.Remotes = sortedGitRemotes(projectPolicy.Git.Remotes)
 	projectPolicy.UpdatedAt = time.Now().UTC()
-	if err := policy.Save(path, projectPolicy); err != nil {
+	if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
 		return err
 	}
 	if len(projectPolicy.Git.Remotes) == 0 {
@@ -279,7 +278,7 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 		projectPolicy.Web.BlocklistManifest = ""
 		projectPolicy.Web.BlocklistSHA256 = ""
 		projectPolicy.UpdatedAt = time.Now().UTC()
-		if err := policy.Save(path, projectPolicy); err != nil {
+		if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
 			return err
 		}
 		fmt.Fprintln(a.output, "Disabled the Project Web Gateway. The pinned blocklist snapshot was retained and is inactive.")
@@ -290,62 +289,23 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 }
 
 func originRule(raw string, includeSubdomains bool) (webgateway.OriginRule, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User != nil || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") || strings.ContainsAny(raw, "\x00\r\n") {
-		return webgateway.OriginRule{}, fmt.Errorf("Web origin must contain only scheme and hostname")
-	}
-	rule := webgateway.OriginRule{Host: parsed.Hostname(), Category: "user", IncludeSubdomains: includeSubdomains}
-	switch parsed.Scheme {
-	case "http":
-		if parsed.Port() != "" && parsed.Port() != "80" {
-			return webgateway.OriginRule{}, fmt.Errorf("HTTP Web origins must use port 80")
-		}
-		rule.Port, rule.AllowHTTP = 80, true
-	case "https":
-		if parsed.Port() != "" && parsed.Port() != "443" {
-			return webgateway.OriginRule{}, fmt.Errorf("HTTPS Web origins must use port 443")
-		}
-		rule.Port, rule.AllowConnect = 443, true
-	default:
-		return webgateway.OriginRule{}, fmt.Errorf("Web origin scheme must be http or https")
-	}
-	if _, err := (webgateway.Policy{Rules: []webgateway.OriginRule{rule}}).Digest(); err != nil {
-		return webgateway.OriginRule{}, fmt.Errorf("invalid Web origin: %w", err)
-	}
-	return rule, nil
+	return projectconfig.ParseOrigin(raw, includeSubdomains)
 }
 
 func (a *app) refreshWebPolicy(ctx context.Context, projectPolicy policy.ProjectPolicy, policyPath, projectState string, rules []webgateway.OriginRule) error {
-	fetchContext, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-	snapshot, err := webgateway.FetchBlocklist(fetchContext, &http.Client{Timeout: 30 * time.Second}, webgateway.DefaultBlocklistSourceURL, time.Now(), 7*24*time.Hour)
+	manifestPath, digest, expiresAt, err := a.fetchAndPersistWebBlocklist(ctx, projectState)
 	if err != nil {
-		return err
-	}
-	manifest, err := snapshot.Manifest.Marshal()
-	if err != nil {
-		return err
-	}
-	webRoot := filepath.Join(projectState, "web")
-	if err := os.MkdirAll(webRoot, 0700); err != nil {
-		return err
-	}
-	manifestPath := filepath.Join(webRoot, "blocklist.json")
-	if err := writePrivateBytes(manifestPath, append(manifest, '\n')); err != nil {
-		return err
-	}
-	if err := writePrivateBytes(filepath.Join(webRoot, "blocklist.hosts"), snapshot.Data); err != nil {
 		return err
 	}
 	projectPolicy.Web.Enabled = true
 	projectPolicy.Web.Rules = rules
 	projectPolicy.Web.BlocklistManifest = manifestPath
-	projectPolicy.Web.BlocklistSHA256 = snapshot.Manifest.SHA256
+	projectPolicy.Web.BlocklistSHA256 = digest
 	projectPolicy.UpdatedAt = time.Now().UTC()
-	if err := policy.Save(policyPath, projectPolicy); err != nil {
+	if err := a.savePolicyAndConfig(policyPath, projectPolicy); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Enabled Web Gateway with %d origin rules and pinned blocklist %s (expires %s).\n", len(rules), snapshot.Manifest.SHA256, snapshot.Manifest.ExpiresAt.Format(time.RFC3339))
+	fmt.Fprintf(a.output, "Enabled Web Gateway with %d origin rules and pinned blocklist %s (expires %s).\n", len(rules), digest, expiresAt.Format(time.RFC3339))
 	return nil
 }
 

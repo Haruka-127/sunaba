@@ -76,7 +76,16 @@ devの`up`は固定artifactだけを準備し、VMやdirect-egress networkをbac
 
 Git Gatewayはfixed HTTPS upstream、host credential終端、bare quarantine、standard smart HTTP、object/ref/force/deleteへ束縛したone-shot approvalを実装しています。Web Gatewayはorigin allowlistとhost DNS全回答/IP検査を持つTLS非終端forward proxyで、HTTPはGET/HEADのみ、CONNECTは443のみです。TLS tunnel内部のmethod/path/uploadは復号しないため保証しません。
 
-Project policyは公開CLIで構成します。
+Projectごとの起動設定はProject worktree外の`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/`で管理します。`project.json`がmode、resource、session、Model/Git/Web、export、audit設定を、`web-origins.txt`がWeb allowlistを保持します。どちらもhost-onlyで、VMへmount/copyされません。
+
+```sh
+bin/sunaba config path --dir /absolute/project/path
+bin/sunaba config validate --dir /absolute/project/path
+bin/sunaba config diff --dir /absolute/project/path
+bin/sunaba config apply --dir /absolute/project/path
+```
+
+未適用の変更がある間は`up`、`agent`、`shell`を拒否します。停止・export・recreate後に明示適用してください。既存のModel/Git/Web設定CLIも同じhost設定を同期して更新します。
 
 ```sh
 bin/sunaba git remote add --name origin --url https://git.example/owner/repository.git --dir /absolute/project/path
@@ -92,7 +101,7 @@ bin/sunaba web disable --dir /absolute/project/path
 
 ## Stateとcleanup
 
-既定stateは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`配下です。Project policy、audit、lease、managed tool、pending Change Setをmode `0700`/`0600`で保持します。Project本文やcredentialをauditへ記録しません。
+既定の利用者設定は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/`、内部stateは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`配下です。内部stateはProject policy、audit、lease、managed tool、pending Change Setをmode `0700`/`0600`で保持します。Project本文やcredentialをauditへ記録しません。
 
 ```sh
 bin/sunaba status --dir /absolute/project/path

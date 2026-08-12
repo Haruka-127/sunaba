@@ -43,7 +43,7 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	_ = buildHostBinary(t, ctx, runtimeBase, "sunaba-git-hook", "./cmd/sunaba-git-hook")
 	_ = buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
 	xdg := filepath.Join(runtimeBase, "data")
-	environment := append(os.Environ(), "XDG_DATA_HOME="+xdg)
+	environment := append(os.Environ(), "XDG_DATA_HOME="+xdg, "XDG_CONFIG_HOME="+filepath.Join(runtimeBase, "config"))
 	runSunaba := func(input string, args ...string) (string, error) {
 		command := exec.CommandContext(ctx, sunaba, args...)
 		command.Env = environment
