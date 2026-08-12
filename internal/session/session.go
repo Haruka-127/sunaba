@@ -92,6 +92,7 @@ type Session struct {
 	SnapshotRoot  string
 
 	cfg              Config
+	lifecycleContext context.Context
 	projectLock      *state.ProjectLock
 	leaseRegistry    *lease.Registry
 	leaseGuard       *lease.Guard
@@ -134,7 +135,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	}
 	s := &Session{
 		ProjectID: projectLock.ProjectID, ProjectRoot: projectLock.ProjectRoot,
-		SessionID: cfg.SessionID, cfg: cfg, projectLock: projectLock,
+		SessionID: cfg.SessionID, cfg: cfg, lifecycleContext: ctx, projectLock: projectLock,
 	}
 	defer func() {
 		if err != nil {
@@ -779,7 +780,7 @@ func (s *Session) startAttachRelay(ctx context.Context) error {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	relayCtx, cancel := context.WithCancel(ctx)
+	relayCtx, cancel := context.WithCancel(s.lifecycleContext)
 	url, done, err := (attachrelay.Relay{UnixSocketPath: socket, Username: "opencode", Password: s.cfg.ServerPassword}).ListenAndServe(relayCtx)
 	if err != nil {
 		cancel()

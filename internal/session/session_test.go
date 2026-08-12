@@ -18,6 +18,7 @@ import (
 
 	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
+	"sunaba/internal/opencode"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 )
@@ -111,6 +112,36 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	}
 	if strings.Contains(string(encodedAudit), cfg.ModelToken) || strings.Contains(string(encodedAudit), cfg.ServerPassword) {
 		t.Fatal("session secret was written to host audit")
+	}
+}
+
+func TestResumeKeepsAttachRelayAliveAfterOperationContextEnds(t *testing.T) {
+	lifecycleContext, cancelLifecycle := context.WithCancel(context.Background())
+	defer cancelLifecycle()
+	cfg, _ := sessionFixture(t)
+	s, err := Start(lifecycleContext, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	operationContext, cancelOperation := context.WithCancel(context.Background())
+	if err := s.Resume(operationContext); err != nil {
+		cancelOperation()
+		t.Fatal(err)
+	}
+	cancelOperation()
+	select {
+	case err := <-s.attachDone:
+		t.Fatalf("resume operation context stopped the session attach relay: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := opencode.GetHealth(context.Background(), s.AttachURL, cfg.ServerPassword); err != nil {
+		t.Fatalf("resumed attach relay is unavailable after operation completion: %v", err)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
