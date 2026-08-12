@@ -70,6 +70,34 @@ func TestBuildHostTUICommandRejectsExecutableDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestBuildHostTUICommandReusesVerifiedExecutable(t *testing.T) {
+	cfg := hostTUIFixture(t)
+	verified, err := VerifyHostTUIExecutable(context.Background(), cfg.ManagedToolDir, cfg.Binary, cfg.ExpectedExecutableSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.VerifiedExecutable = verified
+	cfg.ExpectedExecutableSHA256 = strings.Repeat("0", 64)
+	if _, err := BuildHostTUICommand(context.Background(), cfg, nil); err != nil {
+		t.Fatalf("opaque verified executable was not reused: %v", err)
+	}
+}
+
+func TestBuildHostTUICommandRejectsExecutableChangedAfterVerification(t *testing.T) {
+	cfg := hostTUIFixture(t)
+	verified, err := VerifyHostTUIExecutable(context.Background(), cfg.ManagedToolDir, cfg.Binary, cfg.ExpectedExecutableSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Binary, []byte("tampered after verification"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.VerifiedExecutable = verified
+	if _, err := BuildHostTUICommand(context.Background(), cfg, nil); err == nil {
+		t.Fatal("managed OpenCode mutation after verification was accepted")
+	}
+}
+
 func hostTUIFixture(t *testing.T) HostTUIConfig {
 	t.Helper()
 	root := t.TempDir()

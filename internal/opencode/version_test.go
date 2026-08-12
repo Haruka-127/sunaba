@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCompareVersion(t *testing.T) {
@@ -86,5 +88,53 @@ func TestDirectHTTPClientBypassesProxy(t *testing.T) {
 
 	if _, err := GetHealth(context.Background(), server.URL, "secret"); err != nil {
 		t.Fatalf("direct health request used host proxy: %v", err)
+	}
+}
+
+func TestWaitHealthRetriesWithoutMultiSecondPollingDelay(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(response, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = response.Write([]byte(`{"version":"1.18.16"}`))
+	}))
+	defer server.Close()
+
+	started := time.Now()
+	health, err := WaitHealth(context.Background(), server.URL, "secret", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.Version != "1.18.16" || requests.Load() < 2 {
+		t.Fatalf("health=%+v requests=%d", health, requests.Load())
+	}
+	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+		t.Fatalf("health retry took %s; local readiness polling regressed", elapsed)
+	}
+}
+
+func TestWaitHealthBoundsAStalledStartupProbe(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if requests.Add(1) == 1 {
+			<-request.Context().Done()
+			return
+		}
+		_, _ = response.Write([]byte(`{"version":"1.18.16"}`))
+	}))
+	defer server.Close()
+
+	started := time.Now()
+	health, err := WaitHealth(context.Background(), server.URL, "secret", 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.Version != "1.18.16" || requests.Load() < 2 {
+		t.Fatalf("health=%+v requests=%d", health, requests.Load())
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("stalled readiness probe consumed %s", elapsed)
 	}
 }

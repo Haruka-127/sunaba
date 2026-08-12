@@ -21,11 +21,76 @@ import (
 type HostTUIConfig struct {
 	Binary                   string
 	ManagedToolDir           string
+	VerifiedExecutable       *VerifiedHostTUIExecutable
 	SessionRoot              string
 	ServerURL                string
 	GuestWorkspace           string
 	Password                 string
 	ExpectedExecutableSHA256 string
+}
+
+// VerifiedHostTUIExecutable is an opaque, short-lived proof that the pinned
+// Host TUI executable passed its digest and version checks. Callers cannot
+// construct one without running VerifyHostTUIExecutable.
+type VerifiedHostTUIExecutable struct {
+	binary         string
+	managedToolDir string
+	info           os.FileInfo
+}
+
+func VerifyHostTUIExecutable(ctx context.Context, managedToolDir, binary, expectedDigest string) (*VerifiedHostTUIExecutable, error) {
+	if !filepath.IsAbs(managedToolDir) || !filepath.IsAbs(binary) {
+		return nil, fmt.Errorf("managed tool directory and OpenCode binary must be absolute")
+	}
+	canonicalTools, err := filepath.EvalSymlinks(managedToolDir)
+	if err != nil {
+		return nil, err
+	}
+	canonicalBinary, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		return nil, err
+	}
+	relativeBinary, err := filepath.Rel(canonicalTools, canonicalBinary)
+	if err != nil || relativeBinary == "." || relativeBinary == ".." || strings.HasPrefix(relativeBinary, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("OpenCode binary must be inside the managed tool directory")
+	}
+	info, err := os.Lstat(canonicalBinary)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return nil, fmt.Errorf("managed OpenCode binary is not executable")
+	}
+	if err := verifyExecutableDigest(canonicalBinary, expectedDigest); err != nil {
+		return nil, err
+	}
+	versionCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(versionCtx, canonicalBinary, "--version").Output()
+	if err != nil {
+		return nil, fmt.Errorf("read managed OpenCode version: %w", err)
+	}
+	if err := validateOpenCodeVersion(string(output)); err != nil {
+		return nil, err
+	}
+	verifiedInfo, err := os.Lstat(canonicalBinary)
+	if err != nil || !sameExecutable(info, verifiedInfo) {
+		return nil, fmt.Errorf("managed OpenCode binary changed during verification")
+	}
+	return &VerifiedHostTUIExecutable{binary: canonicalBinary, managedToolDir: canonicalTools, info: verifiedInfo}, nil
+}
+
+func (v *VerifiedHostTUIExecutable) currentBinary() (string, error) {
+	if v == nil || v.binary == "" || v.managedToolDir == "" || v.info == nil {
+		return "", fmt.Errorf("verified Host TUI executable is missing")
+	}
+	info, err := os.Lstat(v.binary)
+	if err != nil || !sameExecutable(v.info, info) {
+		return "", fmt.Errorf("managed OpenCode binary changed after verification")
+	}
+	return v.binary, nil
+}
+
+func sameExecutable(before, after os.FileInfo) bool {
+	return before != nil && after != nil && os.SameFile(before, after) &&
+		before.Mode() == after.Mode() && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
 }
 
 func BuildHostTUICommand(ctx context.Context, cfg HostTUIConfig, hostEnvironment []string) (*exec.Cmd, error) {
@@ -65,35 +130,15 @@ func validateHostTUIConfig(ctx context.Context, cfg HostTUIConfig) (sessionRoot,
 	if err != nil {
 		return "", "", err
 	}
-	if !filepath.IsAbs(cfg.ManagedToolDir) || !filepath.IsAbs(cfg.Binary) {
-		return "", "", fmt.Errorf("managed tool directory and OpenCode binary must be absolute")
+	verified := cfg.VerifiedExecutable
+	if verified == nil {
+		verified, err = VerifyHostTUIExecutable(ctx, cfg.ManagedToolDir, cfg.Binary, cfg.ExpectedExecutableSHA256)
+		if err != nil {
+			return "", "", err
+		}
 	}
-	managedToolDir, err := filepath.EvalSymlinks(cfg.ManagedToolDir)
+	binary, err = verified.currentBinary()
 	if err != nil {
-		return "", "", err
-	}
-	binary, err = filepath.EvalSymlinks(cfg.Binary)
-	if err != nil {
-		return "", "", err
-	}
-	relativeBinary, err := filepath.Rel(managedToolDir, binary)
-	if err != nil || relativeBinary == "." || relativeBinary == ".." || strings.HasPrefix(relativeBinary, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("OpenCode binary must be inside the managed tool directory")
-	}
-	info, err = os.Lstat(binary)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
-		return "", "", fmt.Errorf("managed OpenCode binary is not executable")
-	}
-	if err := verifyExecutableDigest(binary, cfg.ExpectedExecutableSHA256); err != nil {
-		return "", "", err
-	}
-	versionCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(versionCtx, binary, "--version").Output()
-	if err != nil {
-		return "", "", fmt.Errorf("read managed OpenCode version: %w", err)
-	}
-	if err := validateOpenCodeVersion(string(output)); err != nil {
 		return "", "", err
 	}
 	parsedURL, err := url.Parse(cfg.ServerURL)

@@ -165,8 +165,15 @@ func (r *AppleContainer) Start(ctx context.Context, name string) error {
 func (r *AppleContainer) Stop(ctx context.Context, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
-	_, err := r.output(ctx, "container", "stop", name)
+	_, err := r.output(ctx, "container", stopArgs(name)...)
 	return err
+}
+
+func stopArgs(name string) []string {
+	// Agent channels and capabilities are revoked before this call. Keep a
+	// bounded SIGTERM grace period without paying Apple Container's five-second
+	// default on every interactive pause.
+	return []string{"stop", "--time", "1", name}
 }
 
 func (r *AppleContainer) Remove(ctx context.Context, name string) error {

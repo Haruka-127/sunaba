@@ -307,6 +307,8 @@ Host TUIは利便性のためホストで動かすため、固定・検証され
 
 OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能である。したがって秘密としてではなく、範囲と寿命を限定したcapabilityとして扱う。
 
+起動待ちを抑えるため、固定Host TUIのdigest/version検証はVM再開と並列に実行してよい。ただし検証済み実行ファイルのidentityをTUI起動直前に再確認し、検証後の置換や変更を拒否する。Local Attach Relay経由のhealth確認は短いbounded backoffで行い、複数秒固定のpoll間隔を設けない。並列化やpoll短縮を理由に、VM identity、network、resource limit、Host TUI digest/version、server health/versionの検証を省略しない。
+
 ### 8.3 継続利用
 
 - 同じProjectの次回セッションは、原則として同じVMとupperを再利用する。
@@ -322,6 +324,8 @@ OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能で�
 4. devモードでは直接外向き通信を無効化するか、無効化を確認してからVMを停止する。
 5. セッション後のバックグラウンドプロセスによるGateway操作を拒否し、直接インターネットへも到達できないことを保証する。
 6. Project lockを解放する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。
+
+secureモードではattach閉鎖とcapability失効を先に完了してから、Apple ContainerへSIGTERMを送り1秒のbounded graceで停止し、停止状態を再確認する。既定の長いgraceを対話終了ごとに待たない一方、通常停止を省略して直接killする経路には変更しない。
 
 Agent Sessionの正常系とfail-closed経路は次のとおりである。
 
@@ -1099,6 +1103,7 @@ sunaba git remote add/remove/list named fixed HTTPS remoteの構成
 - Agent VM内ではOpenCodeとshellを通常どおり使える。
 - secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後にVMを停止して返す。返却時はLocal Attach Relay、Gateway gate、永続leaseがinactiveであり、一般session channelは到達不能である。
 - secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway gate、leaseをinactiveへして同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineでも同じfail-closed pauseを行う。期限内の再実行は同じVM/upperをresumeするが、TTL到達後はresumeせずexportまたはrecreateを要求する。`changes export`またはdestroyでcapability、listener、credentialを最終失効する。
+- VM再開時はtmpfsであるguestの`/run/sunaba`が空になることを前提とし、relay、provider設定、session capabilityをHost上のsession memoryから再生成してからserverを起動する。session capabilityをVMの永続root filesystemへ退避せず、copyに使うmode 0700のHost runtime内一時fileは成功・失敗を問わず直後に削除する。
 - devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。background supervisorへdirect egressを残さない。
 - `sunaba shell`はraw execや未検証PTYではなく、bounded line commandの全出力をhost terminal sanitizerへ通す。
 - Model Gatewayの存在を会話やツール選択で意識する必要はない。

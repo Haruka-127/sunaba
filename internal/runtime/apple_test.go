@@ -53,6 +53,13 @@ func TestCreateArgsForSecureSocketOnlyContainer(t *testing.T) {
 	}
 }
 
+func TestStopArgsUseBoundedGracePeriod(t *testing.T) {
+	want := []string{"stop", "--time", "1", "sunaba-test-project"}
+	if got := stopArgs("sunaba-test-project"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stopArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestParseInspectLabels(t *testing.T) {
 	info, err := parseInspect(`{
 		"configuration": {"labels": {"dev.sunaba.test": "run-1"}},

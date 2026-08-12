@@ -102,6 +102,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	defer upstream.Close()
 	auditErrors := make(chan error, 16)
 	newConfig := func(sessionID string) session.Config {
+		lastEventAt := time.Now()
 		modelToken, err := session.NewSecret()
 		if err != nil {
 			t.Fatal(err)
@@ -145,21 +146,32 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		measuredRuntime := &timedRuntime{Runtime: sunabaruntime.NewAppleContainer(false), t: t}
 		return session.Config{
-			Store: &state.Store{Root: filepath.Join(runtimeBase, "state")}, Runtime: sunabaruntime.NewAppleContainer(false),
+			Store: &state.Store{Root: filepath.Join(runtimeBase, "state")}, Runtime: measuredRuntime,
 			ProjectRoot: projectRoot, RuntimeBase: runtimeBase, SessionID: sessionID,
 			Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", GuestRelayBinary: relay,
 			DiskBytes: 128 << 20, ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
 			ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken, ServerPassword: password,
 			LeaseTTL: 3 * time.Minute, Audit: auditRecorder,
-			OnEvent: func(session.Event) {},
+			OnEvent: func(event session.Event) {
+				now := time.Now()
+				t.Logf("session event %s (+%s)", event.Type, now.Sub(lastEventAt))
+				lastEventAt = now
+			},
 		}
 	}
 
 	first := newConfig(firstSessionID)
+	startBegan := time.Now()
 	active, err := session.Start(ctx, first)
 	if err != nil {
 		t.Fatal(err)
+	}
+	startupElapsed := time.Since(startBegan)
+	t.Logf("secure session startup: %s", startupElapsed)
+	if startupElapsed >= 8*time.Second {
+		t.Fatalf("secure session startup latency regressed: %s", startupElapsed)
 	}
 	defer active.Destroy(context.Background())
 	if out, err := first.Runtime.ExecOutput(ctx, active.Container, []string{"/bin/bash", "-lc", "runuser -u sunaba-agent -- /bin/bash -lc 'ulimit -u 513'"}); err == nil {
@@ -170,8 +182,14 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		t.Fatalf("bounded workspace disk did not reject over-limit write: %v: %s", err, out)
 	}
 	prePauseURL := active.AttachURL
+	pauseBegan := time.Now()
 	if err := active.Pause(ctx); err != nil {
 		t.Fatal(err)
+	}
+	pauseElapsed := time.Since(pauseBegan)
+	t.Logf("secure session pause: %s", pauseElapsed)
+	if pauseElapsed >= 3*time.Second {
+		t.Fatalf("secure session pause latency regressed: %s", pauseElapsed)
 	}
 	pausedRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, prePauseURL+"/global/health", nil)
 	pausedRequest.SetBasicAuth("opencode", first.ServerPassword)
@@ -193,8 +211,14 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	if pausedModelResponse.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("paused Model Gateway status=%d", pausedModelResponse.StatusCode)
 	}
+	resumeBegan := time.Now()
 	if err := active.Resume(ctx); err != nil {
 		t.Fatal(err)
+	}
+	resumeElapsed := time.Since(resumeBegan)
+	t.Logf("secure session resume: %s", resumeElapsed)
+	if resumeElapsed >= 8*time.Second {
+		t.Fatalf("secure session resume latency regressed: %s", resumeElapsed)
 	}
 	message := exerciseOpenCodeResponses(t, ctx, filepath.Join(active.Root, "attach.sock"), first.ServerPassword, modelID)
 	if !strings.Contains(message, "phase1 tool complete") {
@@ -322,6 +346,57 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		t.Fatalf("Model Gateway audit append failed: %v", err)
 	default:
 	}
+}
+
+type timedRuntime struct {
+	sunabaruntime.Runtime
+	t *testing.T
+}
+
+func (r *timedRuntime) CreateSecure(ctx context.Context, spec sunabaruntime.ContainerSpec, policy sunabaruntime.SecureSessionPolicy) error {
+	started := time.Now()
+	err := r.Runtime.CreateSecure(ctx, spec, policy)
+	r.t.Logf("runtime create secure: %s", time.Since(started))
+	return err
+}
+
+func (r *timedRuntime) Start(ctx context.Context, name string) error {
+	started := time.Now()
+	err := r.Runtime.Start(ctx, name)
+	r.t.Logf("runtime start: %s", time.Since(started))
+	return err
+}
+
+func (r *timedRuntime) Stop(ctx context.Context, name string) error {
+	started := time.Now()
+	err := r.Runtime.Stop(ctx, name)
+	r.t.Logf("runtime stop: %s", time.Since(started))
+	return err
+}
+
+func (r *timedRuntime) Exec(ctx context.Context, name string, interactive bool, command []string) error {
+	started := time.Now()
+	err := r.Runtime.Exec(ctx, name, interactive, command)
+	r.t.Logf("runtime exec %q: %s", strings.Join(command, " "), time.Since(started))
+	return err
+}
+
+func (r *timedRuntime) ExecOutput(ctx context.Context, name string, command []string) (string, error) {
+	started := time.Now()
+	out, err := r.Runtime.ExecOutput(ctx, name, command)
+	description := strings.Join(command, " ")
+	if len(description) > 80 {
+		description = description[:80]
+	}
+	r.t.Logf("runtime exec-output %q: %s", description, time.Since(started))
+	return out, err
+}
+
+func (r *timedRuntime) CopyTo(ctx context.Context, name, source, target string) error {
+	started := time.Now()
+	err := r.Runtime.CopyTo(ctx, name, source, target)
+	r.t.Logf("runtime copy %s: %s", target, time.Since(started))
+	return err
 }
 
 func writeResponsesFunctionCallStream(w http.ResponseWriter, modelID, name, arguments string) {

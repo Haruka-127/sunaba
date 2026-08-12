@@ -82,6 +82,11 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if err := s.Resume(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	for _, target := range []string{"/run/sunaba/guest-relay", "/run/sunaba/opencode.json", "/run/sunaba/session.env", "/run/sunaba/shell-wrapper"} {
+		if fake.copyCount[target] != 2 {
+			t.Fatalf("resume did not restore ephemeral guest input %s: copies=%d", target, fake.copyCount[target])
+		}
+	}
 	if fake.state != runtime.StateRunning {
 		t.Fatalf("resumed state=%s", fake.state)
 	}
@@ -553,6 +558,7 @@ type fakeRuntime struct {
 	server     *http.Server
 	removed    bool
 	copies     map[string][]byte
+	copyCount  map[string]int
 	commands   []string
 	startHook  func()
 	startError error
@@ -637,7 +643,11 @@ func (f *fakeRuntime) CopyTo(_ context.Context, _ string, source, target string)
 	if f.copies == nil {
 		f.copies = make(map[string][]byte)
 	}
+	if f.copyCount == nil {
+		f.copyCount = make(map[string]int)
+	}
 	f.copies[target] = append([]byte(nil), data...)
+	f.copyCount[target]++
 	return nil
 }
 func (f *fakeRuntime) Export(context.Context, string, string) error {

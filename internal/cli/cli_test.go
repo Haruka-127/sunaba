@@ -62,6 +62,30 @@ func TestGuestRelayRequiresLinuxAArch64ELF(t *testing.T) {
 	}
 }
 
+func TestInstallManagedOpenCodeRepairsInvalidManagedCopyFromPinnedSource(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source-opencode")
+	destination := filepath.Join(root, "opencode")
+	script := []byte("#!/bin/sh\nprintf '1.18.16\\n'\n")
+	if err := os.WriteFile(source, script, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("tampered"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := installManagedOpenCode(source, destination, digest, "1.18.16"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil || string(got) != string(script) {
+		t.Fatalf("managed copy=%q error=%v", got, err)
+	}
+}
+
 func TestHostGitAuthorizationUsesOnlyNonInteractiveCredentialHelper(t *testing.T) {
 	bin := t.TempDir()
 	git := filepath.Join(bin, "git")

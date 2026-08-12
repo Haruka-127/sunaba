@@ -510,6 +510,12 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 	} else if current != runtime.StateRunning {
 		return fmt.Errorf("paused session VM is not resumable: state=%s", current)
 	}
+	// /run is guest tmpfs and is empty after a real VM stop/start. Recreate
+	// session inputs from the in-memory Config instead of persisting secrets in
+	// the container root filesystem.
+	if err := s.restoreGuestRuntimeInputs(ctx); err != nil {
+		return err
+	}
 	if err := s.resumeGuest(ctx); err != nil {
 		return err
 	}
@@ -579,57 +585,11 @@ func (s *Session) resumeGuest(ctx context.Context) error {
 }
 
 func (s *Session) configureGuest(ctx context.Context) error {
-	if err := s.cfg.Runtime.Exec(ctx, s.Container, false, []string{"mkdir", "-p", "/var/lib/sunaba", "/run/sunaba"}); err != nil {
+	if err := s.restoreGuestRuntimeInputs(ctx); err != nil {
 		return err
 	}
-	providerPath := filepath.Join(s.Root, "opencode.json")
-	if err := os.WriteFile(providerPath, s.cfg.ProviderConfig, 0600); err != nil {
+	if err := s.cfg.Runtime.CopyTo(ctx, s.Container, s.SnapshotRoot, "/var/lib/sunaba/lower"); err != nil {
 		return err
-	}
-	envPath := filepath.Join(s.Root, "session.env")
-	environment := "OPENCODE_SERVER_PASSWORD=" + s.cfg.ServerPassword + "\nSUNABA_MODEL_GATEWAY_TOKEN=" + s.cfg.ModelToken + "\n"
-	if s.cfg.GitGateway != nil {
-		for index, remote := range s.cfg.GitRemotes {
-			environment += fmt.Sprintf("SUNABA_GIT_GATEWAY_TOKEN_%d=%s\n", index, remote.Token)
-		}
-	}
-	if s.cfg.WebGateway != nil {
-		environment += "SUNABA_WEB_GATEWAY_TOKEN=" + s.cfg.WebToken + "\n"
-	}
-	if err := os.WriteFile(envPath, []byte(environment), 0600); err != nil {
-		return err
-	}
-	shellWrapperPath := filepath.Join(s.Root, "shell-wrapper")
-	if err := os.WriteFile(shellWrapperPath, []byte(s.guestShellWrapper()), 0600); err != nil {
-		return err
-	}
-	copies := [][2]string{
-		{s.SnapshotRoot, "/var/lib/sunaba/lower"},
-		{s.cfg.GuestRelayBinary, "/run/sunaba/guest-relay"},
-		{providerPath, "/run/sunaba/opencode.json"},
-		{envPath, "/run/sunaba/session.env"},
-		{shellWrapperPath, "/run/sunaba/shell-wrapper"},
-	}
-	ephemeralHostFiles := []string{providerPath, envPath, shellWrapperPath}
-	if s.cfg.WebGateway != nil {
-		aptConfigPath := filepath.Join(s.Root, "apt-proxy.conf")
-		proxyURL := "http://sunaba:" + s.cfg.WebToken + "@127.0.0.1:4343"
-		aptConfig := "Acquire::http::Proxy \"" + proxyURL + "\";\nAcquire::https::Proxy \"" + proxyURL + "\";\nAcquire::Retries \"0\";\n"
-		if err := os.WriteFile(aptConfigPath, []byte(aptConfig), 0600); err != nil {
-			return err
-		}
-		copies = append(copies, [2]string{aptConfigPath, "/run/sunaba/apt-proxy.conf"})
-		ephemeralHostFiles = append(ephemeralHostFiles, aptConfigPath)
-	}
-	for _, copy := range copies {
-		if err := s.cfg.Runtime.CopyTo(ctx, s.Container, copy[0], copy[1]); err != nil {
-			return err
-		}
-	}
-	for _, path := range ephemeralHostFiles {
-		if err := os.Remove(path); err != nil {
-			return fmt.Errorf("remove copied host session input: %w", err)
-		}
 	}
 	commands := []string{
 		"set -eu",
@@ -675,6 +635,63 @@ func (s *Session) configureGuest(ctx context.Context) error {
 	setup := strings.Join(commands, "\n")
 	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", setup}); err != nil {
 		return fmt.Errorf("configure secure guest: %w: %s", err, out)
+	}
+	return nil
+}
+
+func (s *Session) restoreGuestRuntimeInputs(ctx context.Context) (err error) {
+	if err := s.cfg.Runtime.Exec(ctx, s.Container, false, []string{"mkdir", "-p", "/var/lib/sunaba", "/run/sunaba"}); err != nil {
+		return fmt.Errorf("prepare guest runtime directory: %w", err)
+	}
+	providerPath := filepath.Join(s.Root, "opencode.json")
+	envPath := filepath.Join(s.Root, "session.env")
+	shellWrapperPath := filepath.Join(s.Root, "shell-wrapper")
+	ephemeralHostFiles := []string{providerPath, envPath, shellWrapperPath}
+	defer func() {
+		for _, path := range ephemeralHostFiles {
+			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("remove copied host session input: %w", removeErr))
+			}
+		}
+	}()
+	if err := os.WriteFile(providerPath, s.cfg.ProviderConfig, 0600); err != nil {
+		return err
+	}
+	environment := "OPENCODE_SERVER_PASSWORD=" + s.cfg.ServerPassword + "\nSUNABA_MODEL_GATEWAY_TOKEN=" + s.cfg.ModelToken + "\n"
+	if s.cfg.GitGateway != nil {
+		for index, remote := range s.cfg.GitRemotes {
+			environment += fmt.Sprintf("SUNABA_GIT_GATEWAY_TOKEN_%d=%s\n", index, remote.Token)
+		}
+	}
+	if s.cfg.WebGateway != nil {
+		environment += "SUNABA_WEB_GATEWAY_TOKEN=" + s.cfg.WebToken + "\n"
+	}
+	if err := os.WriteFile(envPath, []byte(environment), 0600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(shellWrapperPath, []byte(s.guestShellWrapper()), 0600); err != nil {
+		return err
+	}
+	copies := [][2]string{
+		{s.cfg.GuestRelayBinary, "/run/sunaba/guest-relay"},
+		{providerPath, "/run/sunaba/opencode.json"},
+		{envPath, "/run/sunaba/session.env"},
+		{shellWrapperPath, "/run/sunaba/shell-wrapper"},
+	}
+	if s.cfg.WebGateway != nil {
+		aptConfigPath := filepath.Join(s.Root, "apt-proxy.conf")
+		ephemeralHostFiles = append(ephemeralHostFiles, aptConfigPath)
+		proxyURL := "http://sunaba:" + s.cfg.WebToken + "@127.0.0.1:4343"
+		aptConfig := "Acquire::http::Proxy \"" + proxyURL + "\";\nAcquire::https::Proxy \"" + proxyURL + "\";\nAcquire::Retries \"0\";\n"
+		if err := os.WriteFile(aptConfigPath, []byte(aptConfig), 0600); err != nil {
+			return err
+		}
+		copies = append(copies, [2]string{aptConfigPath, "/run/sunaba/apt-proxy.conf"})
+	}
+	for _, copy := range copies {
+		if err := s.cfg.Runtime.CopyTo(ctx, s.Container, copy[0], copy[1]); err != nil {
+			return err
+		}
 	}
 	return nil
 }

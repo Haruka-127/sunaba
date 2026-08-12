@@ -278,9 +278,11 @@ func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {
 
 func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (returnErr error) {
 	fmt.Fprintln(a.errors, "WARNING: dev mode permits direct Internet egress only while this foreground Agent Session is active; exfiltration prevention is not provided.")
+	managedOpenCode := a.prepareManagedOpenCodeAsync(ctx)
 	managed, err := a.startManagedSession(ctx, projectPolicy, projectState)
 	if err != nil {
-		return err
+		prepared := <-managedOpenCode
+		return errors.Join(err, prepared.err)
 	}
 	destroyed := false
 	defer func() {
@@ -300,12 +302,13 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, control.Close()) }()
-	managedDir, hostOpenCode, err := a.prepareManagedOpenCode(ctx)
-	if err != nil {
-		return err
+	prepared := <-managedOpenCode
+	if prepared.err != nil {
+		return prepared.err
 	}
 	tui, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
-		Binary: hostOpenCode, ManagedToolDir: managedDir, SessionRoot: managed.active.Root, ServerURL: managed.active.AttachURL,
+		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
+		SessionRoot: managed.active.Root, ServerURL: managed.active.AttachURL,
 		GuestWorkspace: managed.active.WorkspacePath, Password: managed.serverPassword,
 		ExpectedExecutableSHA256: dependency.MustPinned().OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())

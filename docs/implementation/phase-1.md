@@ -29,6 +29,18 @@ Model Gatewayは期限、request回数、並行数、request/response size、Pro
 
 Codex OAuth経路ではCLIProxyAPIのCodex Responses変換に合わせ、subscription backendが受理しない`max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`を上流転送前に除去する。この変換はOAuth経路だけに適用し、OpenAI API key経路ではResponses APIの同フィールドをそのまま転送する。
 
+## 対話起動latency
+
+secure VMの停止、capability失効、固定OpenCodeのdigest/version検証、server health/version検証、resource probeは維持したまま、対話経路の固定待ちを削減した。
+
+- OpenCode healthは最初に即時確認し、失敗時だけ25 msから最大100 msまでのbounded backoffで再確認する。個々のreadiness probeは200 msで打ち切り、guest relayがbackend起動前の接続を保持しても全体の60秒deadlineを消費させない。従来の2秒固定pollと10秒の単一probe待ちを廃止した。
+- Host TUIのdigestと`--version`検証をVM再開と並列化する。検証結果は外部から構築できない短命identityとして渡し、command生成直前にinode、mode、size、mtimeが変わっていないことを再確認する。管理copyが正常ならPATH上の別copyをhashしない。
+- 実際のVM停止・再開で空になるguest tmpfsの`/run/sunaba`は、Host memory内のsession設定から再生成する。capabilityを永続VMへ保存せず、mode 0700のruntime内一時fileをcopy成否にかかわらず直後に削除する。
+- TUI終了時はattachとcapabilityを先に失効し、`container stop --time 1`で通常のSIGTERM停止を行った後、stopped状態を再確認する。Apple Container既定の5秒graceを対話終了ごとに待たない。
+- Phase 1実機gateはstartup、pause、resumeと主要runtime操作の所要時間を個別に出力し、8秒、3秒、8秒の上限で固定待ちの再混入を拒否する。
+
+2026-08-12の固定環境（Apple Container 1.2.2、`sunaba-base:1.18.16-secure.1`、OpenCode 1.18.16）では、同じvertical sliceで初回startup 2.46秒、pause 1.24秒、resume 1.74秒を記録した。VM create/start自体は0.87秒/0.39秒であり、従来約12秒の主因はVMではなく最初のhealth probeが10秒timeoutまで保持されることだった。
+
 ## 実機証跡
 
 2026-08-11にApple Container 1.2.2、`sunaba-base:1.18.16-secure.1`、OpenCode 1.18.16で次を一続きに確認した。

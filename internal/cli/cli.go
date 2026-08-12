@@ -43,6 +43,13 @@ type app struct {
 	errors  io.Writer
 }
 
+type managedOpenCodeResult struct {
+	dir      string
+	binary   string
+	verified *opencode.VerifiedHostTUIExecutable
+	err      error
+}
+
 func Run(ctx context.Context, args []string) error {
 	verbose := false
 	filtered := make([]string, 0, len(args))
@@ -314,12 +321,14 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 		defer cancel()
 		return errors.Join(fmt.Errorf("Agent Session capability expired; export or recreate the stopped VM"), client.operation(pauseContext, "pause"))
 	}
+	managedOpenCode := a.prepareManagedOpenCodeAsync(ctx)
 	if info.State == "paused" {
 		resumeContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		err = client.operation(resumeContext, "resume")
 		cancel()
 		if err != nil {
-			return err
+			prepared := <-managedOpenCode
+			return errors.Join(err, prepared.err)
 		}
 		info, err = client.info(ctx)
 		if err != nil {
@@ -327,16 +336,18 @@ func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
 		}
 	}
 	if info.State != "running" {
-		return fmt.Errorf("active supervisor is in non-runnable state %s; export or recreate it", info.State)
+		prepared := <-managedOpenCode
+		return errors.Join(fmt.Errorf("active supervisor is in non-runnable state %s; export or recreate it", info.State), prepared.err)
 	}
-	managedDir, hostOpenCode, err := a.prepareManagedOpenCode(ctx)
-	if err != nil {
+	prepared := <-managedOpenCode
+	if prepared.err != nil {
 		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		return errors.Join(err, client.operation(pauseContext, "pause"))
+		return errors.Join(prepared.err, client.operation(pauseContext, "pause"))
 	}
 	tui, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
-		Binary: hostOpenCode, ManagedToolDir: managedDir, SessionRoot: info.RuntimeRoot, ServerURL: info.AttachURL,
+		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
+		SessionRoot: info.RuntimeRoot, ServerURL: info.AttachURL,
 		GuestWorkspace: info.WorkspacePath, Password: info.ServerPassword,
 		ExpectedExecutableSHA256: dependency.MustPinned().OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
@@ -898,66 +909,85 @@ func (a *app) cleanupOrphans(ctx context.Context) error {
 	return nil
 }
 
-func (a *app) prepareManagedOpenCode(ctx context.Context) (string, string, error) {
+func (a *app) prepareManagedOpenCode(ctx context.Context) (string, string, *opencode.VerifiedHostTUIExecutable, error) {
+	pinned := dependency.MustPinned()
+	managedDir := filepath.Join(a.store.Root, "tools", "opencode", "v"+dependency.OpenCodeVersion)
+	if err := os.MkdirAll(managedDir, 0700); err != nil {
+		return "", "", nil, err
+	}
+	destination := filepath.Join(managedDir, "opencode")
+	verified, verifyErr := opencode.VerifyHostTUIExecutable(ctx, managedDir, destination, pinned.OpenCode.Host.ExecutableSHA256)
+	if verifyErr == nil {
+		return managedDir, destination, verified, nil
+	}
+	if ctx.Err() != nil {
+		return "", "", nil, ctx.Err()
+	}
 	source, err := exec.LookPath("opencode")
 	if err != nil {
-		return "", "", err
+		return "", "", nil, errors.Join(verifyErr, err)
 	}
 	source, err = filepath.Abs(source)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, errors.Join(verifyErr, err)
 	}
+	if err := installManagedOpenCode(source, destination, pinned.OpenCode.Host.ExecutableSHA256, dependency.OpenCodeVersion); err != nil {
+		return "", "", nil, errors.Join(verifyErr, err)
+	}
+	verified, err = opencode.VerifyHostTUIExecutable(ctx, managedDir, destination, pinned.OpenCode.Host.ExecutableSHA256)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return managedDir, destination, verified, nil
+}
+
+func (a *app) prepareManagedOpenCodeAsync(ctx context.Context) <-chan managedOpenCodeResult {
+	result := make(chan managedOpenCodeResult, 1)
+	go func() {
+		dir, binary, verified, err := a.prepareManagedOpenCode(ctx)
+		result <- managedOpenCodeResult{dir: dir, binary: binary, verified: verified, err: err}
+	}()
+	return result
+}
+
+func installManagedOpenCode(source, destination, expectedDigest, expectedVersion string) error {
 	digest, err := fileSHA256(source)
 	if err != nil {
-		return "", "", err
+		return err
 	}
-	pinned := dependency.MustPinned()
-	if digest != pinned.OpenCode.Host.ExecutableSHA256 {
-		return "", "", fmt.Errorf("host OpenCode executable digest does not match the pinned v%s artifact", dependency.OpenCodeVersion)
-	}
-	managedDir := filepath.Join(a.store.Root, "tools", "opencode", "v"+dependency.OpenCodeVersion)
-	if err := os.MkdirAll(managedDir, 0700); err != nil {
-		return "", "", err
-	}
-	destination := filepath.Join(managedDir, "opencode")
-	if current, err := fileSHA256(destination); err == nil && current == digest {
-		return managedDir, destination, nil
+	if digest != expectedDigest {
+		return fmt.Errorf("host OpenCode executable digest does not match the pinned v%s artifact", expectedVersion)
 	}
 	input, err := os.Open(source)
 	if err != nil {
-		return "", "", err
+		return err
 	}
 	defer input.Close()
-	temporary, err := os.CreateTemp(managedDir, ".sunaba-opencode-*")
+	temporary, err := os.CreateTemp(filepath.Dir(destination), ".sunaba-opencode-*")
 	if err != nil {
-		return "", "", err
+		return err
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if _, err := io.Copy(temporary, input); err != nil {
 		temporary.Close()
-		return "", "", err
+		return err
 	}
 	if err := temporary.Chmod(0700); err != nil {
 		temporary.Close()
-		return "", "", err
+		return err
 	}
 	if err := temporary.Sync(); err != nil {
 		temporary.Close()
-		return "", "", err
+		return err
 	}
 	if err := temporary.Close(); err != nil {
-		return "", "", err
+		return err
 	}
 	if err := os.Rename(temporaryPath, destination); err != nil {
-		return "", "", err
+		return err
 	}
-	versionContext, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(versionContext, destination, "--version").Output(); err != nil || strings.TrimSpace(string(out)) != dependency.OpenCodeVersion {
-		return "", "", fmt.Errorf("managed Host TUI version verification failed")
-	}
-	return managedDir, destination, nil
+	return nil
 }
 
 func siblingExecutable(name string) (string, error) {
