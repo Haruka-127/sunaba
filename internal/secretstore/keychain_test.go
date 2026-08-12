@@ -3,6 +3,7 @@ package secretstore
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,36 @@ func TestInteractiveStoreKeepsSecretOutOfArguments(t *testing.T) {
 	got, _ := os.ReadFile(arguments)
 	if strings.Contains(string(got), "host-key") || !strings.HasSuffix(strings.TrimSpace(string(got)), "-w") {
 		t.Fatalf("unsafe add arguments=%q", got)
+	}
+}
+
+func TestCodexOAuthStoreUsesFixedAccountAndStdin(t *testing.T) {
+	root := t.TempDir()
+	arguments := filepath.Join(root, "arguments")
+	stdin := filepath.Join(root, "stdin")
+	fake := filepath.Join(root, "security")
+	script := "#!/bin/sh\nif test \"$1\" = login-keychain; then printf '\"%s\"\\n' \"$SUNABA_TEST_KEYCHAIN\"; exit; fi\nprintf '%s\\n' \"$*\" > \"$SUNABA_TEST_ARGUMENTS\"\n/bin/cat > \"$SUNABA_TEST_STDIN\"\n"
+	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	previous := commandPath
+	commandPath = fake
+	t.Cleanup(func() { commandPath = previous })
+	t.Setenv("SUNABA_TEST_ARGUMENTS", arguments)
+	t.Setenv("SUNABA_TEST_STDIN", stdin)
+	t.Setenv("SUNABA_TEST_KEYCHAIN", filepath.Join(root, "login.keychain-db"))
+	credential := CodexOAuthCredential{AccessToken: "access-token", RefreshToken: "refresh-token", IDToken: "identity-token", AccountID: "account-id", ExpiresAt: 1_800_000_000}
+	if err := StoreCodexOAuth(context.Background(), credential); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := os.ReadFile(arguments)
+	secret, _ := os.ReadFile(stdin)
+	if strings.Contains(string(args), "access-token") || !strings.Contains(string(args), "-a "+CodexOAuthAccount) || !strings.HasSuffix(strings.TrimSpace(string(args)), "-w") {
+		t.Fatalf("unsafe OAuth Keychain arguments=%q", args)
+	}
+	var stored CodexOAuthCredential
+	if json.Unmarshal(secret, &stored) != nil || stored != credential {
+		t.Fatalf("stored OAuth credential=%q", secret)
 	}
 }
 

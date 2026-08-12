@@ -575,7 +575,7 @@ flowchart TB
 
 | Gateway | 主目的 | ホスト側で守るもの | 初期状態 |
 |---|---|---|---|
-| Model Gateway | OpenCodeからLLMを利用 | 実APIキー、provider/model、利用量 | 最初に実装 |
+| Model Gateway | OpenCodeからLLMを利用 | 実API key/OAuth token、provider/model、利用量 | 最初に実装 |
 | Git Gateway | 標準Git操作をremoteへ中継 | Git token/SSH鍵、push承認 | Model後に実装 |
 | Web Gateway | Web検索・取得・package readを明示proxyで仲介 | origin、解決後IP、quota、既知危険先 | HTTPS tunnel内部のmethod/uploadは非保証 |
 
@@ -631,7 +631,7 @@ OpenCodeはv1系の最新stable releaseを互換試験後に固定して使う�
 
 ### 12.2 OpenCode serverとHost TUI
 
-Agent VMでは`opencode serve`をmerged workspaceで動かす。Projectの`opencode.json`、`.opencode/`、plugin、hook、MCP、AGENTS.md等はVM内serverだけが読み込み、VM内で自由に実行できる。serverは`OPENCODE_DISABLE_AUTOUPDATE=1`と`OPENCODE_DISABLE_MODELS_FETCH=1`を設定する。model metadata、context/output上限、capability、variantは固定OpenCode artifactに組み込まれたmodel catalogを使い、sunabaはmodel metadataを複製しない。secureモードでModels.devやupdate endpointへの直接通信を前提にしない。
+Agent VMでは`opencode serve`をmerged workspaceで動かす。Projectの`opencode.json`、`.opencode/`、plugin、hook、MCP、AGENTS.md等はVM内serverだけが読み込み、VM内で自由に実行できる。serverは`OPENCODE_DISABLE_AUTOUPDATE=1`と`OPENCODE_DISABLE_MODELS_FETCH=1`を設定する。Model Gateway向けのmodel metadata、context/input/output上限、capabilityは、sunabaが認証方式ごとの固定catalogから生成するcustom provider設定を使う。secureモードでModels.dev、OpenAIのmodel discovery API、update endpointへの直接通信を前提にしない。
 
 Project設定はuntrustedであり、OpenCode v1では`server.hostname`、`server.port`、`server.mdns`、`server.cors`も設定できる。したがって、listen先とmDNSはSupervisorがCLI引数`--hostname`、`--port`、`--mdns=false`で上書きし、CORS設定の有無をnetwork boundaryや認証の根拠にしない。v1.18.16のboolean flagは`--mdns`であり`--no-mdns`は存在しない。Local Attach RelayはOpenCodeのCORS応答とは独立して、許可したTUI接続、HTTP method/path、basic auth、Project/VM channelだけを受け付ける。
 
@@ -657,21 +657,27 @@ Host TUIはTCBに含まれるため、server応答によるcrash、任意file ac
 
 pushとChange Set applyの承認はOpenCode TUIへ表示された文字列やserver eventだけでは成立しない。Supervisorがhost側で生成したnonce、Project、対象digest/object IDをTrusted Approval UIへ表示し、host側の明示操作で確定する。guestは承認requestを開始できるが、承認結果を生成・変更できない。
 
-### 12.3 初期Model provider
+### 12.3 Model providerと認証方式
 
-初期実装では、利用者がホスト側で設定したOpenAI API keyを使い、OpenCodeからCodex系モデルを利用する。ChatGPT/PlusのOAuthやアカウントセッションをMVPの前提にはせず、OpenAI APIの従量課金credentialを対象とする。
+利用者はProject policyで`api_key`または`oauth`を選ぶ。`api_key`はOpenAI APIの従量課金credential、`oauth`はChatGPTのCodex subscription credentialを使う。認証方式はAgent Session開始時にsnapshotし、実行中にguest requestで切り替えない。
 
 LLMアクセスは、エージェントへ公開する明示的なtool callではない。OpenCode runtime自身がprovider通信としてModel Gatewayを呼び、エージェントは通常どおりモデル上で動作する。Agent VMからModel Gatewayのupstream設定や実credentialを参照・変更する経路は設けない。
 
-実APIキーはmacOS login Keychainの固定generic password（service `dev.sunaba.openai`、account `openai-api-key`）からModel Gatewayだけが`/usr/bin/security`の固定queryで読む。login Keychain pathも同じ固定commandから取得し、quoted absolute clean pathとして検証して各item操作へ明示する。登録はKeychain自身の対話promptを使い、secretをargvやenvironmentへ載せない。Agent VMへは次だけを渡す。
+実API keyはmacOS login Keychainの固定generic password（service `dev.sunaba.openai`、account `openai-api-key`）へ保存する。OAuth credentialは同じserviceの固定account `codex-oauth`へ、access token、refresh token、ID token、account ID、有効期限だけをbounded JSONとして保存する。Model Gatewayだけが`/usr/bin/security`の固定queryで選択されたcredentialを読む。login Keychain pathも同じ固定commandから取得し、quoted absolute clean pathとして検証して各item操作へ明示する。API keyの登録はKeychain自身の対話promptを使い、OAuth credentialの保存・更新はsecret JSONを固定`security` processのstdinだけへ渡す。どちらもsecretをargv、environment、Project file、設定、監査へ載せない。
+
+OAuthログインはCodex public clientのdevice authorization flowを使う。sunabaは固定したOpenAI auth endpointへだけ接続し、verification URLとuser codeをterminalへ表示する。ブラウザを自動起動せず、15分以内に得たauthorization codeをPKCE verifierと交換する。token refreshは有効期限直前にホスト側で直列化し、rotated refresh tokenを同じKeychain itemへ原子的に更新する。JWT claimはaccount IDの抽出にだけ使い、sunabaによるtoken検証や認可判断には使わない。upstreamがBearer token自体を検証する。
+
+Agent VMへは次だけを渡す。
 
 - VMから到達できるModel Gatewayのbase URL
 - セッション限定のsunaba gateway token
 - 許可されたprovider/modelを指すOpenCode設定
 
-OpenCode側では組み込みの`openai` providerを使う。sunabaが生成する設定は`enabled_providers`を`openai`へ限定し、`options.baseURL`をModel Gatewayへ向け、`options.apiKey`には環境変数参照の短命gateway tokenを設定する。Project policyの`allowed_models`は`whitelist`として渡すが、`npm`、`models`、modelごとのcontext/output上限は生成しない。これによりモデルの意味とmetadataはOpenCode側に置き、利用可否だけをsunaba policyとGatewayが決める。設定ファイルやOpenCodeのcredential storeへ実OpenAI API keyを書かない。
+OpenCode側ではprovider ID `sunaba`、npm provider `@ai-sdk/openai`のcustom providerを使う。sunabaが生成する設定は`enabled_providers`を`sunaba`へ限定し、`options.baseURL`をModel Gatewayへ向け、`options.apiKey`には環境変数参照の短命gateway tokenを設定する。`models`にはProject policyの`allowed_models`だけを出力し、認証方式ごとの固定catalogからmodel family、reasoning/tool/attachment capability、modalities、context/input/output上限を設定する。API key用とOAuth用の定義は別に持ち、特にOpenCodeのcompaction開始点へ使われるinput上限をsubscriptionの実効上限に合わせる。設定ファイルやOpenCodeのcredential storeへ実upstream credentialを書かない。
 
-Model GatewayはOpenAIへモデル一覧を問い合わせない。セッション開始時の許可集合はProject policyの`allowed_models`をそのままsnapshotし、先頭要素を既定modelとしてOpenCodeへ渡す。固定OpenCode artifactが定義を持たないmodel名はOpenCode側で選択できないため、OpenCode更新時にpolicyのmodel名と組み込みcatalogの整合をintegration testで確認する。
+Model GatewayはOpenAIへモデル一覧を問い合わせない。セッション開始時にProject policyの`allowed_models`が選択した認証方式のsunaba catalogにすべて存在することを検証し、その集合をGatewayとOpenCode設定へsnapshotする。先頭要素を既定modelとする。未知のmodelや別認証方式だけに存在するmodelが1件でもあればfail closedでセッションを開始しない。
+
+`api_key`では`https://api.openai.com/v1/responses`へAPI keyを注入する。`oauth`では`https://chatgpt.com/backend-api/codex/responses`へ有効なaccess token、固定`ChatGPT-Account-Id`、固定`Originator`を注入し、Codex backendが受理しないAPI専用fieldを削除する。OAuthの上流仕様差はGatewayで吸収し、guestへOAuth tokenやaccount IDを返さない。
 
 Project configや侵害済みserverが`baseURL`、provider、modelを変更すること自体は防御境界にしない。secure networkはModel Gateway以外への接続を許さず、Model Gatewayがhost policyのprovider/model allowlistを最終的に強制する。
 
@@ -693,13 +699,13 @@ Project configや侵害済みserverが`baseURL`、provider、modelを変更す�
 
 [`router-for-me/CLIProxyAPI`](https://github.com/router-for-me/CLIProxyAPI)は、OpenAI互換API、Responses API、streaming、tool call、error変換などを理解するための参考実装とする。
 
-MVPでは次を行わない。
+次を行わない。
 
 - CLIProxyAPIをそのまま製品依存として組み込む
 - forkしてsunabaの中核サービスにする
-- OAuth、多数provider、アカウントpool、dashboard、管理API、fallbackを移植する
+- 多数provider、アカウントpool、dashboard、管理API、fallbackを移植する
 
-sunabaが所有する小さなModel Gatewayを実装し、必要な互換性だけをテストで固定する。
+OAuth device flow、token refresh、Codex Responses request/header差分だけを参考にし、sunabaが所有する小さなModel Gatewayとして必要な互換性をテストで固定する。
 
 ---
 
@@ -939,7 +945,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 4. Project/VM専用経路からLocal Attach RelayとModel Gatewayだけへ接続できるようにする。
 5. VM内`opencode serve v1.18.16`へhostの`opencode attach v1.18.16`を接続する。
 6. OpenCode serverがCodex系モデルを使い、VM内workspaceを編集する。
-7. 実OpenAI API keyがVM、Host TUI、Project fileに存在しないことを確認する。
+7. 実OpenAI API keyまたはOAuth token/account IDがVM、Host TUI、Project fileに存在しないことを確認する。
 8. VM内編集ではhost worktreeが変わらないことを確認する。
 9. merged workspaceをsafe extractorでquarantineへexportし、hostがChange Setを生成する。
 10. basic resource limits、session capability失効、host側の最小監査を実装する。
@@ -1029,6 +1035,8 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 ### 20.4 Model Gateway
 
 - OpenCodeからCodex系モデルへResponses互換で接続できる。
+- API keyとCodex OAuthの両方でhost側がcredentialを終端し、認証方式ごとのmodel input上限がOpenCode設定へ反映される。
+- OAuth access token、refresh token、account IDがVM、Host TUI、Project file、監査へ出ない。
 - streaming、tool call、error、cancelが期待どおり動く。
 - VM filesystem、process environment、OpenCode configに実upstream API keyがない。
 - 許可外model、quota超過、期限切れtoken、別VM tokenが拒否される。
@@ -1070,6 +1078,8 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 
 ```text
 sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登録・確認・削除
+sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
+sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
 sunaba project init <path>       Project登録と初期snapshot
 sunaba up [--mode secure|dev]    secure VMを作成してpause、devはforeground session用artifactだけ準備
 sunaba agent                     server、relay、Host TUIを起動してAgent Session開始

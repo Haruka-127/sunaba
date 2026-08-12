@@ -2,6 +2,7 @@ package secretstore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
@@ -13,8 +14,17 @@ import (
 const (
 	OpenAIService      = "dev.sunaba.openai"
 	OpenAIAccount      = "openai-api-key"
-	maximumSecretBytes = 8 << 10
+	CodexOAuthAccount  = "codex-oauth"
+	maximumSecretBytes = 32 << 10
 )
+
+type CodexOAuthCredential struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	IDToken      string `json:"id_token"`
+	AccountID    string `json:"account_id"`
+	ExpiresAt    int64  `json:"expires_at"`
+}
 
 // commandPath is a link-time test seam. Production builds always use the
 // absolute macOS security(1) path and do not accept an environment override.
@@ -79,6 +89,107 @@ func DeleteOpenAIKey(ctx context.Context) error {
 		return fmt.Errorf("delete OpenAI credential from the macOS Keychain: operation failed")
 	}
 	return nil
+}
+
+func LoadCodexOAuth(ctx context.Context) (CodexOAuthCredential, error) {
+	secret, err := loadSecret(ctx, CodexOAuthAccount)
+	if err != nil {
+		return CodexOAuthCredential{}, fmt.Errorf("Codex OAuth credential is unavailable in the macOS Keychain; run 'sunaba credentials openai oauth login'")
+	}
+	var credential CodexOAuthCredential
+	if json.Unmarshal([]byte(secret), &credential) != nil || validateCodexOAuth(credential) != nil {
+		return CodexOAuthCredential{}, fmt.Errorf("Codex OAuth credential in the macOS Keychain is invalid")
+	}
+	return credential, nil
+}
+
+func StoreCodexOAuth(ctx context.Context, credential CodexOAuthCredential) error {
+	if err := validateCodexOAuth(credential); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(credential)
+	if err != nil || len(encoded) > maximumSecretBytes {
+		return fmt.Errorf("Codex OAuth credential is too large")
+	}
+	keychain, err := loginKeychainPath(ctx)
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, commandPath, "add-generic-password", "-U", "-a", CodexOAuthAccount, "-s", OpenAIService, keychain, "-w")
+	command.Stdin = strings.NewReader(string(encoded) + "\n")
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("store Codex OAuth credential in the macOS Keychain: operation failed")
+	}
+	return nil
+}
+
+func CodexOAuthExists(ctx context.Context) error {
+	if err := secretExists(ctx, CodexOAuthAccount); err != nil {
+		return fmt.Errorf("Codex OAuth credential is not configured in the macOS Keychain")
+	}
+	return nil
+}
+
+func DeleteCodexOAuth(ctx context.Context) error {
+	keychain, err := loginKeychainPath(ctx)
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, commandPath, "delete-generic-password", "-a", CodexOAuthAccount, "-s", OpenAIService, keychain)
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("delete Codex OAuth credential from the macOS Keychain: operation failed")
+	}
+	return nil
+}
+
+func validateCodexOAuth(credential CodexOAuthCredential) error {
+	for _, value := range []string{credential.AccessToken, credential.RefreshToken, credential.IDToken, credential.AccountID} {
+		if !validOAuthSecretValue(value) {
+			return fmt.Errorf("Codex OAuth credential is invalid")
+		}
+	}
+	if credential.ExpiresAt <= 0 {
+		return fmt.Errorf("Codex OAuth credential expiry is invalid")
+	}
+	return nil
+}
+
+func validOAuthSecretValue(value string) bool {
+	if len(value) < 8 || len(value) > maximumSecretBytes {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x20 || value[index] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func loadSecret(ctx context.Context, account string) (string, error) {
+	keychain, err := loginKeychainPath(ctx)
+	if err != nil {
+		return "", err
+	}
+	var output boundedWriter
+	command := exec.CommandContext(ctx, commandPath, "find-generic-password", "-a", account, "-s", OpenAIService, "-w", keychain)
+	command.Stdout, command.Stderr = &output, io.Discard
+	if err := command.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(output.String(), "\n"), "\r"), nil
+}
+
+func secretExists(ctx context.Context, account string) error {
+	keychain, err := loginKeychainPath(ctx)
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, commandPath, "find-generic-password", "-a", account, "-s", OpenAIService, keychain)
+	command.Stdout, command.Stderr = io.Discard, io.Discard
+	return command.Run()
 }
 
 func loginKeychainPath(ctx context.Context) (string, error) {

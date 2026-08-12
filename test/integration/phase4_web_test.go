@@ -283,7 +283,7 @@ func TestPhase4WebGatewayInAgentVM(t *testing.T) {
 	desiredTool = "websearch"
 	desiredToolMu.Unlock()
 	searchProfile := "/tmp/sunaba-p4-search"
-	searchCommand := "mkdir -p " + searchProfile + "/home " + searchProfile + "/config " + searchProfile + "/data; exec env HOME=" + searchProfile + "/home XDG_CONFIG_HOME=" + searchProfile + "/config XDG_DATA_HOME=" + searchProfile + "/data OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1 OPENCODE_ENABLE_EXA=1 OPENCODE_WEBSEARCH_PROVIDER=exa NODE_EXTRA_CA_CERTS=/run/sunaba/phase4-ca.pem opencode run --model openai/" + modelID + " 'run websearch once'"
+	searchCommand := "mkdir -p " + searchProfile + "/home " + searchProfile + "/config " + searchProfile + "/data; exec env HOME=" + searchProfile + "/home XDG_CONFIG_HOME=" + searchProfile + "/config XDG_DATA_HOME=" + searchProfile + "/data OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1 OPENCODE_ENABLE_EXA=1 OPENCODE_WEBSEARCH_PROVIDER=exa NODE_EXTRA_CA_CERTS=/run/sunaba/phase4-ca.pem opencode run --model " + opencode.ModelGatewayProviderID + "/" + modelID + " 'run websearch once'"
 	if output, err := runGuest(searchCommand); err != nil || !strings.Contains(output, "phase4 webfetch complete") {
 		t.Fatalf("OpenCode websearch through Web Gateway: %v %q", err, output)
 	}

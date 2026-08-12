@@ -37,12 +37,12 @@ image buildはembedded bytesをmanifestへ再照合してから実行する。ve
 
 ## Project policy migration
 
-Project policy schema v4はProject identity/root、mode、dependency、resource、session、Model/Git/Web、export、audit retention、Protected Pathを一つのdigest可能な文書へ統合し、Git remoteを名前と固定URLの組として保持する。v4ではModel Gatewayの既定quotaとtransport sizeを長時間のagent session向けに更新した。
+Project policy schema v5はProject identity/root、mode、dependency、resource、session、Model/Git/Web、export、audit retention、Protected Pathを一つのdigest可能な文書へ統合し、Git remoteを名前と固定URLの組として保持する。v4でModel Gatewayの既定quotaとtransport sizeを長時間のagent session向けに更新し、v5でModel Gatewayの`api_key`/`oauth`認証方式を追加した。
 
 - JSON unknown field、trailing data、unsupported schemaを拒否
 - canonical rootとProject IDの差し替えを拒否
 - mode `0600` current-user regular fileとmode `0700` canonical parentだけを受理
-- v1/v2/v3からv4へのmigrationをprivate temporary file + fsync + atomic renameで行う。v2のGit URL配列はnamed remoteへ変換し、v3のModel Gateway値は旧既定値と完全一致する場合だけ新既定値へ更新する
+- v1/v2/v3/v4からv5へのmigrationをprivate temporary file + fsync + atomic renameで行う。v2のGit URL配列はnamed remoteへ変換し、v3のModel Gateway値は旧既定値と完全一致する場合だけ新既定値へ更新し、既存policyの認証方式は`api_key`とする
 - legacy Web originがあるpolicyは、blocklist snapshot/digestを推測せずmigrationを拒否
 
 ## Audit retention / redaction

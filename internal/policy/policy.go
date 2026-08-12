@@ -13,12 +13,13 @@ import (
 	"strings"
 	"time"
 
+	"sunaba/internal/modelcatalog"
 	"sunaba/internal/modelgateway"
 	"sunaba/internal/state"
 	"sunaba/internal/webgateway"
 )
 
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -65,11 +66,12 @@ type SessionPolicy struct {
 }
 
 type ModelPolicy struct {
-	AllowedModels    []string `json:"allowed_models"`
-	MaxRequests      int      `json:"max_requests"`
-	MaxConcurrent    int      `json:"max_concurrent"`
-	MaxRequestBytes  int64    `json:"max_request_bytes"`
-	MaxResponseBytes int64    `json:"max_response_bytes"`
+	AuthMode         modelcatalog.AuthMode `json:"auth"`
+	AllowedModels    []string              `json:"allowed_models"`
+	MaxRequests      int                   `json:"max_requests"`
+	MaxConcurrent    int                   `json:"max_concurrent"`
+	MaxRequestBytes  int64                 `json:"max_request_bytes"`
+	MaxResponseBytes int64                 `json:"max_response_bytes"`
 }
 
 type GitPolicy struct {
@@ -116,7 +118,7 @@ func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentIm
 		Resources:  ResourcePolicy{CPUs: 2, Memory: "2G", DiskBytes: 512 << 20, ProcessMax: 512, FileSizeMax: 512 << 20, OpenFileMax: 4096},
 		Session:    SessionPolicy{TTLSeconds: 3600, IdleSeconds: 900},
 		Model: ModelPolicy{
-			AllowedModels: []string{"gpt-5"}, MaxRequests: modelgateway.DefaultMaxRequests,
+			AuthMode: modelcatalog.AuthAPIKey, AllowedModels: []string{"gpt-5"}, MaxRequests: modelgateway.DefaultMaxRequests,
 			MaxConcurrent: modelgateway.DefaultMaxConcurrent, MaxRequestBytes: modelgateway.DefaultMaxRequestBytes,
 			MaxResponseBytes: modelgateway.DefaultMaxResponseBytes,
 		},
@@ -153,7 +155,13 @@ func (p ProjectPolicy) Validate() error {
 		p.Model.MaxResponseBytes <= 0 || p.Model.MaxResponseBytes > modelgateway.MaximumMaxResponseBytes {
 		return fmt.Errorf("Project Model Gateway policy is invalid")
 	}
-	if !uniqueSafeStrings(p.Model.AllowedModels, 128) || modelgateway.ValidateAllowedModels(p.Model.AllowedModels) != nil || !validGitRemotes(p.Git.Remotes) || !p.Git.PushApprovalRequired {
+	if !uniqueSafeStrings(p.Model.AllowedModels, 128) || modelgateway.ValidateAllowedModels(p.Model.AllowedModels) != nil || modelcatalog.ValidateAuthMode(p.Model.AuthMode) != nil {
+		return fmt.Errorf("Project Model Gateway authentication or model policy is invalid")
+	}
+	if _, err := modelcatalog.Resolve(p.Model.AuthMode, p.Model.AllowedModels); err != nil {
+		return fmt.Errorf("Project Model Gateway model catalog selection is invalid: %w", err)
+	}
+	if !validGitRemotes(p.Git.Remotes) || !p.Git.PushApprovalRequired {
 		return fmt.Errorf("Project Model/Git policy is invalid")
 	}
 	if p.Web.Enabled {

@@ -44,7 +44,7 @@ Model Gatewayは期限、request回数、並行数、request/response size、Pro
 
 ## Host Secret Storeとlive opt-in gate
 
-実OpenAI API keyは環境変数から取得せず、macOS login Keychainの固定generic password（service `dev.sunaba.openai`、account `openai-api-key`）だけを使う。固定`/usr/bin/security login-keychain`のquoted absolute pathを検証し、find/add/deleteへ同じpathを明示する。登録時はKeychain promptを使い、secretをargvへ置かない。unit testと公開CLI実機gateはcommand pathをlink-time fakeへ差し替え、実Keychainを変更せずに固定引数、output bound、control文字拒否、環境変数非依存を検証した。
+実OpenAI API keyとCodex OAuth credentialは環境変数から取得せず、macOS login Keychainの固定generic password（service `dev.sunaba.openai`、account `openai-api-key`または`codex-oauth`）だけを使う。固定`/usr/bin/security login-keychain`のquoted absolute pathを検証し、find/add/deleteへ同じpathを明示する。API key登録時はKeychain promptを使い、OAuth credentialはdevice flow後に固定security processのstdinへ渡し、secretをargvへ置かない。unit testと公開CLI実機gateはcommand pathをlink-time fakeへ差し替え、実Keychainを変更せずに固定引数、output bound、control文字拒否、環境変数非依存を検証した。
 
 実providerへの従量課金requestは通常gateで送らない。利用者が`SUNABA_LIVE_OPENAI=1`を明示した場合だけ、実Keychain credentialをHost Model Gatewayで終端し、secure Agent VMからResponses requestを送るgateを提供する。2026-08-11の本変更検証では課金許可を独立に得ていないため、このlive gate自体は未実行である。
 

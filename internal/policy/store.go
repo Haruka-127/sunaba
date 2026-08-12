@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"sunaba/internal/modelcatalog"
 	"sunaba/internal/modelgateway"
 )
 
@@ -56,6 +57,7 @@ type legacyPolicyV2 struct {
 }
 
 type legacyPolicyV3 ProjectPolicy
+type legacyPolicyV4 ProjectPolicy
 
 type legacyGitV2 struct {
 	Remotes              []string `json:"remotes"`
@@ -80,6 +82,19 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 			return ProjectPolicy{}, false, err
 		}
 		return current, false, current.Validate()
+	case 4:
+		var legacy legacyPolicyV4
+		if err := decodeStrict(data, &legacy); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		migrated, err := migrateV4(legacy, now)
+		if err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		if err := Save(path, migrated); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		return migrated, true, nil
 	case 3:
 		var legacy legacyPolicyV3
 		if err := decodeStrict(data, &legacy); err != nil {
@@ -127,9 +142,24 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 func migrateV3(legacy legacyPolicyV3, now time.Time) (ProjectPolicy, error) {
 	policy := ProjectPolicy(legacy)
 	policy.SchemaVersion = CurrentSchemaVersion
+	setLegacyAuthenticationDefault(&policy.Model)
 	upgradeLegacyModelDefaults(&policy.Model)
 	policy.UpdatedAt = now.UTC()
 	return policy, policy.Validate()
+}
+
+func migrateV4(legacy legacyPolicyV4, now time.Time) (ProjectPolicy, error) {
+	policy := ProjectPolicy(legacy)
+	policy.SchemaVersion = CurrentSchemaVersion
+	setLegacyAuthenticationDefault(&policy.Model)
+	policy.UpdatedAt = now.UTC()
+	return policy, policy.Validate()
+}
+
+func setLegacyAuthenticationDefault(model *ModelPolicy) {
+	if model.AuthMode == "" {
+		model.AuthMode = modelcatalog.AuthAPIKey
+	}
 }
 
 func upgradeLegacyModelDefaults(model *ModelPolicy) {
@@ -158,6 +188,7 @@ func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
 		Web: legacy.Web, Export: legacy.Export, Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
 		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
 	}
+	setLegacyAuthenticationDefault(&policy.Model)
 	upgradeLegacyModelDefaults(&policy.Model)
 	return policy, policy.Validate()
 }
@@ -265,7 +296,7 @@ func migrateV1(legacy legacyPolicyV1, now time.Time) (ProjectPolicy, error) {
 		Resources:  ResourcePolicy{CPUs: legacy.CPUs, Memory: legacy.Memory, DiskBytes: legacy.DiskBytes, ProcessMax: 512, FileSizeMax: legacy.DiskBytes, OpenFileMax: 4096},
 		Session:    SessionPolicy{TTLSeconds: legacy.SessionTTLSeconds, IdleSeconds: min(legacy.SessionTTLSeconds, 900)},
 		Model: ModelPolicy{
-			AllowedModels: legacy.AllowedModels, MaxRequests: modelgateway.DefaultMaxRequests,
+			AuthMode: modelcatalog.AuthAPIKey, AllowedModels: legacy.AllowedModels, MaxRequests: modelgateway.DefaultMaxRequests,
 			MaxConcurrent: modelgateway.DefaultMaxConcurrent, MaxRequestBytes: modelgateway.DefaultMaxRequestBytes,
 			MaxResponseBytes: modelgateway.DefaultMaxResponseBytes,
 		},

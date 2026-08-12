@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"sunaba/internal/modelcatalog"
 )
 
 const (
@@ -95,15 +97,28 @@ type AuditEvent struct {
 type Config struct {
 	UpstreamBaseURL string
 	UpstreamAPIKey  string
+	AuthMode        modelcatalog.AuthMode
+	OAuthTokens     OAuthTokenSource
 	Capability      Capability
 	HTTPClient      *http.Client
 	Audit           func(AuditEvent)
 	Now             func() time.Time
 }
 
+type OAuthAccess struct {
+	Token     string
+	AccountID string
+}
+
+type OAuthTokenSource interface {
+	AccessToken(context.Context) (OAuthAccess, error)
+}
+
 type Gateway struct {
 	upstream   *url.URL
 	apiKey     string
+	authMode   modelcatalog.AuthMode
+	oauth      OAuthTokenSource
 	capability Capability
 	client     *http.Client
 	audit      func(AuditEvent)
@@ -115,12 +130,21 @@ type Gateway struct {
 }
 
 func New(config Config) (*Gateway, error) {
+	if config.AuthMode == "" {
+		config.AuthMode = modelcatalog.AuthAPIKey
+	}
+	if err := modelcatalog.ValidateAuthMode(config.AuthMode); err != nil {
+		return nil, err
+	}
 	upstream, err := url.Parse(config.UpstreamBaseURL)
 	if err != nil || (upstream.Scheme != "http" && upstream.Scheme != "https") || upstream.Host == "" || upstream.User != nil || upstream.RawQuery != "" || upstream.Fragment != "" {
 		return nil, fmt.Errorf("Model Gateway upstream must be a fixed HTTP(S) base URL")
 	}
-	if config.UpstreamAPIKey == "" {
+	if config.AuthMode == modelcatalog.AuthAPIKey && config.UpstreamAPIKey == "" {
 		return nil, fmt.Errorf("Model Gateway upstream API key is required")
+	}
+	if config.AuthMode == modelcatalog.AuthOAuth && config.OAuthTokens == nil {
+		return nil, fmt.Errorf("Model Gateway OAuth token source is required")
 	}
 	capability := config.Capability
 	models, err := validateAllowedModels(capability.AllowedModels)
@@ -145,7 +169,7 @@ func New(config Config) (*Gateway, error) {
 		now = time.Now
 	}
 	return &Gateway{
-		upstream: upstream, apiKey: config.UpstreamAPIKey, capability: capability,
+		upstream: upstream, apiKey: config.UpstreamAPIKey, authMode: config.AuthMode, oauth: config.OAuthTokens, capability: capability,
 		client: &clientCopy, audit: config.Audit, now: now,
 		semaphore: make(chan struct{}, capability.MaxConcurrent), models: modelSet,
 	}, nil
@@ -216,8 +240,19 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		reject(http.StatusForbidden, "model_not_allowed")
 		return
 	}
+	if g.authMode == modelcatalog.AuthOAuth {
+		body, err = normalizeOAuthRequest(body)
+		if err != nil {
+			reject(http.StatusBadRequest, "invalid_oauth_request")
+			return
+		}
+	}
 	upstreamURL := *g.upstream
-	upstreamURL.Path = strings.TrimRight(g.upstream.Path, "/") + "/v1/responses"
+	upstreamPath := "/v1/responses"
+	if g.authMode == modelcatalog.AuthOAuth {
+		upstreamPath = "/responses"
+	}
+	upstreamURL.Path = strings.TrimRight(g.upstream.Path, "/") + upstreamPath
 	upstreamContext, cancelUpstream := context.WithCancel(request.Context())
 	defer cancelUpstream()
 	upstreamDone := make(chan struct{})
@@ -239,7 +274,18 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		reject(http.StatusBadGateway, "upstream_request_failed")
 		return
 	}
-	upstreamRequest.Header.Set("Authorization", "Bearer "+g.apiKey)
+	if g.authMode == modelcatalog.AuthOAuth {
+		access, tokenErr := g.oauth.AccessToken(upstreamContext)
+		if tokenErr != nil || !safeHeaderValue(access.Token, 8, 32<<10) || !safeHeaderValue(access.AccountID, 8, 1024) {
+			reject(http.StatusBadGateway, "oauth_credential_unavailable")
+			return
+		}
+		upstreamRequest.Header.Set("Authorization", "Bearer "+access.Token)
+		upstreamRequest.Header.Set("ChatGPT-Account-Id", access.AccountID)
+		upstreamRequest.Header.Set("Originator", "sunaba")
+	} else {
+		upstreamRequest.Header.Set("Authorization", "Bearer "+g.apiKey)
+	}
 	upstreamRequest.Header.Set("Content-Type", "application/json")
 	upstreamRequest.Header.Set("User-Agent", "sunaba-model-gateway/1")
 	upstreamResponse, err := g.client.Do(upstreamRequest)
@@ -271,6 +317,32 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 			event.Reason = "response_copy_failed"
 		}
 	}
+}
+
+func safeHeaderValue(value string, minimum, maximum int) bool {
+	if len(value) < minimum || len(value) > maximum {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x20 || value[index] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeOAuthRequest(body []byte) ([]byte, error) {
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, err
+	}
+	for _, field := range []string{"previous_response_id", "generate", "prompt_cache_retention", "safety_identifier", "stream_options"} {
+		delete(request, field)
+	}
+	if instructions, exists := request["instructions"]; !exists || bytes.Equal(bytes.TrimSpace(instructions), []byte("null")) {
+		request["instructions"] = json.RawMessage(`""`)
+	}
+	return json.Marshal(request)
 }
 
 func (g *Gateway) authorized(header string) bool {

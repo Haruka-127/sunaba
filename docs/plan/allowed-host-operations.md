@@ -60,12 +60,18 @@ sudo ./bin/sunaba firewall status
 
 ## 許可するmacOS Keychain操作
 
-Host Model Gateway用OpenAI API keyは、固定service `dev.sunaba.openai`、固定account `openai-api-key`のgeneric passwordとしてlogin Keychainへ保存する。許可する入口はsunabaの次のサブコマンドに限定する。
+Host Model Gateway用OpenAI API keyは固定service `dev.sunaba.openai`、固定account `openai-api-key`、Codex OAuth credentialは同じserviceの固定account `codex-oauth`のgeneric passwordとしてlogin Keychainへ保存する。許可する入口はsunabaの次のサブコマンドに限定する。
 
 ```sh
 sunaba credentials openai set
 sunaba credentials openai status
 sunaba credentials openai delete
+sunaba credentials openai api-key set
+sunaba credentials openai api-key status
+sunaba credentials openai api-key delete
+sunaba credentials openai oauth login
+sunaba credentials openai oauth status
+sunaba credentials openai oauth delete
 ```
 
 内部では固定パス`/usr/bin/security`の次の操作だけを使う。
@@ -76,9 +82,14 @@ sunaba credentials openai delete
 /usr/bin/security find-generic-password -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path>
 /usr/bin/security find-generic-password -a openai-api-key -s dev.sunaba.openai -w <verified-login-keychain-path>
 /usr/bin/security delete-generic-password -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path>
+/usr/bin/security add-generic-password -U -a codex-oauth -s dev.sunaba.openai <verified-login-keychain-path> -w
+/usr/bin/security find-generic-password -a codex-oauth -s dev.sunaba.openai <verified-login-keychain-path>
+/usr/bin/security find-generic-password -a codex-oauth -s dev.sunaba.openai -w <verified-login-keychain-path>
+/usr/bin/security delete-generic-password -a codex-oauth -s dev.sunaba.openai <verified-login-keychain-path>
 ```
 
-- `add-generic-password`の`-w`は必ず最後の引数とし、Keychain自身の対話promptから入力する。secretをargv、environment、Project file、auditへ渡さない
+- `add-generic-password`の`-w`は必ず最後の引数とする。API keyはKeychain自身の対話promptから入力し、OAuth credentialのbounded JSONはsunaba processから固定`security` processのstdinだけへ渡す。secretをargv、environment、Project file、auditへ渡さない
+- OAuth device flowとrefreshでは固定OpenAI endpointへのHTTPS通信だけを行う。verification URLを表示するがブラウザやGUI applicationを自動起動しない
 - `login-keychain`のbounded outputからquoted absolute clean pathだけを受理し、同じ操作内の明示的なkeychain引数として使う
 - service/account、security executable、Keychain search listをguestまたはProject policyから変更させない
 - `-A`、password値付き`-w`、任意itemの列挙・削除、login Keychain以外の作成、Keychain設定変更を行わない

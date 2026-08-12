@@ -197,7 +197,7 @@ func runMeasuredOpenCode(t *testing.T, ctx context.Context, runtime sunabaruntim
 	if enableSearch {
 		searchEnvironment = " OPENCODE_ENABLE_EXA=1 OPENCODE_WEBSEARCH_PROVIDER=exa"
 	}
-	command := "set -a; . /run/sunaba/session.env; set +a; exec env HOME=" + directory + "/home XDG_CONFIG_HOME=" + directory + "/config XDG_DATA_HOME=" + directory + "/data HTTP_PROXY=http://127.0.0.1:4242 HTTPS_PROXY=http://127.0.0.1:4242 http_proxy=http://127.0.0.1:4242 https_proxy=http://127.0.0.1:4242 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1" + searchEnvironment + " opencode run --model openai/gpt-5 'run the " + tool + " tool once'"
+	command := "set -a; . /run/sunaba/session.env; set +a; exec env HOME=" + directory + "/home XDG_CONFIG_HOME=" + directory + "/config XDG_DATA_HOME=" + directory + "/data HTTP_PROXY=http://127.0.0.1:4242 HTTPS_PROXY=http://127.0.0.1:4242 http_proxy=http://127.0.0.1:4242 https_proxy=http://127.0.0.1:4242 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1" + searchEnvironment + " opencode run --model " + opencode.ModelGatewayProviderID + "/gpt-5 'run the " + tool + " tool once'"
 	_, _ = runtime.ExecOutput(ctx, container, []string{"runuser", "-u", "sunaba-agent", "--", "/bin/bash", "-lc", "cd " + workspace + "; " + command})
 }
 

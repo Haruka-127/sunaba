@@ -10,7 +10,50 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"sunaba/internal/modelcatalog"
 )
+
+type staticOAuthSource struct {
+	access OAuthAccess
+	err    error
+}
+
+func (s staticOAuthSource) AccessToken(context.Context) (OAuthAccess, error) {
+	return s.access, s.err
+}
+
+func TestGatewayUsesCodexOAuthEndpointHeadersAndRequestShape(t *testing.T) {
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/backend-api/codex/responses" || request.Header.Get("Authorization") != "Bearer oauth-access-token" || request.Header.Get("ChatGPT-Account-Id") != "account-123" || request.Header.Get("Originator") != "sunaba" {
+			t.Errorf("path=%q headers=%v", request.URL.Path, request.Header)
+		}
+		upstreamBody, _ = io.ReadAll(request.Body)
+		_, _ = io.WriteString(response, `{}`)
+	}))
+	defer upstream.Close()
+	gateway, err := New(Config{
+		UpstreamBaseURL: upstream.URL + "/backend-api/codex", AuthMode: modelcatalog.AuthOAuth,
+		OAuthTokens: staticOAuthSource{access: OAuthAccess{Token: "oauth-access-token", AccountID: "account-123"}},
+		Capability:  testCapability(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+testModel+`","stream":false,"previous_response_id":"secret","stream_options":{"include_usage":true}}`))
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || strings.Contains(string(upstreamBody), "previous_response_id") || strings.Contains(string(upstreamBody), "stream_options") || !strings.Contains(string(upstreamBody), `"instructions":""`) {
+		t.Fatalf("status=%d upstream body=%s", response.StatusCode, upstreamBody)
+	}
+}
 
 const (
 	testToken = "gateway-token-0123456789abcdef0123456789abcdef"

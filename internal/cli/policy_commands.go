@@ -13,11 +13,103 @@ import (
 	"strings"
 	"time"
 
+	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
 	"sunaba/internal/webgateway"
 )
 
 type stringFlags []string
+
+func (a *app) modelPolicy(_ context.Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("%s", modelPolicyUsage())
+	}
+	action := args[0]
+	if action != "auth" && action != "set" && action != "list" {
+		return fmt.Errorf("%s", modelPolicyUsage())
+	}
+	if action == "auth" && (len(args) < 2 || (args[1] != "api-key" && args[1] != "oauth")) {
+		return fmt.Errorf("%s", modelPolicyUsage())
+	}
+	flagArguments := args[1:]
+	if action == "auth" {
+		flagArguments = args[2:]
+	}
+	fs := flag.NewFlagSet("model "+action, flag.ContinueOnError)
+	fs.SetOutput(a.errors)
+	dir := fs.String("dir", ".", "Project directory")
+	var models stringFlags
+	fs.Var(&models, "model", "allowed model ID; repeat for multiple models")
+	if err := fs.Parse(flagArguments); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("%s", modelPolicyUsage())
+	}
+	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
+	if err != nil {
+		return err
+	}
+	if action == "list" {
+		if len(models) != 0 {
+			return fmt.Errorf("model list does not accept --model")
+		}
+		available, err := modelcatalog.Available(projectPolicy.Model.AuthMode)
+		if err != nil {
+			return err
+		}
+		allowed := make(map[string]struct{}, len(projectPolicy.Model.AllowedModels))
+		for _, id := range projectPolicy.Model.AllowedModels {
+			allowed[id] = struct{}{}
+		}
+		for _, definition := range available {
+			_, selected := allowed[definition.ID]
+			fmt.Fprintf(a.output, "%s\tallowed=%t\tcontext=%d\tinput=%d\toutput=%d\n", definition.ID, selected, definition.Limit.Context, definition.Limit.Input, definition.Limit.Output)
+		}
+		return nil
+	}
+	if err := refuseActivePolicyChange(projectState); err != nil {
+		return err
+	}
+	switch action {
+	case "auth":
+		if len(models) != 0 {
+			return fmt.Errorf("model auth does not accept --model")
+		}
+		mode := modelcatalog.AuthAPIKey
+		if args[1] == "oauth" {
+			mode = modelcatalog.AuthOAuth
+		}
+		defaultModel, err := modelcatalog.DefaultModel(mode)
+		if err != nil {
+			return err
+		}
+		projectPolicy.Model.AuthMode = mode
+		if _, err := modelcatalog.Resolve(mode, projectPolicy.Model.AllowedModels); err != nil {
+			projectPolicy.Model.AllowedModels = []string{defaultModel}
+		}
+	case "set":
+		if len(models) == 0 {
+			return fmt.Errorf("model set requires at least one --model")
+		}
+		if _, err := modelcatalog.Resolve(projectPolicy.Model.AuthMode, models); err != nil {
+			return err
+		}
+		projectPolicy.Model.AllowedModels = append([]string(nil), models...)
+	default:
+		return fmt.Errorf("%s", modelPolicyUsage())
+	}
+	projectPolicy.UpdatedAt = time.Now().UTC()
+	if err := policy.Save(path, projectPolicy); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.output, "Configured Project Model Gateway authentication=%s with models=%s.\n", projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","))
+	return nil
+}
+
+func modelPolicyUsage() string {
+	return "usage: sunaba model auth api-key|oauth [--dir <path>] | model set --model <id>... [--dir <path>] | model list [--dir <path>]"
+}
 
 func (f *stringFlags) String() string { return strings.Join(*f, ",") }
 

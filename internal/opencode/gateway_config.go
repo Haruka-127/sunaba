@@ -6,9 +6,11 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+
+	"sunaba/internal/modelcatalog"
 )
 
-const ModelGatewayProviderID = "openai"
+const ModelGatewayProviderID = "sunaba"
 
 var modelIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,255}$`)
 var environmentNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,127}$`)
@@ -18,9 +20,13 @@ type ModelGatewayProviderConfig struct {
 	AllowedModels []string
 	DefaultModel  string
 	TokenEnv      string
+	AuthMode      modelcatalog.AuthMode
 }
 
 func BuildModelGatewayConfig(config ModelGatewayProviderConfig) ([]byte, error) {
+	if config.AuthMode == "" {
+		config.AuthMode = modelcatalog.AuthAPIKey
+	}
 	parsed, err := url.Parse(config.BaseURL)
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "/v1" {
 		return nil, fmt.Errorf("Model Gateway base URL must be a guest-loopback HTTP /v1 endpoint")
@@ -50,13 +56,37 @@ func BuildModelGatewayConfig(config ModelGatewayProviderConfig) ([]byte, error) 
 	if _, exists := seen[config.DefaultModel]; !exists {
 		return nil, fmt.Errorf("Model Gateway default model is not allowed")
 	}
+	definitions, err := modelcatalog.Resolve(config.AuthMode, allowed)
+	if err != nil {
+		return nil, fmt.Errorf("Model Gateway model definitions are invalid: %w", err)
+	}
 	type options struct {
 		BaseURL string `json:"baseURL"`
 		APIKey  string `json:"apiKey"`
 	}
+	type modalities struct {
+		Input  []string `json:"input"`
+		Output []string `json:"output"`
+	}
+	type model struct {
+		ID          string             `json:"id"`
+		Name        string             `json:"name"`
+		Family      string             `json:"family"`
+		ReleaseDate string             `json:"release_date"`
+		Attachment  bool               `json:"attachment"`
+		Reasoning   bool               `json:"reasoning"`
+		Temperature bool               `json:"temperature"`
+		ToolCall    bool               `json:"tool_call"`
+		Limit       modelcatalog.Limit `json:"limit"`
+		Cost        modelcatalog.Cost  `json:"cost"`
+		Modalities  modalities         `json:"modalities"`
+	}
 	type provider struct {
-		Whitelist []string `json:"whitelist"`
-		Options   options  `json:"options"`
+		Name      string           `json:"name"`
+		NPM       string           `json:"npm"`
+		Whitelist []string         `json:"whitelist"`
+		Models    map[string]model `json:"models"`
+		Options   options          `json:"options"`
 	}
 	payload := struct {
 		Schema           string              `json:"$schema"`
@@ -70,8 +100,23 @@ func BuildModelGatewayConfig(config ModelGatewayProviderConfig) ([]byte, error) 
 		EnabledProviders: []string{ModelGatewayProviderID},
 		Providers: map[string]provider{
 			ModelGatewayProviderID: {
+				Name: "sunaba OpenAI Gateway", NPM: "@ai-sdk/openai",
 				Whitelist: allowed,
-				Options:   options{BaseURL: config.BaseURL, APIKey: "{env:" + config.TokenEnv + "}"},
+				Models: func() map[string]model {
+					models := make(map[string]model, len(definitions))
+					for _, definition := range definitions {
+						models[definition.ID] = model{
+							ID: definition.ID, Name: definition.Name, Family: definition.Family,
+							ReleaseDate: definition.ReleaseDate, Attachment: definition.Attachment,
+							Reasoning: definition.Reasoning, Temperature: definition.Temperature,
+							ToolCall: definition.ToolCall, Limit: definition.Limit,
+							Cost:       definition.Cost,
+							Modalities: modalities{Input: definition.Input, Output: definition.Output},
+						}
+					}
+					return models
+				}(),
+				Options: options{BaseURL: config.BaseURL, APIKey: "{env:" + config.TokenEnv + "}"},
 			},
 		},
 	}

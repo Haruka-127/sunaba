@@ -8,7 +8,7 @@
 - Apple Container exact `1.2.2`
 - OpenCode host TUI / guest server exact `1.18.16`
 - buildにGo 1.22以降
-- OpenAI APIの従量課金API key。ChatGPT PlusのログインやOAuth credentialは使わない
+- OpenAI APIの従量課金API key、またはCodexを利用できるChatGPT subscription
 
 Apple Container systemは利用者が起動する。
 
@@ -33,13 +33,13 @@ bin/sunaba help
 
 以降はrepository rootから`bin/sunaba`を使う例を示す。別directoryへ配置する場合も3 binaryを分離しない。
 
-## 3. OpenAI API keyを登録する
+## 3. OpenAI credentialを登録する
 
 API keyは環境変数ではなく、macOS login Keychainの固定itemへ登録する。
 
 ```sh
-bin/sunaba credentials openai set
-bin/sunaba credentials openai status
+bin/sunaba credentials openai api-key set
+bin/sunaba credentials openai api-key status
 ```
 
 `set`を実行するとKeychain自身がpassword入力を求める。入力値はterminalに表示されず、argv、Project file、sunaba policy、auditへ保存されない。固定identityはservice `dev.sunaba.openai`、account `openai-api-key`である。
@@ -47,8 +47,17 @@ bin/sunaba credentials openai status
 削除する場合は、先に各Projectで`changes export`または`destroy`を行い、起動中のSupervisorを終了してから実行する。既に起動しているSupervisorは、終了するまでmemory上に読み込み済みのkeyを保持し得る。
 
 ```sh
-bin/sunaba credentials openai delete
+bin/sunaba credentials openai api-key delete
 ```
+
+ChatGPT subscriptionを使う場合はdevice flowでログインする。表示されたURLをブラウザで開き、表示されたcodeを入力する。sunaba自身はブラウザを起動しない。
+
+```sh
+bin/sunaba credentials openai oauth login
+bin/sunaba credentials openai oauth status
+```
+
+OAuth tokenは固定account `codex-oauth`へ保存され、期限前にhost側でrefreshされる。削除は`bin/sunaba credentials openai oauth delete`で行う。
 
 ## 4. 最短のsecure mode利用手順
 
@@ -62,6 +71,23 @@ bin/sunaba agent --dir "$PROJECT"
 ```
 
 `project init`はProject policyを作る。`up`はhost worktreeの安全なSnapshotからnetworkなしのVMを準備し、検証後にpauseして返す。`agent`は同じVMをresumeし、VM内のOpenCode serverへ隔離済みhost TUIを接続する。TUIを終了するとGatewayをinactiveにしてVMを再びpauseする。期限内の次回`agent`は同じVMと編集状態を再利用する。
+
+OAuthを使うProjectは初期化時に認証方式を指定する。既存Projectはactive sessionを終了した後に切り替えられる。認証方式を変えたとき、現在のmodel allowlistが移行先で使えなければ安全な既定modelへ置き換わる。
+
+```sh
+bin/sunaba project init "$PROJECT" --mode secure --model-auth oauth
+# または既存Projectで
+bin/sunaba model auth oauth --dir "$PROJECT"
+```
+
+OpenCodeにはcustom `sunaba` providerが設定される。API keyとOAuthではcontext/input/output上限が別定義であり、subscriptionの小さいinput上限に合わせてOpenCodeのcompactionが開始される。model discoveryは行わず、Project policyと認証別の固定catalogにないmodelはセッション開始前に拒否される。
+
+現在の認証方式で利用可能なmodelと上限を確認し、Projectで許可するmodelを設定できる。`model set`の先頭を既定modelとしてOpenCodeへ渡す。
+
+```sh
+bin/sunaba model list --dir "$PROJECT"
+bin/sunaba model set --model gpt-5.5 --model gpt-5.6-sol --dir "$PROJECT"
+```
 
 host ProjectはVMへbind mountされない。VM内の編集は、この時点ではhost worktreeに反映されない。
 
@@ -187,11 +213,13 @@ bin/sunaba destroy --dir "$PROJECT" --yes --discard-pending
 
 ```sh
 container system version
-bin/sunaba credentials openai status
+bin/sunaba credentials openai api-key status
+# OAuth Projectの場合
+bin/sunaba credentials openai oauth status
 bin/sunaba status --dir "$PROJECT"
 ```
 
-- `credential is unavailable`: `credentials openai set`を再実行する
+- `credential is unavailable`: Projectの認証方式に対応する`api-key set`または`oauth login`を再実行する
 - `credential helper`: host Git credential helperが該当する固定HTTPS URLを非対話で解決できるか確認する
 - `cannot change ... active`: `changes export`または明示的な破棄を完了してからpolicyを変更する
 - `capability expired`: `changes export`で成果物を保存するか、`recreate`でclean sessionへ移る

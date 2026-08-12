@@ -16,6 +16,7 @@ import (
 
 	"sunaba/internal/audit"
 	"sunaba/internal/gitgateway"
+	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
@@ -134,6 +135,34 @@ func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *te
 		if err := a.gitPolicy(context.Background(), []string{"remote", "add", "--dir", project, "--name", "unsafe", "--url", unsafe}); err == nil {
 			t.Fatalf("unsafe Git remote accepted: %s", unsafe)
 		}
+	}
+}
+
+func TestModelAuthenticationPolicySwitchesToOAuthCatalogDefault(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state")}
+	var output bytes.Buffer
+	a := &app{store: store, output: &output, errors: &output}
+	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.modelPolicy(context.Background(), []string{"auth", "oauth", "--dir", project}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
+	if err != nil || loaded.Model.AuthMode != modelcatalog.AuthOAuth || len(loaded.Model.AllowedModels) != 1 || loaded.Model.AllowedModels[0] != "gpt-5.5" {
+		t.Fatalf("model policy=%+v error=%v", loaded.Model, err)
+	}
+	if err := a.modelPolicy(context.Background(), []string{"set", "--dir", project, "--model", "gpt-5.5", "--model", "gpt-5.6-sol"}); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := a.modelPolicy(context.Background(), []string{"list", "--dir", project}); err != nil || !strings.Contains(output.String(), "gpt-5.6-sol\tallowed=true\tcontext=500000\tinput=372000") {
+		t.Fatalf("model list=%q error=%v", output.String(), err)
 	}
 }
 

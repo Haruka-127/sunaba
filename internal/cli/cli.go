@@ -25,6 +25,7 @@ import (
 	"sunaba/internal/dependency"
 	"sunaba/internal/firewall"
 	"sunaba/internal/image"
+	"sunaba/internal/modelcatalog"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
 	"sunaba/internal/runtime"
@@ -66,6 +67,8 @@ func Run(ctx context.Context, args []string) error {
 		return a.project(ctx, filtered[1:])
 	case "credentials":
 		return a.credentials(ctx, filtered[1:])
+	case "model":
+		return a.modelPolicy(ctx, filtered[1:])
 	case "up":
 		return a.up(ctx, filtered[1:])
 	case "agent":
@@ -104,8 +107,12 @@ func usage(output io.Writer) {
 	fmt.Fprint(output, `sunaba securely runs OpenCode v1.18.16 in a Project Agent VM.
 
 Usage:
-  sunaba credentials openai set|status|delete
-  sunaba project init <path> [--mode secure|dev]
+  sunaba credentials openai api-key set|status|delete
+  sunaba credentials openai oauth login|status|delete
+  sunaba model auth api-key|oauth [--dir <path>]
+  sunaba model set --model <id>... [--dir <path>]
+  sunaba model list [--dir <path>]
+  sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]
   sunaba up [--dir <path>] [--mode secure|dev]
   sunaba agent [--dir <path>]
   sunaba shell [--dir <path>]
@@ -134,20 +141,21 @@ The Host TUI uses an isolated configuration and a loopback Local Attach Relay. H
 
 func (a *app) project(_ context.Context, args []string) error {
 	if len(args) == 0 || args[0] != "init" {
-		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev]")
+		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]")
 	}
 	if len(args) < 2 || strings.HasPrefix(args[1], "-") {
-		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev]")
+		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]")
 	}
 	projectArgument := args[1]
 	fs := flag.NewFlagSet("project init", flag.ContinueOnError)
 	fs.SetOutput(a.errors)
 	mode := fs.String("mode", "secure", "secure or dev")
+	modelAuth := fs.String("model-auth", "api-key", "api-key or oauth")
 	if err := fs.Parse(args[2:]); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || (*mode != "secure" && *mode != "dev") {
-		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev]")
+	if fs.NArg() != 0 || (*mode != "secure" && *mode != "dev") || (*modelAuth != "api-key" && *modelAuth != "oauth") {
+		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]")
 	}
 	root, err := state.ResolveProjectPath(projectArgument)
 	if err != nil {
@@ -179,6 +187,11 @@ func (a *app) project(_ context.Context, args []string) error {
 	projectPolicy, err := policy.New(root, manifestDigest, dependency.OpenCodeVersion, dependency.AppleContainerVersion, pinned.AgentImage.Tag, *mode, time.Now())
 	if err != nil {
 		return err
+	}
+	if *modelAuth == "oauth" {
+		defaultModel, _ := modelcatalog.DefaultModel(modelcatalog.AuthOAuth)
+		projectPolicy.Model.AuthMode = modelcatalog.AuthOAuth
+		projectPolicy.Model.AllowedModels = []string{defaultModel}
 	}
 	if err := policy.Save(policyPath, projectPolicy); err != nil {
 		return err
@@ -503,12 +516,12 @@ func (a *app) status(ctx context.Context, args []string) error {
 	if projectPolicy.Web.Enabled {
 		webState = fmt.Sprintf("enabled (%d origin rules, pinned blocklist %s)", len(projectPolicy.Web.Rules), projectPolicy.Web.BlocklistSHA256)
 	}
-	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
+	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
 		projectPolicy.ProjectRoot, projectPolicy.ProjectID, projectPolicy.Mode, projectPolicy.SchemaVersion,
 		projectPolicy.Dependency.OpenCode, projectPolicy.Dependency.AppleContainer, projectPolicy.Dependency.AgentImage,
 		sessionVMs, sessionExpiry, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, pending,
 		projectPolicy.Resources.CPUs, projectPolicy.Resources.Memory, projectPolicy.Resources.DiskBytes, projectPolicy.Resources.ProcessMax, projectPolicy.Resources.FileSizeMax, projectPolicy.Resources.OpenFileMax,
-		strings.Join(projectPolicy.Model.AllowedModels, ","),
+		projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","),
 		projectPolicy.Model.MaxRequests, projectPolicy.Model.MaxConcurrent, projectPolicy.Model.MaxRequestBytes, projectPolicy.Model.MaxResponseBytes,
 		gitState, webState)
 	return listErr

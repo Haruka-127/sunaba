@@ -16,7 +16,9 @@ import (
 	"sunaba/internal/dependency"
 	"sunaba/internal/devnetwork"
 	"sunaba/internal/image"
+	"sunaba/internal/modelcatalog"
 	"sunaba/internal/modelgateway"
+	"sunaba/internal/openauth"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
 	"sunaba/internal/secretstore"
@@ -54,9 +56,22 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if len(cleanupResult.Refused) > 0 {
 		fmt.Fprintf(a.errors, "WARNING: cleanup refused resources without matching current ownership/lease: %s\n", strings.Join(cleanupResult.Refused, ", "))
 	}
-	upstreamKey, err := secretstore.LoadOpenAIKey(ctx)
-	if err != nil {
-		return nil, err
+	upstreamBaseURL := "https://api.openai.com"
+	upstreamKey := ""
+	var oauthTokens modelgateway.OAuthTokenSource
+	if projectPolicy.Model.AuthMode == modelcatalog.AuthOAuth {
+		manager := openauth.NewManager()
+		if _, err := manager.AccessToken(ctx); err != nil {
+			return nil, err
+		}
+		upstreamBaseURL = "https://chatgpt.com/backend-api/codex"
+		oauthTokens = manager
+	} else {
+		var err error
+		upstreamKey, err = secretstore.LoadOpenAIKey(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	sessionID, err := newSessionID()
 	if err != nil {
@@ -82,7 +97,7 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	capability.MaxRequestBytes = projectPolicy.Model.MaxRequestBytes
 	capability.MaxResponseBytes = projectPolicy.Model.MaxResponseBytes
 	gateway, err := modelgateway.New(modelgateway.Config{
-		UpstreamBaseURL: "https://api.openai.com", UpstreamAPIKey: upstreamKey, Capability: capability,
+		UpstreamBaseURL: upstreamBaseURL, UpstreamAPIKey: upstreamKey, AuthMode: projectPolicy.Model.AuthMode, OAuthTokens: oauthTokens, Capability: capability,
 		Audit: func(event modelgateway.AuditEvent) {
 			_ = recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
 				"model": event.Model, "status": fmt.Sprint(event.Status), "request_bytes": fmt.Sprint(event.RequestBytes), "response_bytes": fmt.Sprint(event.ResponseBytes), "reason": event.Reason,
@@ -94,7 +109,7 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	}
 	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
 		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: projectPolicy.Model.AllowedModels,
-		DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN",
+		DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", AuthMode: projectPolicy.Model.AuthMode,
 	})
 	if err != nil {
 		return nil, err
