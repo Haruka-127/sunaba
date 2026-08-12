@@ -12,9 +12,10 @@ import (
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/modelgateway"
 	"sunaba/internal/state"
+	"sunaba/internal/webgateway"
 )
 
-func TestPolicyV5RoundTripIdentityBindingAndModelDefaults(t *testing.T) {
+func TestPolicyV6RoundTripIdentityBindingAndModelDefaults(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	policy, err := New(project, strings.Repeat("a", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now)
@@ -23,6 +24,9 @@ func TestPolicyV5RoundTripIdentityBindingAndModelDefaults(t *testing.T) {
 	}
 	if policy.Model.MaxRequests != modelgateway.DefaultMaxRequests || policy.Model.MaxConcurrent != modelgateway.DefaultMaxConcurrent || policy.Model.MaxRequestBytes != modelgateway.DefaultMaxRequestBytes || policy.Model.MaxResponseBytes != modelgateway.DefaultMaxResponseBytes {
 		t.Fatalf("unexpected Model Gateway defaults: %+v", policy.Model)
+	}
+	if len(policy.Web.OriginPresets) != 1 || policy.Web.OriginPresets[0] != webgateway.CommonDevelopmentOriginPreset || len(policy.Web.OriginPresetSHA256) != 64 || policy.Web.Enabled {
+		t.Fatalf("unexpected Web Gateway defaults: %+v", policy.Web)
 	}
 	policyRoot, _ := filepath.EvalSymlinks(t.TempDir())
 	path := filepath.Join(policyRoot, "state", "policy.json")
@@ -44,7 +48,7 @@ func TestPolicyV5RoundTripIdentityBindingAndModelDefaults(t *testing.T) {
 	}
 }
 
-func TestLegacyV1MigratesAtomicallyToStrictV5(t *testing.T) {
+func TestLegacyV1MigratesAtomicallyToStrictV6(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	legacy := legacyPolicyV1{
@@ -68,11 +72,53 @@ func TestLegacyV1MigratesAtomicallyToStrictV5(t *testing.T) {
 		t.Fatalf("migrated=%+v changed=%v error=%v", migrated, changed, err)
 	}
 	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), `"schema_version": 5`) || !strings.Contains(string(data), `"auth": "api_key"`) || strings.Contains(string(data), `"web_origins"`) {
-		t.Fatalf("policy file was not atomically replaced with v5: %s", data)
+	if !strings.Contains(string(data), `"schema_version": 6`) || !strings.Contains(string(data), `"auth": "api_key"`) || strings.Contains(string(data), `"web_origins"`) {
+		t.Fatalf("policy file was not atomically replaced with v6: %s", data)
 	}
 	if leftovers, _ := filepath.Glob(filepath.Join(directory, ".sunaba-policy-*.tmp")); len(leftovers) != 0 {
 		t.Fatalf("migration temporary files remained: %v", leftovers)
+	}
+}
+
+func TestLegacyV5WebRulesMigrateWithoutExpandingAccess(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	now := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	legacy, err := New(project, strings.Repeat("f", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRule := webgateway.OriginRule{Host: "legacy.example", Port: 443, Category: "general", AllowConnect: true}
+	migratedRule := legacyRule
+	migratedRule.Category = "user"
+	legacy.SchemaVersion = 5
+	legacy.Web.Enabled = true
+	legacy.Web.OriginPresets = nil
+	legacy.Web.OriginPresetSHA256 = ""
+	legacy.Web.CustomRules = nil
+	legacy.Web.Rules = []webgateway.OriginRule{legacyRule}
+	legacy.Web.BlocklistManifest = filepath.Join(project, "blocklist.json")
+	legacy.Web.BlocklistSHA256 = strings.Repeat("1", 64)
+	encoded, _ := json.Marshal(legacy)
+	var legacyDocument map[string]any
+	if err := json.Unmarshal(encoded, &legacyDocument); err != nil {
+		t.Fatal(err)
+	}
+	legacyWeb := legacyDocument["web"].(map[string]any)
+	delete(legacyWeb, "origin_presets")
+	delete(legacyWeb, "origin_preset_sha256")
+	delete(legacyWeb, "custom_rules")
+	encoded, _ = json.Marshal(legacyDocument)
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	path := filepath.Join(root, "state", "policy.json")
+	if err := os.Mkdir(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, changed, err := LoadAndMigrate(path, now)
+	if err != nil || !changed || len(migrated.Web.OriginPresets) != 0 || !reflect.DeepEqual(migrated.Web.CustomRules, []webgateway.OriginRule{migratedRule}) || !reflect.DeepEqual(migrated.Web.Rules, []webgateway.OriginRule{migratedRule}) {
+		t.Fatalf("migrated=%+v changed=%v error=%v", migrated.Web, changed, err)
 	}
 }
 

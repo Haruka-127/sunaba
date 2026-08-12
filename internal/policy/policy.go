@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -19,7 +21,7 @@ import (
 	"sunaba/internal/webgateway"
 )
 
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 6
 
 var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -85,16 +87,19 @@ type GitRemotePolicy struct {
 }
 
 type WebPolicy struct {
-	Enabled           bool                    `json:"enabled"`
-	Rules             []webgateway.OriginRule `json:"rules"`
-	BlocklistManifest string                  `json:"blocklist_manifest,omitempty"`
-	BlocklistSHA256   string                  `json:"blocklist_sha256,omitempty"`
-	MaxRequests       int                     `json:"max_requests"`
-	MaxConcurrent     int                     `json:"max_concurrent"`
-	MaxConnectSeconds int64                   `json:"max_connect_seconds"`
-	MaxUploadBytes    int64                   `json:"max_upload_bytes"`
-	MaxDownloadBytes  int64                   `json:"max_download_bytes"`
-	MaxTotalBytes     int64                   `json:"max_total_bytes"`
+	Enabled            bool                    `json:"enabled"`
+	OriginPresets      []string                `json:"origin_presets"`
+	OriginPresetSHA256 string                  `json:"origin_preset_sha256,omitempty"`
+	CustomRules        []webgateway.OriginRule `json:"custom_rules"`
+	Rules              []webgateway.OriginRule `json:"rules"`
+	BlocklistManifest  string                  `json:"blocklist_manifest,omitempty"`
+	BlocklistSHA256    string                  `json:"blocklist_sha256,omitempty"`
+	MaxRequests        int                     `json:"max_requests"`
+	MaxConcurrent      int                     `json:"max_concurrent"`
+	MaxConnectSeconds  int64                   `json:"max_connect_seconds"`
+	MaxUploadBytes     int64                   `json:"max_upload_bytes"`
+	MaxDownloadBytes   int64                   `json:"max_download_bytes"`
+	MaxTotalBytes      int64                   `json:"max_total_bytes"`
 }
 
 type ExportPolicy struct {
@@ -112,6 +117,11 @@ func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentIm
 	if err != nil {
 		return ProjectPolicy{}, err
 	}
+	originPresets := []string{webgateway.CommonDevelopmentOriginPreset}
+	_, originPresetDigest, err := webgateway.ResolveOriginRules(originPresets, nil)
+	if err != nil {
+		return ProjectPolicy{}, err
+	}
 	policy := ProjectPolicy{
 		SchemaVersion: CurrentSchemaVersion, ProjectID: state.ProjectID(canonical), ProjectRoot: canonical, Mode: mode,
 		Dependency: DependencyPolicy{ManifestSHA256: manifestDigest, OpenCode: openCodeVersion, AppleContainer: containerVersion, AgentImage: agentImage},
@@ -122,8 +132,12 @@ func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentIm
 			MaxConcurrent: modelgateway.DefaultMaxConcurrent, MaxRequestBytes: modelgateway.DefaultMaxRequestBytes,
 			MaxResponseBytes: modelgateway.DefaultMaxResponseBytes,
 		},
-		Git:    GitPolicy{PushApprovalRequired: true},
-		Web:    WebPolicy{Enabled: false, MaxRequests: 500, MaxConcurrent: 4, MaxConnectSeconds: 120, MaxUploadBytes: 1 << 20, MaxDownloadBytes: 64 << 20, MaxTotalBytes: 256 << 20},
+		Git: GitPolicy{PushApprovalRequired: true},
+		Web: WebPolicy{
+			Enabled: false, OriginPresets: originPresets, OriginPresetSHA256: originPresetDigest,
+			MaxRequests: 500, MaxConcurrent: 4, MaxConnectSeconds: 120, MaxUploadBytes: 1 << 20,
+			MaxDownloadBytes: 64 << 20, MaxTotalBytes: 256 << 20,
+		},
 		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30},
 		Audit:  AuditPolicy{RetentionDays: 30}, ProtectedPaths: []string{".git"}, CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
 	}
@@ -164,10 +178,19 @@ func (p ProjectPolicy) Validate() error {
 	if !validGitRemotes(p.Git.Remotes) || !p.Git.PushApprovalRequired {
 		return fmt.Errorf("Project Model/Git policy is invalid")
 	}
+	sortedOriginPresets := append([]string(nil), p.Web.OriginPresets...)
+	sort.Strings(sortedOriginPresets)
+	resolvedWebRules, currentPresetDigest, resolveErr := webgateway.ResolveOriginRules(p.Web.OriginPresets, p.Web.CustomRules)
+	if resolveErr != nil || !slices.Equal(p.Web.OriginPresets, sortedOriginPresets) || (len(p.Web.OriginPresets) == 0) != (p.Web.OriginPresetSHA256 == "") || (p.Web.OriginPresetSHA256 != "" && !digestPattern.MatchString(p.Web.OriginPresetSHA256)) {
+		return fmt.Errorf("Project Web Gateway origin selection is invalid")
+	}
 	if p.Web.Enabled {
 		web := webgateway.Policy{Rules: p.Web.Rules}
 		if _, err := web.Digest(); err != nil || p.Web.MaxRequests <= 0 || p.Web.MaxConcurrent <= 0 || p.Web.MaxConnectSeconds <= 0 || p.Web.MaxConnectSeconds > 600 || p.Web.MaxUploadBytes <= 0 || p.Web.MaxDownloadBytes <= 0 || p.Web.MaxTotalBytes <= 0 {
 			return fmt.Errorf("Project Web Gateway policy is invalid")
+		}
+		if p.Web.OriginPresetSHA256 == currentPresetDigest && !reflect.DeepEqual(p.Web.Rules, resolvedWebRules) {
+			return fmt.Errorf("Project Web Gateway effective rules do not match their origin selection")
 		}
 		if !filepath.IsAbs(p.Web.BlocklistManifest) || filepath.Clean(p.Web.BlocklistManifest) != p.Web.BlocklistManifest || !digestPattern.MatchString(p.Web.BlocklistSHA256) {
 			return fmt.Errorf("Project blocklist manifest path is invalid")

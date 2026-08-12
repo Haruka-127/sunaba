@@ -102,6 +102,7 @@ sunabaの目的は、AIエージェントを単に制限することではない
 | SD-19 | OpenCode serverはAgent VM、TUI clientはホストで動かす | エージェント実行を隔離しながら、利用者へ通常のTUI操作を提供するため |
 | SD-20 | OpenCode server/TUIを同じv1系の固定バージョンにする | client/server protocolと設定schemaのずれを防ぎ、再現可能にするため |
 | SD-21 | sunabaの承認はOpenCode TUI内で完結させない | 侵害済みVMによる偽承認画面とtrusted UIを分離するため |
+| SD-22 | Web Gatewayは組み込み`common-development` origin presetとProject固有追加ruleを分離する | 一般的な依存導入を容易にしつつ、preset不使用とProject単位の追加を明示選択でき、更新をpolicy適用時に固定するため |
 
 ---
 
@@ -799,6 +800,12 @@ HTTP absolute-form requestはGET/HEAD、bodyなし、allowlist originだけを�
 
 公開blocklistはallowlistを置き換えず補助denyとして使う。pinned source、digest、取得時刻、有効期限をpolicyへ記録し、期限切れまたは検証失敗時はblocklist依存ruleをfail closedにする。同一origin内のmalicious path、CDN tenant、許可先自身の侵害はblocklistで防げると主張しない。
 
+sunaba本体は、source control、OS/package repository、language registry、container registry、browser/toolchain download、開発文書に使うoriginをまとめた、名前付き組み込みpreset `common-development`を持つ。新規Projectはこのpresetを選択済みにするが、Web Gateway自体は既定で無効のままとし、preset選択だけで通信を開始しない。Project設定はpresetを空配列にして不使用にでき、`web-origins.txt`のProject固有ruleだけを使うことも、presetと追加ruleを和集合にすることもできる。
+
+presetはsunabaのversion管理対象であり、Project固有設定directoryや外部URLを実行時の正本として参照しない。`config apply`は選択presetを展開し、Project固有ruleとの正規化済み和集合、preset source digest、blocklist digestを実効Project policyへ固定する。sunaba更新で組み込みpresetが変わった場合、既存policyへ黙って反映せず、`config diff`で差分を示して再度`config apply`を要求する。旧policyの明示ruleはmigration時にProject固有ruleとして保持し、新presetを自動追加して許可範囲を広げない。
+
+`common-development`には`githubusercontent.com`、public object storage、package registry、CDNなど、第三者がcontentを公開できるmulti-tenant originが含まれ得る。これは依存導入の互換性を目的とする広い許可集合であり、安全なcontentやread-only通信を意味しない。特にHTTPS CONNECT内部のupload非識別リスクはpreset利用時にも変わらず、機密Projectではpresetを無効にして必要最小限のProject固有originだけを設定する。
+
 ### 14.4 capability、quota、監査
 
 proxy capabilityはProject、VM、Session、policy digest、期限、request/concurrency、接続時間、upload/download byte上限へ束縛する。bearer token単独ではなくProject専用socket peer boundaryと併用し、pause/endで失効する。parserはrequest line、header count/size、hostname、port、bodyを上限付きで処理する。
@@ -811,7 +818,7 @@ host auditにはProject/VM/Session、category、正規化hostname、port、HTTP 
 
 HTTPS CONNECT内部のmethod、path、upload、cookie、同一origin side effectは識別できず、許可originへの情報流出を防ぐ保証はしない。Web検索queryと取得URL自体も情報を含み得る。利用者にはorigin categoryとこの非保証を表示し、機密Projectではgeneral web/search ruleを無効にできるようにする。完全なread-only意味論が必要なoriginは将来のtyped fetch/mirrorを別途使い、opaque CONNECTを許可しない。
 
-Web Gatewayの実装gateはPhase 4で完成した。secureモードではProject policyで明示したorigin categoryだけを有効にし、未登録originやexact baseに存在しないpackage managerを利用可能とは表明しない。追加toolは実通信計測とorigin/CDN policy gateを通してから有効にする。
+Web Gatewayの実装gateはPhase 4で完成した。secureモードではProject policyへ明示適用した組み込みpresetとProject固有originだけを有効にし、未登録originやexact baseに存在しないpackage managerを利用可能とは表明しない。追加toolは実通信計測とorigin/CDN policy gateを通してから有効にする。
 
 ---
 
@@ -862,9 +869,9 @@ Phase 0のprobeで既存許可範囲にない操作が必要になった場合�
 
 Projectの利用者設定は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/`を正本とし、Project worktree外のhost-only領域へ保存する。Project directory、Snapshot、VM、session input、exportへこの設定directoryをmountまたはcopyせず、VMから参照・変更できる経路を作らない。directoryはcurrent user所有のmode `0700`、`project.json`と`web-origins.txt`はmode `0600`の通常fileに限定し、symlink、未知field、trailing data、上限超過を拒否する。
 
-`project.json`にはmode、resource、session、Model、Git remote、Web quota、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
+`project.json`にはmode、resource、session、Model、Git remote、Webの有効状態・`origin_presets`・quota、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、組み込みpreset内容/digest、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
 
-Web allowlistは同じhost-only directoryの固定名`web-origins.txt`で管理する。空行と`#`で始まるcommentを除き、各行は`http://host`または`https://host`と、任意の第2token `include-subdomains`だけを受け付ける。path、query、fragment、userinfo、非標準port、IP literal、重複rule、未知optionを1件でも含む場合はfile全体を拒否する。sizeは64 KiB、rule数は1024件を上限とする。
+Project固有のWeb allowlist追加分は同じhost-only directoryの固定名`web-origins.txt`で管理する。組み込みpresetの内容をこのfileへ複製しない。空行と`#`で始まるcommentを除き、各行は`http://host`または`https://host`と、任意の第2token `include-subdomains`だけを受け付ける。path、query、fragment、userinfo、非標準port、IP literal、重複rule、未知optionを1件でも含む場合はfile全体を拒否する。sizeは64 KiB、Project固有ruleは1024件、preset展開後の実効ruleも1024件を上限とする。Web Gateway無効時もpreset選択とProject固有追加分はinactiveな宣言として保持できる。
 
 設定変更は`config validate`と`config diff`で検査し、active/paused Agent Session、pending Change Setがない状態で`config apply`により実効policyへ明示適用する。未適用または不正な設定がある場合、`up`、`agent`、`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
 
@@ -1011,7 +1018,7 @@ Phase 1は内部vertical sliceであり、untrusted Projectを扱う一般利用
 - image provenanceとdependency更新
 - セキュリティレビューと公開前の残余リスク整理
 
-実装状態: 完了。dependency manifest schema v2、build input provenance、全証拠を要求するversion更新contract、Project policy v1/v2/v3からv4へのmigration、audit retention/redaction、Gateway fuzz/property、ENOSPC、guardを失ったhost reboot、Git partial failureのfault injectionを自動testへ固定した。通常verifyは旧prototype gateを廃止してformat、unit、race、vet、固定helper build、CLI/static boundaryを実行する。詳細な証拠と再現コマンドは[`../implementation/phase-5.md`](../implementation/phase-5.md)を正とする。
+実装状態: 完了。dependency manifest schema v2、build input provenance、全証拠を要求するversion更新contract、Project policy v1〜v5からv6へのmigration、audit retention/redaction、Gateway fuzz/property、ENOSPC、guardを失ったhost reboot、Git partial failureのfault injectionを自動testへ固定した。通常verifyは旧prototype gateを廃止してformat、unit、race、vet、固定helper build、CLI/static boundaryを実行する。詳細な証拠と再現コマンドは[`../implementation/phase-5.md`](../implementation/phase-5.md)を正とする。
 
 ---
 
@@ -1110,6 +1117,7 @@ sunaba recreate                  optional export後にclean VM再生成
 sunaba down                      VM停止（状態保持）
 sunaba destroy                   対象Project VMと隔離状態の破棄
 sunaba git remote add/remove/list named fixed HTTPS remoteの構成
+sunaba web enable/refresh/disable    組み込みpresetとProject固有originの構成
 ```
 
 期待する通常体験は次である。
@@ -1124,6 +1132,7 @@ sunaba git remote add/remove/list named fixed HTTPS remoteの構成
 - secureで一般Webが未提供なら、コマンドが明確なnetwork policy errorで失敗する。
 - devへ切り替える場合は、情報流出防止を保証しない旨を明示する。
 - Git Gateway実装後も通常のGitコマンドを使う。push requestはhost側のpending approvalとなり、OpenCode TUIと分離したTrusted Approval UIで確認する。
+- Web Gatewayを有効にすると、新規Projectでは`common-development` presetを利用する。`origin_presets`を空にすればpresetを使わず、`web-origins.txt`だけ、またはpresetへのProject固有追加として構成できる。
 - hostへ反映するときだけ、Trusted Approval UIでChange Setのdigestと対象pathを確認する。
 
 ---
@@ -1271,4 +1280,6 @@ Phase 0でsecure networkまたはOverlayFS/exportの中核不変条件を実現�
 - [OpenCode Server](https://opencode.ai/docs/server/)
 - [OpenCode Config](https://opencode.ai/docs/config/)
 - [CLIProxyAPI（Model Gatewayの参考実装）](https://github.com/router-for-me/CLIProxyAPI)
+- [OpenAI Codex Agent internet access](https://developers.openai.com/codex/cloud/internet-access)
+- [GitHub Copilot allowlist reference](https://docs.github.com/en/copilot/reference/copilot-allowlist-reference)
 - [`allowed-host-operations.md`](./allowed-host-operations.md)

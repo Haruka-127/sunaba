@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/modelgateway"
+	"sunaba/internal/webgateway"
 )
 
 const maxPolicyBytes = 1 << 20
@@ -59,6 +60,37 @@ type legacyPolicyV2 struct {
 type legacyPolicyV3 ProjectPolicy
 type legacyPolicyV4 ProjectPolicy
 
+type legacyPolicyV5 struct {
+	SchemaVersion  int              `json:"schema_version"`
+	ProjectID      string           `json:"project_id"`
+	ProjectRoot    string           `json:"project_root"`
+	Mode           string           `json:"mode"`
+	Dependency     DependencyPolicy `json:"dependency"`
+	Resources      ResourcePolicy   `json:"resources"`
+	Session        SessionPolicy    `json:"session"`
+	Model          ModelPolicy      `json:"model"`
+	Git            GitPolicy        `json:"git"`
+	Web            legacyWebPolicy  `json:"web"`
+	Export         ExportPolicy     `json:"export"`
+	Audit          AuditPolicy      `json:"audit"`
+	ProtectedPaths []string         `json:"protected_paths"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+}
+
+type legacyWebPolicy struct {
+	Enabled           bool                    `json:"enabled"`
+	Rules             []webgateway.OriginRule `json:"rules"`
+	BlocklistManifest string                  `json:"blocklist_manifest,omitempty"`
+	BlocklistSHA256   string                  `json:"blocklist_sha256,omitempty"`
+	MaxRequests       int                     `json:"max_requests"`
+	MaxConcurrent     int                     `json:"max_concurrent"`
+	MaxConnectSeconds int64                   `json:"max_connect_seconds"`
+	MaxUploadBytes    int64                   `json:"max_upload_bytes"`
+	MaxDownloadBytes  int64                   `json:"max_download_bytes"`
+	MaxTotalBytes     int64                   `json:"max_total_bytes"`
+}
+
 type legacyGitV2 struct {
 	Remotes              []string `json:"remotes"`
 	PushApprovalRequired bool     `json:"push_approval_required"`
@@ -82,6 +114,19 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 			return ProjectPolicy{}, false, err
 		}
 		return current, false, current.Validate()
+	case 5:
+		var legacy legacyPolicyV5
+		if err := decodeStrict(data, &legacy); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		migrated, err := migrateV5(legacy, now)
+		if err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		if err := Save(path, migrated); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		return migrated, true, nil
 	case 4:
 		var legacy legacyPolicyV4
 		if err := decodeStrict(data, &legacy); err != nil {
@@ -139,11 +184,29 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 	}
 }
 
+func migrateV5(legacy legacyPolicyV5, now time.Time) (ProjectPolicy, error) {
+	policy := ProjectPolicy{
+		SchemaVersion: CurrentSchemaVersion, ProjectID: legacy.ProjectID, ProjectRoot: legacy.ProjectRoot, Mode: legacy.Mode,
+		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: legacy.Model, Git: legacy.Git,
+		Web: WebPolicy{
+			Enabled: legacy.Web.Enabled, Rules: append([]webgateway.OriginRule(nil), legacy.Web.Rules...),
+			BlocklistManifest: legacy.Web.BlocklistManifest, BlocklistSHA256: legacy.Web.BlocklistSHA256,
+			MaxRequests: legacy.Web.MaxRequests, MaxConcurrent: legacy.Web.MaxConcurrent, MaxConnectSeconds: legacy.Web.MaxConnectSeconds,
+			MaxUploadBytes: legacy.Web.MaxUploadBytes, MaxDownloadBytes: legacy.Web.MaxDownloadBytes, MaxTotalBytes: legacy.Web.MaxTotalBytes,
+		},
+		Export: legacy.Export, Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
+		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
+	}
+	migrateLegacyWebSelection(&policy.Web)
+	return policy, policy.Validate()
+}
+
 func migrateV3(legacy legacyPolicyV3, now time.Time) (ProjectPolicy, error) {
 	policy := ProjectPolicy(legacy)
 	policy.SchemaVersion = CurrentSchemaVersion
 	setLegacyAuthenticationDefault(&policy.Model)
 	upgradeLegacyModelDefaults(&policy.Model)
+	migrateLegacyWebSelection(&policy.Web)
 	policy.UpdatedAt = now.UTC()
 	return policy, policy.Validate()
 }
@@ -152,6 +215,7 @@ func migrateV4(legacy legacyPolicyV4, now time.Time) (ProjectPolicy, error) {
 	policy := ProjectPolicy(legacy)
 	policy.SchemaVersion = CurrentSchemaVersion
 	setLegacyAuthenticationDefault(&policy.Model)
+	migrateLegacyWebSelection(&policy.Web)
 	policy.UpdatedAt = now.UTC()
 	return policy, policy.Validate()
 }
@@ -172,6 +236,19 @@ func upgradeLegacyModelDefaults(model *ModelPolicy) {
 	model.MaxResponseBytes = modelgateway.DefaultMaxResponseBytes
 }
 
+func migrateLegacyWebSelection(web *WebPolicy) {
+	if len(web.OriginPresets) != 0 || web.OriginPresetSHA256 != "" || len(web.CustomRules) != 0 {
+		return
+	}
+	web.CustomRules = append([]webgateway.OriginRule(nil), web.Rules...)
+	for index := range web.CustomRules {
+		web.CustomRules[index].Category = "user"
+	}
+	if web.Enabled {
+		web.Rules = append([]webgateway.OriginRule(nil), web.CustomRules...)
+	}
+}
+
 func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
 	remotes := make([]GitRemotePolicy, 0, len(legacy.Git.Remotes))
 	for index, remoteURL := range legacy.Git.Remotes {
@@ -190,6 +267,7 @@ func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
 	}
 	setLegacyAuthenticationDefault(&policy.Model)
 	upgradeLegacyModelDefaults(&policy.Model)
+	migrateLegacyWebSelection(&policy.Web)
 	return policy, policy.Validate()
 }
 

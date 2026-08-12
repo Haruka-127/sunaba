@@ -80,7 +80,7 @@ bin/sunaba config show --dir "$PROJECT"
 bin/sunaba config show --effective --dir "$PROJECT"
 ```
 
-`project.json`ではmode、CPU/memory/disk/process上限、session TTL/idle、Model allowlist/quota、Git remote、Web quota、export上限、audit retentionを管理する。dependency digest、credential、capability、blocklist digest、push承認必須、Protected Pathはsunabaが生成するため記述できない。設定directoryはmode `0700`、fileはmode `0600`であり、VMにはmount/copyされない。
+`project.json`ではmode、CPU/memory/disk/process上限、session TTL/idle、Model allowlist/quota、Git remote、Webの組み込みorigin presetとquota、export上限、audit retentionを管理する。dependency digest、credential、capability、preset内容/digest、blocklist digest、push承認必須、Protected Pathはsunabaが生成するため記述できない。設定directoryはmode `0700`、fileはmode `0600`であり、VMにはmount/copyされない。
 
 編集後は次の順序で明示適用する。未適用または不正な設定がある間、`up`、`agent`、`shell`は起動を拒否する。`status`と停止・export・recreate・destroyは復旧のため引き続き使用できる。active/paused VMまたはpending Change Setがある場合は、先に`changes export`または`recreate`を行う。
 
@@ -181,7 +181,19 @@ Git LFS endpointとSSH transportは対象外である。submoduleは親remoteの
 
 ## 8. Web Gatewayを使う
 
-secure modeの一般Web通信は既定で拒否される。必要なoriginだけをhost設定directoryの`web-origins.txt`へ登録できる。
+secure modeの一般Web通信は既定で拒否される。新規Projectの`project.json`は、依存導入でよく使う190件のoriginを収録した組み込み`common-development` presetを選択済みにするが、`web.enabled`は`false`なので通信は開始されない。Web Gatewayを有効にするとpresetが展開される。該当部分は次の形になる（他の必須fieldは省略）。
+
+```json
+{
+  "web": {
+    "enabled": true,
+    "origin_presets": ["common-development"],
+    "origins_file": "web-origins.txt"
+  }
+}
+```
+
+`web-origins.txt`はProject固有の追加分だけを保持する。
 
 ```text
 # exact HTTPS origin
@@ -192,19 +204,26 @@ https://packages.example include-subdomains
 http://archive.example
 ```
 
-`project.json`の`web.enabled`を`true`にし、両fileをmode `0600`にしたうえで`config validate`、`config diff`、`config apply`を実行する。各行はHTTP(S) originだけを許可し、path、query、userinfo、非標準port、IP literal、未知option、重複ruleが1件でもあればfile全体を拒否する。上限は64 KiB、1024 ruleである。
+`project.json`の`web.enabled`を`true`にし、両fileをmode `0600`にしたうえで`config validate`、`config diff`、`config apply`を実行する。presetを使わない場合は`origin_presets`を空配列にする。各行はHTTP(S) originだけを許可し、path、query、userinfo、非標準port、IP literal、未知option、重複ruleが1件でもあればfile全体を拒否する。上限は64 KiB、preset展開後を含め1024 ruleである。
 
 既存のCLIでも同じhost設定と実効policyを同期して更新できる。
 
 ```sh
 bin/sunaba web enable --origin https://docs.example \
   --origin https://packages.example --dir "$PROJECT"
+# presetを使わずProject固有originだけにする場合
+bin/sunaba web enable --default-origins=false \
+  --origin https://packages.example --dir "$PROJECT"
 bin/sunaba web refresh --dir "$PROJECT"
 ```
+
+`web enable`は既定で`common-development`を利用し、`--origin`を追加分として扱う。引数なしの`web enable`はpresetだけを有効にする。`config apply`時にpreset展開結果とdigestを実効policyへ固定するため、sunaba更新でpreset内容が変わっても既存Projectへ黙って反映されず、`config diff`と再適用が必要になる。旧Projectのoriginはmigration時にProject固有ruleとして保持され、自動的にpresetへ拡張されない。
 
 `enable`と`refresh`はhostで固定blocklist sourceを取得し、digestと期限へ束縛したsnapshotを保存する。`config apply`もWebの新規有効化時または有効なsnapshotがない場合だけ取得する。期限切れや取得・検証失敗時はfail closedとなる。設定変更はactive/paused VMがある間は拒否される。
 
 HTTPはallowlist originへのGET/HEADだけを許し、body/uploadを拒否する。HTTPSは443へのTLS非終端CONNECTなので、送信先origin、解決後IP、時間、byte量は制限するが、暗号化されたtunnel内部のmethod、path、upload内容は識別・保証しない。
+
+`common-development`にはpackage registry、CDN、public object storageなど第三者がcontentを公開できるoriginも含まれる。依存導入の互換性を目的とした広い許可集合であり、安全なcontentやread-only通信を意味しない。機密Projectではpresetを無効にし、必要最小限のProject固有originだけを使う。
 
 ```sh
 bin/sunaba web disable --dir "$PROJECT"

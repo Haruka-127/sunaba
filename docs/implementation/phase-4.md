@@ -48,6 +48,7 @@ pinned OpenCodeソースとの照合:
 - 完了: URLhaus由来の外部maintainer feedをStevenBlack hosts repositoryの固定HTTPS pathからhostが取得する。各snapshotをSHA-256、取得時刻、最大14日の期限へ固定し、redirect、形式逸脱、改ざん、期限切れをfail closedにする
 - 完了: 実OpenCode webfetch/websearch、curl、wget、非root apt metadata、証明書検証付きHTTPS CONNECTの実VM gate
 - 完了: private/metadata、blocklist、direct IP、HTTP upload、cross-origin redirect、pause、secret export、audit redaction attack gate
+- 完了: 指定Projectの190件（source SHA-256 `986b65106d38478b8fae51a8822110a794587c89b408059de6420e7bd25dc763`）を組み込み`common-development` presetへ固定し、preset不使用、Project固有追加、和集合と重複除去、preset digest差分、旧policyの非拡張migrationをunit testで固定
 
 既定blocklist source:
 

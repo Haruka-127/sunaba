@@ -21,6 +21,7 @@ import (
 	"sunaba/internal/projectconfig"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
+	"sunaba/internal/webgateway"
 	"sunaba/internal/workspace"
 )
 
@@ -698,6 +699,9 @@ func TestHostProjectConfigurationMustBeAppliedBeforeUse(t *testing.T) {
 	config, rules, err := configs.Load(projectID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if config.Web.Enabled || len(config.Web.OriginPresets) != 1 || config.Web.OriginPresets[0] != webgateway.CommonDevelopmentOriginPreset || len(rules) != 0 {
+		t.Fatalf("unexpected new Project Web defaults: config=%+v rules=%+v", config.Web, rules)
 	}
 	config.Mode = "dev"
 	encoded, err := projectconfig.Marshal(config)

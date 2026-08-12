@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 1
+	CurrentSchemaVersion = 2
 	ProjectFileName      = "project.json"
 	WebOriginsFileName   = "web-origins.txt"
 	maxConfigBytes       = 1 << 20
@@ -57,14 +57,15 @@ type GitConfig struct {
 }
 
 type WebConfig struct {
-	Enabled           bool   `json:"enabled"`
-	OriginsFile       string `json:"origins_file"`
-	MaxRequests       int    `json:"max_requests"`
-	MaxConcurrent     int    `json:"max_concurrent"`
-	MaxConnectSeconds int64  `json:"max_connect_seconds"`
-	MaxUploadBytes    int64  `json:"max_upload_bytes"`
-	MaxDownloadBytes  int64  `json:"max_download_bytes"`
-	MaxTotalBytes     int64  `json:"max_total_bytes"`
+	Enabled           bool     `json:"enabled"`
+	OriginPresets     []string `json:"origin_presets"`
+	OriginsFile       string   `json:"origins_file"`
+	MaxRequests       int      `json:"max_requests"`
+	MaxConcurrent     int      `json:"max_concurrent"`
+	MaxConnectSeconds int64    `json:"max_connect_seconds"`
+	MaxUploadBytes    int64    `json:"max_upload_bytes"`
+	MaxDownloadBytes  int64    `json:"max_download_bytes"`
+	MaxTotalBytes     int64    `json:"max_total_bytes"`
 }
 
 type Paths struct {
@@ -188,6 +189,9 @@ func (s *Store) Load(projectID string) (Config, []webgateway.OriginRule, error) 
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return Config{}, nil, fmt.Errorf("Project configuration contains trailing data")
 	}
+	if config.SchemaVersion == 1 {
+		config.SchemaVersion = CurrentSchemaVersion
+	}
 	if state.ProjectID(config.ProjectRoot) != projectID {
 		return Config{}, nil, fmt.Errorf("Project configuration identity does not match its directory")
 	}
@@ -246,7 +250,7 @@ func FromPolicy(effective policy.ProjectPolicy) (Config, []webgateway.OriginRule
 		Model:         effective.Model,
 		Git:           GitConfig{Remotes: append([]policy.GitRemotePolicy(nil), effective.Git.Remotes...)},
 		Web: WebConfig{
-			Enabled: effective.Web.Enabled, OriginsFile: WebOriginsFileName,
+			Enabled: effective.Web.Enabled, OriginPresets: append([]string(nil), effective.Web.OriginPresets...), OriginsFile: WebOriginsFileName,
 			MaxRequests: effective.Web.MaxRequests, MaxConcurrent: effective.Web.MaxConcurrent,
 			MaxConnectSeconds: effective.Web.MaxConnectSeconds, MaxUploadBytes: effective.Web.MaxUploadBytes,
 			MaxDownloadBytes: effective.Web.MaxDownloadBytes, MaxTotalBytes: effective.Web.MaxTotalBytes,
@@ -254,7 +258,7 @@ func FromPolicy(effective policy.ProjectPolicy) (Config, []webgateway.OriginRule
 		Export: effective.Export,
 		Audit:  effective.Audit,
 	}
-	return normalizeConfig(config), normalizeRules(effective.Web.Rules)
+	return normalizeConfig(config), normalizeRules(effective.Web.CustomRules)
 }
 
 func Validate(config Config, rules []webgateway.OriginRule) error {
@@ -264,20 +268,23 @@ func Validate(config Config, rules []webgateway.OriginRule) error {
 	if config.Web.OriginsFile != WebOriginsFileName {
 		return fmt.Errorf("web.origins_file must be %q", WebOriginsFileName)
 	}
-	if !config.Web.Enabled && len(rules) != 0 {
-		return fmt.Errorf("disabled Web Gateway must have an empty origins file")
+	resolvedRules, presetDigest, err := ResolveWebRules(config, rules)
+	if err != nil {
+		return err
 	}
-	if config.Web.Enabled && len(rules) == 0 {
+	if config.Web.Enabled && len(resolvedRules) == 0 {
 		return fmt.Errorf("enabled Web Gateway requires at least one origin")
 	}
 	created := time.Unix(1, 0).UTC()
+	normalizedPresets := normalizeConfig(config).Web.OriginPresets
 	candidate := policy.ProjectPolicy{
 		SchemaVersion: policy.CurrentSchemaVersion, ProjectID: state.ProjectID(config.ProjectRoot), ProjectRoot: config.ProjectRoot, Mode: config.Mode,
 		Dependency: policy.DependencyPolicy{ManifestSHA256: strings.Repeat("0", 64), OpenCode: "pinned", AppleContainer: "pinned", AgentImage: "sunaba-base:pinned"},
 		Resources:  config.Resources, Session: config.Session, Model: config.Model,
 		Git: policy.GitPolicy{Remotes: append([]policy.GitRemotePolicy(nil), config.Git.Remotes...), PushApprovalRequired: true},
 		Web: policy.WebPolicy{
-			Enabled: config.Web.Enabled, Rules: append([]webgateway.OriginRule(nil), rules...),
+			Enabled: config.Web.Enabled, OriginPresets: normalizedPresets, OriginPresetSHA256: presetDigest,
+			CustomRules: append([]webgateway.OriginRule(nil), rules...), Rules: append([]webgateway.OriginRule(nil), resolvedRules...),
 			MaxRequests: config.Web.MaxRequests, MaxConcurrent: config.Web.MaxConcurrent, MaxConnectSeconds: config.Web.MaxConnectSeconds,
 			MaxUploadBytes: config.Web.MaxUploadBytes, MaxDownloadBytes: config.Web.MaxDownloadBytes, MaxTotalBytes: config.Web.MaxTotalBytes,
 		},
@@ -286,6 +293,9 @@ func Validate(config Config, rules []webgateway.OriginRule) error {
 	if candidate.Web.Enabled {
 		candidate.Web.BlocklistManifest = filepath.Join(config.ProjectRoot, ".sunaba-validation-blocklist.json")
 		candidate.Web.BlocklistSHA256 = strings.Repeat("0", 64)
+	}
+	if !candidate.Web.Enabled {
+		candidate.Web.Rules = nil
 	}
 	if err := candidate.Validate(); err != nil {
 		return fmt.Errorf("invalid Project configuration: %w", err)
@@ -308,8 +318,14 @@ func Compile(config Config, rules []webgateway.OriginRule, base policy.ProjectPo
 	result.Model = config.Model
 	result.Model.AllowedModels = append([]string(nil), config.Model.AllowedModels...)
 	result.Git = policy.GitPolicy{Remotes: append([]policy.GitRemotePolicy(nil), config.Git.Remotes...), PushApprovalRequired: true}
+	resolvedRules, presetDigest, err := ResolveWebRules(config, rules)
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	normalizedPresets := normalizeConfig(config).Web.OriginPresets
 	result.Web = policy.WebPolicy{
-		Enabled: config.Web.Enabled, Rules: normalizeRules(rules), BlocklistManifest: blocklistManifest, BlocklistSHA256: blocklistSHA256,
+		Enabled: config.Web.Enabled, OriginPresets: normalizedPresets, OriginPresetSHA256: presetDigest,
+		CustomRules: normalizeRules(rules), Rules: resolvedRules, BlocklistManifest: blocklistManifest, BlocklistSHA256: blocklistSHA256,
 		MaxRequests: config.Web.MaxRequests, MaxConcurrent: config.Web.MaxConcurrent, MaxConnectSeconds: config.Web.MaxConnectSeconds,
 		MaxUploadBytes: config.Web.MaxUploadBytes, MaxDownloadBytes: config.Web.MaxDownloadBytes, MaxTotalBytes: config.Web.MaxTotalBytes,
 	}
@@ -330,7 +346,25 @@ func Compile(config Config, rules []webgateway.OriginRule, base policy.ProjectPo
 
 func Matches(config Config, rules []webgateway.OriginRule, effective policy.ProjectPolicy) bool {
 	applied, appliedRules := FromPolicy(effective)
-	return reflect.DeepEqual(normalizeConfig(config), applied) && reflect.DeepEqual(normalizeRules(rules), appliedRules)
+	if !reflect.DeepEqual(normalizeConfig(config), applied) || !reflect.DeepEqual(normalizeRules(rules), appliedRules) {
+		return false
+	}
+	resolvedRules, presetDigest, err := ResolveWebRules(config, rules)
+	if err != nil || presetDigest != effective.Web.OriginPresetSHA256 {
+		return false
+	}
+	if !config.Web.Enabled {
+		resolvedRules = nil
+	}
+	return reflect.DeepEqual(resolvedRules, effective.Web.Rules)
+}
+
+func ResolveWebRules(config Config, rules []webgateway.OriginRule) ([]webgateway.OriginRule, string, error) {
+	resolved, digest, err := webgateway.ResolveOriginRules(config.Web.OriginPresets, rules)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid Web origin selection: %w", err)
+	}
+	return resolved, digest, nil
 }
 
 func ParseOrigin(raw string, includeSubdomains bool) (webgateway.OriginRule, error) {
@@ -406,6 +440,7 @@ func ParseOrigins(data []byte) ([]webgateway.OriginRule, error) {
 
 func RenderOrigins(rules []webgateway.OriginRule) []byte {
 	var output strings.Builder
+	output.WriteString("# Project-specific additions only; built-in presets are selected in project.json.\n")
 	output.WriteString("# One HTTP(S) origin per line. Add 'include-subdomains' only when explicitly required.\n")
 	for _, rule := range normalizeRules(rules) {
 		scheme := "https"
@@ -425,6 +460,8 @@ func normalizeConfig(config Config) Config {
 	config.Model.AllowedModels = append([]string(nil), config.Model.AllowedModels...)
 	config.Git.Remotes = append(make([]policy.GitRemotePolicy, 0, len(config.Git.Remotes)), config.Git.Remotes...)
 	sort.Slice(config.Git.Remotes, func(i, j int) bool { return config.Git.Remotes[i].Name < config.Git.Remotes[j].Name })
+	config.Web.OriginPresets = append(make([]string, 0, len(config.Web.OriginPresets)), config.Web.OriginPresets...)
+	sort.Strings(config.Web.OriginPresets)
 	return config
 }
 

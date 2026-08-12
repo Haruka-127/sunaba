@@ -1,6 +1,7 @@
 package projectconfig
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"sunaba/internal/policy"
 	"sunaba/internal/state"
+	"sunaba/internal/webgateway"
 )
 
 func TestStoreKeepsEditableConfigurationOutsideProject(t *testing.T) {
@@ -121,6 +123,55 @@ func TestCompileSeparatesDeclarativeAndGeneratedPolicyFields(t *testing.T) {
 	}
 }
 
+func TestCompileResolvesBuiltInPresetAndProjectAdditions(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	effective := testPolicy(t, project)
+	config, _ := FromPolicy(effective)
+	config.Web.Enabled = true
+	custom, err := ParseOrigin("https://custom.example", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocklist := filepath.Join(base, "blocklist.json")
+	compiled, err := Compile(config, []webgateway.OriginRule{custom}, effective, blocklist, strings.Repeat("1", 64), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.Web.OriginPresets) != 1 || compiled.Web.OriginPresets[0] != webgateway.CommonDevelopmentOriginPreset || len(compiled.Web.CustomRules) != 1 || len(compiled.Web.Rules) != 191 || len(compiled.Web.OriginPresetSHA256) != 64 {
+		t.Fatalf("compiled Web policy=%+v", compiled.Web)
+	}
+	if !Matches(config, []webgateway.OriginRule{custom}, compiled) {
+		t.Fatal("compiled preset policy did not match its declarative configuration")
+	}
+
+	config.Web.OriginPresets = nil
+	customOnly, err := Compile(config, []webgateway.OriginRule{custom}, compiled, blocklist, strings.Repeat("1", 64), time.Now().Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(customOnly.Web.Rules) != 1 || customOnly.Web.OriginPresetSHA256 != "" {
+		t.Fatalf("custom-only Web policy=%+v", customOnly.Web)
+	}
+}
+
+func TestMatchesDetectsChangedBuiltInPresetDigestWhileDisabled(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	effective := testPolicy(t, project)
+	config, rules := FromPolicy(effective)
+	effective.Web.OriginPresetSHA256 = strings.Repeat("f", 64)
+	if Matches(config, rules, effective) {
+		t.Fatal("changed built-in preset digest was treated as applied")
+	}
+}
+
 func TestStoreRejectsSymlinkedOriginFile(t *testing.T) {
 	base, _ := filepath.EvalSymlinks(t.TempDir())
 	project := filepath.Join(base, "project")
@@ -166,7 +217,7 @@ func TestStoreRejectsUnknownConfigurationAndDoesNotFollowDirectorySymlink(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = []byte(strings.Replace(string(data), "\"schema_version\": 1,", "\"schema_version\": 1,\n  \"unknown\": true,", 1))
+	data = []byte(strings.Replace(string(data), "\"schema_version\": 2,", "\"schema_version\": 2,\n  \"unknown\": true,", 1))
 	if err := os.WriteFile(paths.Project, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -199,6 +250,42 @@ func TestStoreRejectsUnknownConfigurationAndDoesNotFollowDirectorySymlink(t *tes
 	}
 	if targetInfo.Mode().Perm() != 0755 {
 		t.Fatalf("symlink target mode was modified: mode=%v", targetInfo.Mode())
+	}
+}
+
+func TestStoreLoadsSchemaV1WithoutAutomaticallySelectingPreset(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	effective := testPolicy(t, project)
+	config, rules := FromPolicy(effective)
+	store := &Store{Root: filepath.Join(base, "config", "sunaba")}
+	if err := store.Save(effective.ProjectID, config, rules); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := store.ProjectPaths(effective.ProjectID)
+	data, err := os.ReadFile(paths.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy["schema_version"] = float64(1)
+	delete(legacy["web"].(map[string]any), "origin_presets")
+	data, _ = json.MarshalIndent(legacy, "", "  ")
+	if err := os.WriteFile(paths.Project, append(data, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, loadedRules, err := store.Load(effective.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SchemaVersion != CurrentSchemaVersion || len(loaded.Web.OriginPresets) != 0 || len(loadedRules) != 0 {
+		t.Fatalf("legacy configuration expanded access: config=%+v rules=%+v", loaded.Web, loadedRules)
 	}
 }
 

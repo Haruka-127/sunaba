@@ -37,7 +37,7 @@ image buildはembedded bytesをmanifestへ再照合してから実行する。ve
 
 ## Project policy migration
 
-Project policy schema v5はProject identity/root、mode、dependency、resource、session、Model/Git/Web、export、audit retention、Protected Pathを一つのdigest可能な文書へ統合し、Git remoteを名前と固定URLの組として保持する。v4でModel Gatewayの既定quotaとtransport sizeを長時間のagent session向けに更新し、v5でModel Gatewayの`api_key`/`oauth`認証方式を追加した。
+Project policy schema v6はProject identity/root、mode、dependency、resource、session、Model/Git/Web、export、audit retention、Protected Pathを一つのdigest可能な文書へ統合し、Git remoteを名前と固定URLの組として保持する。v4でModel Gatewayの既定quotaとtransport sizeを長時間のagent session向けに更新し、v5でModel Gatewayの`api_key`/`oauth`認証方式、v6でWeb Gatewayの組み込みorigin preset選択、preset digest、Project固有rule、展開済み実効ruleを追加した。
 
 - JSON unknown field、trailing data、unsupported schemaを拒否
 - canonical rootとProject IDの差し替えを拒否
@@ -47,7 +47,7 @@ Project policy schema v5はProject identity/root、mode、dependency、resource�
 
 ## Host-only Project configuration
 
-Projectの利用者設定を内部stateから分離し、`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/project.json`を起動設定、同directoryの`web-origins.txt`をWeb allowlistの正本とした。両fileはcurrent user所有のmode `0600`、directoryはmode `0700`とし、symlink、未知JSON field、trailing data、oversize、不正originを拒否する。Project worktreeとVMには設定directoryを公開しない。
+Projectの利用者設定を内部stateから分離し、`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/project.json` schema v2を起動設定、同directoryの`web-origins.txt`をProject固有Web allowlist追加分の正本とした。組み込み`common-development` presetはsunaba本体へ固定し、選択名だけを`project.json`へ置く。両fileはcurrent user所有のmode `0600`、directoryはmode `0700`とし、symlink、未知JSON field、trailing data、oversize、不正originを拒否する。Project worktreeとVMには設定directoryを公開しない。
 
 - `config path|validate|diff|apply|show`でpath確認、厳格検証、実効policyとの差分、停止状態でのcompile、declarative/effective表示を行う
 - dependency、blocklist binding、push承認必須、Protected Path、runtime identity、credential/capabilityはdeclarative設定から除外し、host側で生成する

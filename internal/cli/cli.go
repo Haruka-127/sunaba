@@ -136,7 +136,7 @@ Usage:
   sunaba git remote remove --name <name> [--dir <path>]
   sunaba git remote list [--dir <path>]
   sunaba git disable [--dir <path>]
-  sunaba web enable --origin <http(s)://host>... [--dir <path>]
+  sunaba web enable [--default-origins=false] [--origin <http(s)://host>...] [--dir <path>]
   sunaba web refresh|disable [--dir <path>]
   sunaba status [--dir <path>]
   sunaba changes export [--dir <path>]

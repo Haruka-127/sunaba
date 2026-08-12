@@ -226,12 +226,13 @@ func sortedGitRemotes(remotes []policy.GitRemotePolicy) []policy.GitRemotePolicy
 
 func (a *app) webPolicy(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sunaba web enable --origin <http(s)://host>... [--dir <path>] | refresh|disable [--dir <path>]")
+		return fmt.Errorf("%s", webPolicyUsage())
 	}
 	fs := flag.NewFlagSet("web "+args[0], flag.ContinueOnError)
 	fs.SetOutput(a.errors)
 	dir := fs.String("dir", ".", "Project directory")
 	includeSubdomains := fs.Bool("include-subdomains", false, "apply every supplied origin rule to subdomains")
+	defaultOrigins := fs.Bool("default-origins", true, "include the built-in common-development origin preset")
 	var origins stringFlags
 	fs.Var(&origins, "origin", "allowed origin; repeat for multiple origins")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -240,6 +241,12 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected Web policy arguments")
 	}
+	defaultOriginsSet := false
+	fs.Visit(func(current *flag.Flag) {
+		if current.Name == "default-origins" {
+			defaultOriginsSet = true
+		}
+	})
 	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
 	if err != nil {
 		return err
@@ -249,9 +256,6 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "enable":
-		if len(origins) == 0 {
-			return fmt.Errorf("web enable requires at least one --origin")
-		}
 		rules := make([]webgateway.OriginRule, 0, len(origins))
 		for _, origin := range origins {
 			rule, err := originRule(origin, *includeSubdomains)
@@ -260,17 +264,25 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 			}
 			rules = append(rules, rule)
 		}
-		return a.refreshWebPolicy(ctx, projectPolicy, path, projectState, rules)
+		projectPolicy.Web.OriginPresets = nil
+		if *defaultOrigins {
+			projectPolicy.Web.OriginPresets = []string{webgateway.CommonDevelopmentOriginPreset}
+		}
+		projectPolicy.Web.CustomRules = rules
+		if len(projectPolicy.Web.OriginPresets) == 0 && len(rules) == 0 {
+			return fmt.Errorf("web enable requires the default preset or at least one --origin")
+		}
+		return a.refreshWebPolicy(ctx, projectPolicy, path, projectState)
 	case "refresh":
-		if len(origins) != 0 || *includeSubdomains {
+		if len(origins) != 0 || *includeSubdomains || defaultOriginsSet {
 			return fmt.Errorf("web refresh does not accept origin changes")
 		}
 		if !projectPolicy.Web.Enabled {
 			return fmt.Errorf("Web Gateway is disabled; use web enable with explicit origins")
 		}
-		return a.refreshWebPolicy(ctx, projectPolicy, path, projectState, projectPolicy.Web.Rules)
+		return a.refreshWebPolicy(ctx, projectPolicy, path, projectState)
 	case "disable":
-		if len(origins) != 0 || *includeSubdomains {
+		if len(origins) != 0 || *includeSubdomains || defaultOriginsSet {
 			return fmt.Errorf("web disable does not accept origin options")
 		}
 		projectPolicy.Web.Enabled = false
@@ -288,24 +300,36 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 	}
 }
 
+func webPolicyUsage() string {
+	return "usage: sunaba web enable [--default-origins=false] [--origin <http(s)://host>...] [--dir <path>] | refresh|disable [--dir <path>]"
+}
+
 func originRule(raw string, includeSubdomains bool) (webgateway.OriginRule, error) {
 	return projectconfig.ParseOrigin(raw, includeSubdomains)
 }
 
-func (a *app) refreshWebPolicy(ctx context.Context, projectPolicy policy.ProjectPolicy, policyPath, projectState string, rules []webgateway.OriginRule) error {
+func (a *app) refreshWebPolicy(ctx context.Context, projectPolicy policy.ProjectPolicy, policyPath, projectState string) error {
+	rules, presetDigest, err := webgateway.ResolveOriginRules(projectPolicy.Web.OriginPresets, projectPolicy.Web.CustomRules)
+	if err != nil {
+		return fmt.Errorf("resolve Web origin policy: %w", err)
+	}
+	if len(rules) == 0 {
+		return fmt.Errorf("resolve Web origin policy: no origins are selected")
+	}
 	manifestPath, digest, expiresAt, err := a.fetchAndPersistWebBlocklist(ctx, projectState)
 	if err != nil {
 		return err
 	}
 	projectPolicy.Web.Enabled = true
 	projectPolicy.Web.Rules = rules
+	projectPolicy.Web.OriginPresetSHA256 = presetDigest
 	projectPolicy.Web.BlocklistManifest = manifestPath
 	projectPolicy.Web.BlocklistSHA256 = digest
 	projectPolicy.UpdatedAt = time.Now().UTC()
 	if err := a.savePolicyAndConfig(policyPath, projectPolicy); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Enabled Web Gateway with %d origin rules and pinned blocklist %s (expires %s).\n", len(rules), digest, expiresAt.Format(time.RFC3339))
+	fmt.Fprintf(a.output, "Enabled Web Gateway with %d effective origin rules (%d custom) and pinned blocklist %s (expires %s).\n", len(rules), len(projectPolicy.Web.CustomRules), digest, expiresAt.Format(time.RFC3339))
 	return nil
 }
 

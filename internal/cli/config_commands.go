@@ -61,7 +61,11 @@ func (a *app) config(ctx context.Context, args []string) error {
 	}
 	switch action {
 	case "validate":
-		fmt.Fprintf(a.output, "Valid host Project configuration for %s with %d Web origin rule(s).\n", effective.ProjectID, len(rules))
+		resolvedRules, _, err := projectconfig.ResolveWebRules(config, rules)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.output, "Valid host Project configuration for %s with %d custom and %d resolved Web origin rule(s).\n", effective.ProjectID, len(rules), len(resolvedRules))
 		return nil
 	case "diff":
 		if projectconfig.Matches(config, rules, effective) {
@@ -72,12 +76,19 @@ func (a *app) config(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		applied, _ := projectconfig.FromPolicy(effective)
+		applied, appliedRules := projectconfig.FromPolicy(effective)
 		appliedJSON, err := projectconfig.Marshal(applied)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.output, "Host Project configuration has unapplied changes.\n\n--- applied project.json\n+++ desired project.json\n%s\n--- applied web origins\n+++ desired web origins\n%s", renderConfigComparison(appliedJSON, desiredJSON), renderConfigComparison(projectconfig.RenderOrigins(effective.Web.Rules), projectconfig.RenderOrigins(rules)))
+		desiredEffectiveRules, desiredPresetDigest, err := projectconfig.ResolveWebRules(config, rules)
+		if err != nil {
+			return err
+		}
+		if !config.Web.Enabled {
+			desiredEffectiveRules = nil
+		}
+		fmt.Fprintf(a.output, "Host Project configuration has unapplied changes.\n\n--- applied project.json\n+++ desired project.json\n%s\n--- applied custom web origins\n+++ desired custom web origins\n%s\n--- applied effective web origins\n+++ desired effective web origins\n%s\n- applied origin preset digest: %s\n+ desired origin preset digest: %s\n", renderConfigComparison(appliedJSON, desiredJSON), renderConfigComparison(projectconfig.RenderOrigins(appliedRules), projectconfig.RenderOrigins(rules)), renderConfigComparison(projectconfig.RenderOrigins(effective.Web.Rules), projectconfig.RenderOrigins(desiredEffectiveRules)), effective.Web.OriginPresetSHA256, desiredPresetDigest)
 		return nil
 	case "show":
 		if *effectiveOutput {

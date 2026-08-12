@@ -76,7 +76,7 @@ devの`up`は固定artifactだけを準備し、VMやdirect-egress networkをbac
 
 Git Gatewayはfixed HTTPS upstream、host credential終端、bare quarantine、standard smart HTTP、object/ref/force/deleteへ束縛したone-shot approvalを実装しています。Web Gatewayはorigin allowlistとhost DNS全回答/IP検査を持つTLS非終端forward proxyで、HTTPはGET/HEADのみ、CONNECTは443のみです。TLS tunnel内部のmethod/path/uploadは復号しないため保証しません。
 
-Projectごとの起動設定はProject worktree外の`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/`で管理します。`project.json`がmode、resource、session、Model/Git/Web、export、audit設定を、`web-origins.txt`がWeb allowlistを保持します。どちらもhost-onlyで、VMへmount/copyされません。
+Projectごとの起動設定はProject worktree外の`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/`で管理します。`project.json`がmode、resource、session、Model/Git/Web、組み込み`common-development` origin preset、export、audit設定を、`web-origins.txt`がProject固有のWeb allowlist追加分を保持します。どちらもhost-onlyで、VMへmount/copyされません。
 
 ```sh
 bin/sunaba config path --dir /absolute/project/path
@@ -92,6 +92,7 @@ bin/sunaba git remote add --name origin --url https://git.example/owner/reposito
 bin/sunaba git remote add --name upstream --url https://git.example/upstream/repository.git --dir /absolute/project/path
 bin/sunaba git remote list --dir /absolute/project/path
 bin/sunaba web enable --origin https://docs.example --dir /absolute/project/path
+bin/sunaba web enable --default-origins=false --origin https://packages.example --dir /absolute/project/path
 bin/sunaba web refresh --dir /absolute/project/path
 bin/sunaba git remote remove --name upstream --dir /absolute/project/path
 bin/sunaba web disable --dir /absolute/project/path

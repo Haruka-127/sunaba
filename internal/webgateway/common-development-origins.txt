@@ -1,0 +1,243 @@
+# Curated development allowlist for Sunaba.
+# Sources (checked 2026-08-12):
+# - OpenAI Codex "Common dependencies"
+# - GitHub Copilot cloud agent recommended allowlist
+#
+# Exact HTTPS origins are preferred. "include-subdomains" is used only where
+# the official references require wildcard subdomains or the service documents
+# multiple operational subdomains.
+
+# Source control and GitHub-operated download infrastructure.
+# githubusercontent.com can serve repository-controlled content; allow it only
+# because source archives, release assets, and raw files depend on it.
+https://github.com include-subdomains
+https://githubassets.com include-subdomains
+https://githubusercontent.com include-subdomains
+https://github-cloud.s3.amazonaws.com
+https://ghcr.io
+https://gitlab.com
+https://bitbucket.org
+https://sourceforge.net
+https://launchpad.net
+
+# Container registries and image distribution.
+# Registry content is publisher-controlled and must still be treated as untrusted.
+https://docker.io include-subdomains
+https://docker.com include-subdomains
+https://production.cloudflare.docker.com
+https://quay.io
+https://mcr.microsoft.com
+https://gcr.io
+https://public.ecr.aws
+
+# Debian (the current Sunaba base image) and LLVM packages.
+# Official Debian images commonly configure HTTP; apt verifies signed metadata.
+https://deb.debian.org
+http://deb.debian.org
+https://security.debian.org
+http://security.debian.org
+https://keyring.debian.org
+https://packages.debian.org
+https://debian.map.fastlydns.net
+https://apt.llvm.org
+https://debian.org
+
+# Other common Linux package repositories.
+https://archive.ubuntu.com
+https://security.ubuntu.com
+https://ppa.launchpad.net
+https://keyserver.ubuntu.com
+https://azure.archive.ubuntu.com
+https://api.snapcraft.io
+https://ubuntu.com
+https://dl.fedoraproject.org
+https://mirrors.fedoraproject.org
+https://download.fedoraproject.org
+https://fedoraproject.org
+https://mirror.centos.org
+https://vault.centos.org
+https://centos.org
+https://dl-cdn.alpinelinux.org
+https://pkg.alpinelinux.org
+https://alpinelinux.org
+https://mirror.archlinux.org
+https://archlinux.org
+https://download.opensuse.org
+https://cdn.redhat.com
+https://packagecloud.io
+https://packages.cloud.google.com
+https://packages.microsoft.com
+
+# Node.js and JavaScript package managers/runtimes.
+# Package registries contain third-party packages, not only operator-authored code.
+https://npmjs.org
+https://npmjs.com
+https://registry.npmjs.org
+https://registry.npmjs.com
+https://skimdb.npmjs.com
+https://api.npms.io
+https://nodejs.org
+https://yarnpkg.com
+https://registry.yarnpkg.com
+https://repo.yarnpkg.com
+https://deb.nodesource.com
+https://get.pnpm.io
+https://bun.sh
+https://deno.land
+https://registry.bower.io
+https://bower.io
+https://binaries.prisma.sh
+
+# Python and Conda.
+https://pypi.python.org
+https://pypi.org
+https://pip.pypa.io
+https://pythonhosted.org include-subdomains
+https://bootstrap.pypa.io
+https://conda.binstar.org
+https://conda.anaconda.org
+https://binstar.org
+https://anaconda.org
+https://anaconda.com
+https://download.pytorch.org
+https://repo.continuum.io
+https://continuum.io
+https://repo.anaconda.com
+https://pypa.io
+
+# Go. storage.googleapis.com is multi-tenant, but the official Go module proxy
+# may use it for module blobs; it is therefore a higher-risk exception.
+https://go.dev
+https://golang.org
+https://proxy.golang.org
+https://sum.golang.org
+https://pkg.go.dev
+https://goproxy.io
+https://storage.googleapis.com
+
+# Rust.
+https://crates.io
+https://index.crates.io
+https://static.crates.io
+https://sh.rustup.rs
+https://rustup.rs
+https://static.rust-lang.org
+
+# Java, Maven, Gradle, Eclipse, and Spring.
+https://www.java.com
+https://java.com
+https://jdk.java.net
+https://java.net
+https://api.adoptium.net
+https://adoptium.net
+https://search.maven.org
+https://maven.org
+https://maven.apache.org
+https://repo.maven.apache.org
+https://repo1.maven.org
+https://maven-central.storage-download.googleapis.com
+https://maven.google.com
+https://maven.oracle.com
+https://jcenter.bintray.com
+https://oss.sonatype.org
+https://repo.spring.io
+https://spring.io
+https://gradle.org
+https://services.gradle.org
+https://plugins.gradle.org
+https://plugins-artifacts.gradle.org
+https://repo.grails.org
+https://download.eclipse.org
+https://eclipse.org
+https://download.oracle.com
+https://apache.org
+
+# .NET and NuGet.
+https://nuget.org
+https://dist.nuget.org
+https://api.nuget.org
+https://dotnet.microsoft.com
+https://pkgs.dev.azure.com
+https://builds.dotnet.microsoft.com
+https://dotnetcli.blob.core.windows.net
+https://nugetregistryv2prod.blob.core.windows.net
+https://azuresearch-usnc.nuget.org
+https://azuresearch-ussc.nuget.org
+https://dot.net
+https://download.visualstudio.microsoft.com
+https://dotnetcli.azureedge.net
+https://ci.dot.net
+https://visualstudio.com
+
+# PHP and Composer.
+https://repo.packagist.org
+https://packagist.org
+https://getcomposer.org
+
+# Ruby.
+https://rubygems.org
+https://api.rubygems.org
+https://bundler.rubygems.org
+https://gems.rubyforge.org
+https://rubyforge.org
+https://gems.rubyonrails.org
+https://rubyonrails.org
+https://index.rubygems.org
+https://cache.ruby-lang.org
+https://ruby-lang.org
+https://rvm.io include-subdomains
+
+# Dart and Flutter package distribution. storage.googleapis.com is listed once
+# above because Sunaba cannot restrict it to the official /pub-packages path.
+https://pub.dev
+https://pub.dartlang.org
+
+# Haskell.
+https://haskell.org
+https://hackage.haskell.org include-subdomains
+https://get-ghcup.haskell.org
+https://downloads.haskell.org
+
+# Swift and CocoaPods.
+https://download.swift.org
+https://swift.org
+https://cocoapods.org
+https://cdn.cocoapods.org
+
+# Perl and CPAN.
+https://cpan.org
+https://www.cpan.org
+https://metacpan.org
+https://cpan.metacpan.org
+
+# HashiCorp and Kubernetes tooling.
+https://hashicorp.com
+https://releases.hashicorp.com
+https://apt.releases.hashicorp.com
+https://yum.releases.hashicorp.com
+https://registry.terraform.io
+https://k8s.io
+https://dl.k8s.io
+https://pkgs.k8s.io
+
+# Schemas and Playwright/browser binaries.
+https://json-schema.org
+https://json.schemastore.org
+https://playwright.download.prss.microsoft.com
+https://cdn.playwright.dev
+https://playwright.azureedge.net
+https://playwright-akamai.azureedge.net
+https://playwright-verizon.azureedge.net
+
+# Official documentation commonly needed during development.
+https://docs.github.com
+https://developer.mozilla.org
+https://docs.python.org
+https://docs.rs
+https://doc.rust-lang.org
+https://learn.microsoft.com
+https://docs.oracle.com
+https://manpages.debian.org
+https://learn.chatgpt.com
+https://developers.openai.com
+https://platform.openai.com
