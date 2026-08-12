@@ -31,6 +31,7 @@ func TestCreateArgsForSecureSocketOnlyContainer(t *testing.T) {
 		Ulimits:  map[string]RLimit{"nproc": {Soft: 64, Hard: 64}, "fsize": {Soft: 1024, Hard: 1024}},
 		Networks: []string{"none"},
 		NoDNS:    true,
+		Init:     true,
 		CapDrop:  []string{"NET_RAW"},
 		Mounts: []Mount{{
 			Type: "socket", Source: "/private/tmp/gateway.sock", Target: "/run/sunaba/model.sock",
@@ -42,7 +43,7 @@ func TestCreateArgsForSecureSocketOnlyContainer(t *testing.T) {
 	}
 	want := []string{
 		"run", "--detach", "--name", "sunaba-test-project",
-		"--cpus", "2", "--memory", "2G", "--ulimit", "fsize=1024:1024", "--ulimit", "nproc=64:64", "--network", "none", "--no-dns", "--cap-drop", "NET_RAW",
+		"--cpus", "2", "--memory", "2G", "--ulimit", "fsize=1024:1024", "--ulimit", "nproc=64:64", "--network", "none", "--no-dns", "--init", "--cap-drop", "NET_RAW",
 		"--volume", "/private/tmp/gateway.sock:/run/sunaba/model.sock",
 		"--publish-socket", "/private/tmp/attach.sock:/run/sunaba/attach.sock",
 		"--env", "A=first", "--env", "Z=last", "--label", "a=first", "--label", "z=last",

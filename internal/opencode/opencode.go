@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"sunaba/internal/dependency"
@@ -24,37 +25,52 @@ func CheckPrerequisites(ctx context.Context) error {
 	if runtime.GOARCH != "arm64" {
 		return fmt.Errorf("sunaba requires Apple silicon (darwin/arm64); current arch is %s", runtime.GOARCH)
 	}
-	macVersion, err := commandOutput(ctx, 10*time.Second, "sw_vers", "-productVersion")
-	if err != nil {
-		return fmt.Errorf("cannot determine macOS version: %w", err)
-	}
-	if CompareVersion(macVersion, "26.0.0") < 0 {
-		return fmt.Errorf("sunaba requires macOS 26 or later; current version is %s", macVersion)
-	}
 	if _, err := exec.LookPath("container"); err != nil {
 		return fmt.Errorf("container CLI not found. Install apple/container, then run 'container system start'")
 	}
 	if _, err := exec.LookPath("opencode"); err != nil {
 		return fmt.Errorf("opencode CLI %s not found", dependency.OpenCodeVersion)
 	}
-	hostVersion, err := HostVersion(ctx)
-	if err != nil {
-		return fmt.Errorf("cannot determine host OpenCode version: %w", err)
+	var macVersion, hostVersion, containerVersionOutput, systemStatus string
+	var macErr, hostErr, containerErr, statusErr error
+	var checks sync.WaitGroup
+	checks.Add(4)
+	go func() {
+		defer checks.Done()
+		macVersion, macErr = commandOutput(ctx, 10*time.Second, "sw_vers", "-productVersion")
+	}()
+	go func() {
+		defer checks.Done()
+		hostVersion, hostErr = HostVersion(ctx)
+	}()
+	go func() {
+		defer checks.Done()
+		containerVersionOutput, containerErr = commandOutput(ctx, 10*time.Second, "container", "--version")
+	}()
+	go func() {
+		defer checks.Done()
+		systemStatus, statusErr = commandOutput(ctx, 10*time.Second, "container", "system", "status")
+	}()
+	checks.Wait()
+	if macErr != nil {
+		return fmt.Errorf("cannot determine macOS version: %w", macErr)
+	}
+	if CompareVersion(macVersion, "26.0.0") < 0 {
+		return fmt.Errorf("sunaba requires macOS 26 or later; current version is %s", macVersion)
+	}
+	if hostErr != nil {
+		return fmt.Errorf("cannot determine host OpenCode version: %w", hostErr)
 	}
 	if err := validateOpenCodeVersion(hostVersion); err != nil {
 		return err
 	}
-	containerVersionOutput, err := commandOutput(ctx, 10*time.Second, "container", "--version")
-	if err != nil {
-		return fmt.Errorf("cannot determine apple/container version: %w", err)
+	if containerErr != nil {
+		return fmt.Errorf("cannot determine apple/container version: %w", containerErr)
 	}
 	if err := validateAppleContainerVersion(containerVersionOutput); err != nil {
 		return err
 	}
-	c, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(c, "container", "system", "status").CombinedOutput()
-	if err != nil || !strings.Contains(strings.ToLower(string(out)), "running") {
+	if statusErr != nil || !strings.Contains(strings.ToLower(systemStatus), "running") {
 		return fmt.Errorf("container system is not running. Run 'container system start'")
 	}
 	return nil

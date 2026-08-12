@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -32,6 +33,9 @@ import (
 var sessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{5,63}$`)
 var secretPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{32,256}$`)
 var gitRemoteNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+const guestResourceProbeBegin = "SUNABA_RESOURCE_PROBE_BEGIN"
+const guestResourceProbeEnd = "SUNABA_RESOURCE_PROBE_END"
 
 type GitRemote struct {
 	Name  string
@@ -209,7 +213,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 			"fsize":  {Soft: cfg.FileSizeMax, Hard: cfg.FileSizeMax},
 			"nofile": {Soft: cfg.OpenFileMax, Hard: cfg.OpenFileMax},
 		},
-		Networks: networks, NoDNS: noDNS, CapAdd: []string{"SYS_ADMIN"},
+		Networks: networks, NoDNS: noDNS, Init: true, CapAdd: []string{"SYS_ADMIN"},
 		Entrypoint: "/bin/bash", Args: []string{"-lc", "exec tail -f /dev/null"},
 		Mounts:  mounts,
 		Sockets: []runtime.PublishedSocket{{HostPath: filepath.Join(s.Root, "attach.sock"), GuestPath: runtime.SecureAttachGuestPath}},
@@ -239,9 +243,6 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	}
 	if health.Version != dependency.OpenCodeVersion {
 		return nil, fmt.Errorf("OpenCode server version %q does not match pinned Host TUI %q", health.Version, dependency.OpenCodeVersion)
-	}
-	if err := s.verifyGuestResources(ctx); err != nil {
-		return nil, err
 	}
 	if _, err := s.leaseRegistry.Activate(s.SessionID); err != nil {
 		return nil, err
@@ -530,9 +531,6 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 	if health.Version != dependency.OpenCodeVersion {
 		return fmt.Errorf("resumed OpenCode version %q does not match pinned version", health.Version)
 	}
-	if err := s.verifyGuestResources(ctx); err != nil {
-		return err
-	}
 	if _, err := s.leaseRegistry.Activate(s.SessionID); err != nil {
 		return err
 	}
@@ -577,11 +575,13 @@ func (s *Session) resumeGuest(ctx context.Context) error {
 		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
 		s.guestServerCommand(),
 	)
+	commands = append(commands, guestResourceProbeCommands()...)
 	resume := strings.Join(commands, "\n")
-	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", resume}); err != nil {
+	out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", resume})
+	if err != nil {
 		return fmt.Errorf("resume secure guest services: %w: %s", err, out)
 	}
-	return nil
+	return s.validateGuestResources(out)
 }
 
 func (s *Session) configureGuest(ctx context.Context) error {
@@ -632,28 +632,37 @@ func (s *Session) configureGuest(ctx context.Context) error {
 		"nohup /run/sunaba/guest-relay --listen /run/sunaba/attach.sock --target 127.0.0.1:4096 >/run/sunaba/attach-relay.log 2>&1 &",
 		s.guestServerCommand(),
 	)
+	commands = append(commands, guestResourceProbeCommands()...)
 	setup := strings.Join(commands, "\n")
-	if out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", setup}); err != nil {
+	out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", setup})
+	if err != nil {
 		return fmt.Errorf("configure secure guest: %w: %s", err, out)
 	}
-	return nil
+	return s.validateGuestResources(out)
 }
 
 func (s *Session) restoreGuestRuntimeInputs(ctx context.Context) (err error) {
-	if err := s.cfg.Runtime.Exec(ctx, s.Container, false, []string{"mkdir", "-p", "/var/lib/sunaba", "/run/sunaba"}); err != nil {
-		return fmt.Errorf("prepare guest runtime directory: %w", err)
+	bundleRoot := filepath.Join(s.Root, "session-input-bundle")
+	bundlePath := filepath.Join(bundleRoot, "sunaba")
+	if err := os.Mkdir(bundleRoot, 0700); err != nil {
+		return fmt.Errorf("create host session input bundle: %w", err)
 	}
-	providerPath := filepath.Join(s.Root, "opencode.json")
-	envPath := filepath.Join(s.Root, "session.env")
-	shellWrapperPath := filepath.Join(s.Root, "shell-wrapper")
-	ephemeralHostFiles := []string{providerPath, envPath, shellWrapperPath}
+	if err := os.Mkdir(bundlePath, 0700); err != nil {
+		_ = os.Remove(bundleRoot)
+		return fmt.Errorf("create private host session input directory: %w", err)
+	}
 	defer func() {
-		for _, path := range ephemeralHostFiles {
-			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				err = errors.Join(err, fmt.Errorf("remove copied host session input: %w", removeErr))
-			}
+		if removeErr := os.RemoveAll(bundleRoot); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove copied host session input bundle: %w", removeErr))
 		}
 	}()
+	providerPath := filepath.Join(bundlePath, "opencode.json")
+	envPath := filepath.Join(bundlePath, "session.env")
+	shellWrapperPath := filepath.Join(bundlePath, "shell-wrapper")
+	relayPath := filepath.Join(bundlePath, "guest-relay")
+	if err := copyPrivateRegularFile(s.cfg.GuestRelayBinary, relayPath, 0700); err != nil {
+		return fmt.Errorf("stage guest relay: %w", err)
+	}
 	if err := os.WriteFile(providerPath, s.cfg.ProviderConfig, 0600); err != nil {
 		return err
 	}
@@ -672,28 +681,43 @@ func (s *Session) restoreGuestRuntimeInputs(ctx context.Context) (err error) {
 	if err := os.WriteFile(shellWrapperPath, []byte(s.guestShellWrapper()), 0600); err != nil {
 		return err
 	}
-	copies := [][2]string{
-		{s.cfg.GuestRelayBinary, "/run/sunaba/guest-relay"},
-		{providerPath, "/run/sunaba/opencode.json"},
-		{envPath, "/run/sunaba/session.env"},
-		{shellWrapperPath, "/run/sunaba/shell-wrapper"},
-	}
 	if s.cfg.WebGateway != nil {
-		aptConfigPath := filepath.Join(s.Root, "apt-proxy.conf")
-		ephemeralHostFiles = append(ephemeralHostFiles, aptConfigPath)
+		aptConfigPath := filepath.Join(bundlePath, "apt-proxy.conf")
 		proxyURL := "http://sunaba:" + s.cfg.WebToken + "@127.0.0.1:4343"
 		aptConfig := "Acquire::http::Proxy \"" + proxyURL + "\";\nAcquire::https::Proxy \"" + proxyURL + "\";\nAcquire::Retries \"0\";\n"
 		if err := os.WriteFile(aptConfigPath, []byte(aptConfig), 0600); err != nil {
 			return err
 		}
-		copies = append(copies, [2]string{aptConfigPath, "/run/sunaba/apt-proxy.conf"})
 	}
-	for _, copy := range copies {
-		if err := s.cfg.Runtime.CopyTo(ctx, s.Container, copy[0], copy[1]); err != nil {
-			return err
-		}
+	if err := s.cfg.Runtime.CopyTo(ctx, s.Container, bundlePath, "/run/"); err != nil {
+		return fmt.Errorf("copy guest session input bundle: %w", err)
 	}
 	return nil
+}
+
+func copyPrivateRegularFile(source, target string, mode os.FileMode) (err error) {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	info, err := input.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("source is not a regular file")
+	}
+	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := output.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+	if _, err := io.Copy(output, input); err != nil {
+		return err
+	}
+	return output.Chmod(mode)
 }
 
 func (s *Session) guestServerCommand() string {
@@ -702,7 +726,7 @@ func (s *Session) guestServerCommand() string {
 	if s.cfg.WebGateway != nil {
 		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
 	}
-	return "nohup /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
+	return "nohup /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 & echo $! >/run/sunaba/server.pid"
 }
 
 func (s *Session) guestShellWrapper() string {
@@ -725,11 +749,12 @@ func (s *Session) guestGitEnvironment() string {
 	return environment
 }
 
-func (s *Session) verifyGuestResources(ctx context.Context) error {
-	probe := strings.Join([]string{
-		"set -eu",
-		"pid=$(pgrep -u 0 -f 'opencode serve' | head -n 1)",
-		"test -n \"$pid\"",
+func guestResourceProbeCommands() []string {
+	return []string{
+		"pid=''",
+		"for attempt in $(seq 1 200); do pid=$(cat /run/sunaba/server.pid 2>/dev/null || true); test -n \"$pid\" && test -r /proc/$pid/status && break; sleep 0.01; done",
+		"test -n \"$pid\" && test -r /proc/$pid/status",
+		"echo " + guestResourceProbeBegin,
 		"echo cpu=$(getconf _NPROCESSORS_ONLN)",
 		"awk '/MemTotal:/{print \"memory_kb=\" $2}' /proc/meminfo",
 		"echo disk=$(df -B1 --output=size /var/lib/sunaba/overlay | tail -n 1 | tr -d ' ')",
@@ -737,11 +762,17 @@ func (s *Session) verifyGuestResources(ctx context.Context) error {
 		"awk '$1==\"Max\" && $2==\"processes\"{print \"nproc=\" $(NF-1)}' /proc/$pid/limits",
 		"awk '$1==\"Max\" && $2==\"file\" && $3==\"size\"{print \"fsize=\" $(NF-2)}' /proc/$pid/limits",
 		"awk '$1==\"Max\" && $2==\"open\" && $3==\"files\"{print \"nofile=\" $(NF-1)}' /proc/$pid/limits",
-	}, "\n")
-	out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", probe})
-	if err != nil {
-		return fmt.Errorf("probe secure guest resources: %w: %s", err, approval.SanitizeText(out))
+		"echo " + guestResourceProbeEnd,
 	}
+}
+
+func (s *Session) validateGuestResources(out string) error {
+	begin := strings.Index(out, guestResourceProbeBegin+"\n")
+	end := strings.Index(out, "\n"+guestResourceProbeEnd)
+	if begin < 0 || end < 0 || end <= begin {
+		return fmt.Errorf("invalid guest resource probe framing")
+	}
+	out = out[begin+len(guestResourceProbeBegin)+1 : end]
 	values := make(map[string]int64)
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		key, raw, ok := strings.Cut(line, "=")
@@ -915,11 +946,11 @@ func (s *Session) mountPausedWorkspaceForExport(ctx context.Context) error {
 func (s *Session) prepareGuestExport(ctx context.Context) error {
 	script := strings.Join([]string{
 		"set -eu",
-		"server_pid=$(pgrep -u 0 -f '(^|/)opencode serve' | head -n 1 || true)",
+		"server_pid=$(cat /run/sunaba/server.pid 2>/dev/null || true)",
 		"test -z \"$server_pid\" || kill -TERM \"$server_pid\" 2>/dev/null || true",
 		"pkill -TERM -u 1000 -f '.*' 2>/dev/null || true",
 		"pkill -TERM guest-relay 2>/dev/null || true",
-		"sleep 1",
+		"for attempt in $(seq 1 50); do if { test -z \"$server_pid\" || ! kill -0 \"$server_pid\" 2>/dev/null; } && ! pgrep -u 1000 -f '.*' >/dev/null && ! pgrep guest-relay >/dev/null; then break; fi; sleep 0.02; done",
 		"test -z \"$server_pid\" || kill -KILL \"$server_pid\" 2>/dev/null || true",
 		"pkill -KILL -u 1000 -f '.*' 2>/dev/null || true",
 		"pkill -KILL guest-relay 2>/dev/null || true",

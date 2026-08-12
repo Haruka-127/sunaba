@@ -189,7 +189,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	}
 	pauseElapsed := time.Since(pauseBegan)
 	t.Logf("secure session pause: %s", pauseElapsed)
-	if pauseElapsed >= 3*time.Second {
+	if pauseElapsed >= 750*time.Millisecond {
 		t.Fatalf("secure session pause latency regressed: %s", pauseElapsed)
 	}
 	pausedRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, prePauseURL+"/global/health", nil)

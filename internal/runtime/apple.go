@@ -96,6 +96,9 @@ func createArgs(spec ContainerSpec) []string {
 	if spec.NoDNS {
 		args = append(args, "--no-dns")
 	}
+	if spec.Init {
+		args = append(args, "--init")
+	}
 	if spec.ReadOnly {
 		args = append(args, "--read-only")
 	}

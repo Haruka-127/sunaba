@@ -135,7 +135,7 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	if len(spec.CapAdd) != 1 || spec.CapAdd[0] != "SYS_ADMIN" || len(spec.CapDrop) != 0 {
 		return fmt.Errorf("secure session requires only SYS_ADMIN for its guest-local OverlayFS")
 	}
-	if spec.Entrypoint != "/bin/bash" || len(spec.Args) != 2 || spec.Args[0] != "-lc" || spec.Args[1] != "exec tail -f /dev/null" || spec.Workdir != "" || spec.ReadOnly {
+	if !spec.Init || spec.Entrypoint != "/bin/bash" || len(spec.Args) != 2 || spec.Args[0] != "-lc" || spec.Args[1] != "exec tail -f /dev/null" || spec.Workdir != "" || spec.ReadOnly {
 		return fmt.Errorf("secure session bootstrap command does not match host policy")
 	}
 	wantMounts := 1

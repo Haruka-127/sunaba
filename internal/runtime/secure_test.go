@@ -55,6 +55,7 @@ func TestValidateSecureSessionSpecFailsClosed(t *testing.T) {
 		{name: "default network", mutate: func(spec *ContainerSpec) { spec.Networks = []string{"default"} }},
 		{name: "extra network", mutate: func(spec *ContainerSpec) { spec.Networks = []string{"none", "default"} }},
 		{name: "dns", mutate: func(spec *ContainerSpec) { spec.NoDNS = false }},
+		{name: "missing signal-forwarding init", mutate: func(spec *ContainerSpec) { spec.Init = false }},
 		{name: "host directory mount", mutate: func(spec *ContainerSpec) {
 			spec.Mounts = append(spec.Mounts, Mount{Type: "bind", Source: "/tmp", Target: "/host"})
 		}},
@@ -164,7 +165,7 @@ func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 	spec := ContainerSpec{
 		Name: "sunaba-test", Image: policy.Image, CPUs: 1, Memory: "2G",
 		Ulimits:  map[string]RLimit{"nproc": {Soft: 64, Hard: 64}, "fsize": {Soft: 128 << 20, Hard: 128 << 20}, "nofile": {Soft: 1024, Hard: 1024}},
-		Networks: []string{"none"}, NoDNS: true, CapAdd: []string{"SYS_ADMIN"},
+		Networks: []string{"none"}, NoDNS: true, Init: true, CapAdd: []string{"SYS_ADMIN"},
 		Entrypoint: "/bin/bash", Args: []string{"-lc", "exec tail -f /dev/null"},
 		Mounts:  []Mount{{Type: "socket", Source: gatewayPath, Target: SecureGatewayGuestPath}},
 		Sockets: []PublishedSocket{{HostPath: filepath.Join(canonicalRoot, "attach.sock"), GuestPath: SecureAttachGuestPath}},

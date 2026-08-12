@@ -19,6 +19,7 @@ type ContainerSpec struct {
 	Ulimits    map[string]RLimit
 	Networks   []string
 	NoDNS      bool
+	Init       bool
 	ReadOnly   bool
 	CapAdd     []string
 	CapDrop    []string

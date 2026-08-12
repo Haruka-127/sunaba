@@ -62,7 +62,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if output, err := exec.Command("/bin/bash", "-n", wrapper).CombinedOutput(); err != nil {
 		t.Fatalf("guest shell wrapper syntax: %v: %s", err, output)
 	}
-	for _, name := range []string{"session.env", "opencode.json", "shell-wrapper"} {
+	for _, name := range []string{"session.env", "opencode.json", "shell-wrapper", "session-input-bundle"} {
 		if _, err := os.Lstat(filepath.Join(s.Root, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("copied host session input %s remained: %v", name, err)
 		}
@@ -85,10 +85,8 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if err := s.Resume(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{"/run/sunaba/guest-relay", "/run/sunaba/opencode.json", "/run/sunaba/session.env", "/run/sunaba/shell-wrapper"} {
-		if fake.copyCount[target] != 2 {
-			t.Fatalf("resume did not restore ephemeral guest input %s: copies=%d", target, fake.copyCount[target])
-		}
+	if fake.copyCount["/run/"] != 2 {
+		t.Fatalf("resume did not restore the bundled ephemeral guest inputs: copies=%d", fake.copyCount["/run/"])
 	}
 	if fake.state != runtime.StateRunning {
 		t.Fatalf("resumed state=%s", fake.state)
@@ -629,8 +627,14 @@ func (f *fakeRuntime) Exec(context.Context, string, bool, []string) error { retu
 func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) (string, error) {
 	joined := strings.Join(command, " ")
 	f.commands = append(f.commands, joined)
+	if strings.Contains(joined, "opencode serve") {
+		f.setup = joined
+		if f.setupError != nil {
+			return "", f.setupError
+		}
+	}
 	if strings.Contains(joined, "getconf _NPROCESSORS_ONLN") {
-		return "cpu=2\nmemory_kb=1048576\ndisk=120000000\nuid=0\nnproc=64\nfsize=134217728\nnofile=1024\n", nil
+		return guestResourceProbeBegin + "\ncpu=2\nmemory_kb=1048576\ndisk=120000000\nuid=0\nnproc=64\nfsize=134217728\nnofile=1024\n" + guestResourceProbeEnd + "\n", nil
 	}
 	f.setup = joined
 	return "", f.setupError
@@ -639,7 +643,31 @@ func (f *fakeRuntime) CopyTo(_ context.Context, _ string, source, target string)
 	data, err := os.ReadFile(source)
 	if err != nil {
 		if info, statErr := os.Stat(source); statErr == nil && info.IsDir() {
-			return nil
+			if f.copyCount == nil {
+				f.copyCount = make(map[string]int)
+			}
+			f.copyCount[target]++
+			if target != "/run/" || filepath.Base(source) != "sunaba" {
+				return nil
+			}
+			if f.copies == nil {
+				f.copies = make(map[string][]byte)
+			}
+			return filepath.Walk(source, func(path string, entry os.FileInfo, walkErr error) error {
+				if walkErr != nil || entry.IsDir() {
+					return walkErr
+				}
+				relative, relErr := filepath.Rel(source, path)
+				if relErr != nil {
+					return relErr
+				}
+				contents, readErr := os.ReadFile(path)
+				if readErr != nil {
+					return readErr
+				}
+				f.copies[filepath.Join("/run/sunaba", relative)] = contents
+				return nil
+			})
 		}
 		return err
 	}
