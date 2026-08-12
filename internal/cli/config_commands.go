@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"sunaba/internal/configwizard"
 	"sunaba/internal/dependency"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
@@ -23,7 +26,7 @@ func (a *app) config(ctx context.Context, args []string) error {
 		return fmt.Errorf("%s", configUsage())
 	}
 	action := args[0]
-	if action != "path" && action != "validate" && action != "diff" && action != "apply" && action != "show" {
+	if action != "path" && action != "edit" && action != "validate" && action != "diff" && action != "apply" && action != "show" {
 		return fmt.Errorf("%s", configUsage())
 	}
 	fs := flag.NewFlagSet("config "+action, flag.ContinueOnError)
@@ -60,6 +63,52 @@ func (a *app) config(ctx context.Context, args []string) error {
 		return fmt.Errorf("host Project configuration root does not match the registered Project")
 	}
 	switch action {
+	case "edit":
+		if err := a.ensureConfigApplyAllowed(ctx, effective, projectState); err != nil {
+			return err
+		}
+		snapshotBefore, err := captureConfigMutationSnapshot(config, rules, effective)
+		if err != nil {
+			return err
+		}
+		result, err := configwizard.RunWithOptions(a.input, a.output, config, rules, configwizard.Options{SuggestedGitRemotes: detectProjectGitRemotes(ctx, effective.ProjectRoot)})
+		if errors.Is(err, configwizard.ErrCanceled) {
+			fmt.Fprintln(a.output, "Project設定は変更されませんでした。")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if projectconfig.Matches(result.Config, result.Rules, effective) {
+			fmt.Fprintln(a.output, "Project設定に変更はありません。")
+			return nil
+		}
+		lock, err := a.store.AcquireProjectLock(effective.ProjectRoot)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		latestEffective, latestPolicyPath, latestProjectState, err := a.loadEffectivePolicy(*dir)
+		if err != nil {
+			return err
+		}
+		latestConfig, latestRules, err := configStore.Load(latestEffective.ProjectID)
+		if err != nil {
+			return err
+		}
+		latestSnapshot, err := captureConfigMutationSnapshot(latestConfig, latestRules, latestEffective)
+		if err != nil {
+			return err
+		}
+		if latestPolicyPath != policyPath || latestProjectState != projectState || !snapshotBefore.equal(latestSnapshot) {
+			return fmt.Errorf("Project configuration changed during the wizard; no wizard changes were saved")
+		}
+		compiled, err := a.applyProjectConfig(ctx, result.Config, result.Rules, latestEffective, latestPolicyPath, latestProjectState, true, &snapshotBefore)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.output, "対話設定をProject %sへ保存・適用しました。次のAgent Sessionは新しいpolicyを使用します。\n", compiled.ProjectID)
+		return nil
 	case "validate":
 		resolvedRules, _, err := projectconfig.ResolveWebRules(config, rules)
 		if err != nil {
@@ -110,52 +159,23 @@ func (a *app) config(ctx context.Context, args []string) error {
 			fmt.Fprintln(a.output, "Host Project configuration is already applied.")
 			return nil
 		}
-		if err := refuseActivePolicyChange(projectState); err != nil {
-			return err
-		}
-		if a.runtime != nil {
-			items, err := a.runtime.List(ctx)
-			if err != nil {
-				return err
-			}
-			for _, item := range items {
-				if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == effective.ProjectID {
-					return fmt.Errorf("Project configuration cannot change while owned Project VM %s exists; export or recreate it first", item.Name)
-				}
-			}
-		}
-		if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil {
-			return fmt.Errorf("Project configuration cannot change while a pending Change Set exists; apply or discard it first")
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		manifestDigest, err := dependency.ManifestSHA256()
+		snapshotBefore, err := captureConfigMutationSnapshot(config, rules, effective)
 		if err != nil {
 			return err
 		}
-		pinned := dependency.MustPinned()
-		effective.Dependency = policy.DependencyPolicy{
-			ManifestSHA256: manifestDigest, OpenCode: dependency.OpenCodeVersion,
-			AppleContainer: dependency.AppleContainerVersion, AgentImage: pinned.AgentImage.Tag,
+		if err := a.ensureConfigApplyAllowed(ctx, effective, projectState); err != nil {
+			return err
 		}
-		blocklistPath, blocklistDigest := "", ""
-		if config.Web.Enabled {
-			blocklistPath, blocklistDigest, err = existingWebBlocklist(effective, projectState, time.Now())
-			if err != nil {
-				blocklistPath, blocklistDigest, _, err = a.fetchAndPersistWebBlocklist(ctx, projectState)
-			}
-			if err != nil {
-				return err
-			}
-		}
-		compiled, err := projectconfig.Compile(config, rules, effective, blocklistPath, blocklistDigest, time.Now())
+		lock, err := a.store.AcquireProjectLock(effective.ProjectRoot)
 		if err != nil {
 			return err
 		}
-		if err := policy.Save(policyPath, compiled); err != nil {
+		defer lock.Close()
+		compiled, err := a.applyProjectConfig(ctx, config, rules, effective, policyPath, projectState, false, &snapshotBefore)
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.output, "Applied host Project configuration for %s. Effective policy digest is now bound to the next Agent Session.\n", effective.ProjectID)
+		fmt.Fprintf(a.output, "Applied host Project configuration for %s. Effective policy digest is now bound to the next Agent Session.\n", compiled.ProjectID)
 		return nil
 	default:
 		return fmt.Errorf("%s", configUsage())
@@ -163,7 +183,177 @@ func (a *app) config(ctx context.Context, args []string) error {
 }
 
 func configUsage() string {
-	return "usage: sunaba config path|validate|diff|apply|show [--effective] [--dir <path>]"
+	return "usage: sunaba config path|edit|validate|diff|apply|show [--effective] [--dir <path>]"
+}
+
+type boundedCommandOutput struct {
+	bytes.Buffer
+	maximum int
+}
+
+func (b *boundedCommandOutput) Write(data []byte) (int, error) {
+	if b.Len()+len(data) > b.maximum {
+		return 0, fmt.Errorf("command output exceeds %d bytes", b.maximum)
+	}
+	return b.Buffer.Write(data)
+}
+
+func detectProjectGitRemotes(ctx context.Context, projectRoot string) []policy.GitRemotePolicy {
+	detectContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	command := exec.CommandContext(detectContext, "/usr/bin/git", "-C", projectRoot, "config", "--local", "--no-includes", "--get-regexp", `^remote\..*\.url$`)
+	command.Env = []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "PATH=/usr/bin:/bin"}
+	output := &boundedCommandOutput{maximum: 64 << 10}
+	command.Stdout = output
+	if err := command.Run(); err != nil {
+		return nil
+	}
+	return parseDetectedGitRemotes(output.Bytes())
+}
+
+func parseDetectedGitRemotes(data []byte) []policy.GitRemotePolicy {
+	result := make([]policy.GitRemotePolicy, 0)
+	seenNames := make(map[string]struct{})
+	seenURLs := make(map[string]struct{})
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !strings.HasPrefix(fields[0], "remote.") || !strings.HasSuffix(fields[0], ".url") {
+			continue
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(fields[0], "remote."), ".url")
+		candidate := policy.GitRemotePolicy{Name: name, URL: fields[1]}
+		if policy.ValidateGitRemote(candidate) != nil {
+			continue
+		}
+		if _, exists := seenNames[candidate.Name]; exists {
+			continue
+		}
+		if _, exists := seenURLs[candidate.URL]; exists {
+			continue
+		}
+		seenNames[candidate.Name] = struct{}{}
+		seenURLs[candidate.URL] = struct{}{}
+		result = append(result, candidate)
+		if len(result) == 16 {
+			break
+		}
+	}
+	return result
+}
+
+func (a *app) ensureConfigApplyAllowed(ctx context.Context, effective policy.ProjectPolicy, projectState string) error {
+	if err := refuseActivePolicyChange(projectState); err != nil {
+		return err
+	}
+	if a.runtime != nil {
+		items, err := a.runtime.List(ctx)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == effective.ProjectID {
+				return fmt.Errorf("Project configuration cannot change while owned Project VM %s exists; export or recreate it first", item.Name)
+			}
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil {
+		return fmt.Errorf("Project configuration cannot change while a pending Change Set exists; apply or discard it first")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+type configMutationSnapshot struct {
+	config       []byte
+	rules        []byte
+	policyDigest string
+}
+
+func captureConfigMutationSnapshot(config projectconfig.Config, rules []webgateway.OriginRule, effective policy.ProjectPolicy) (configMutationSnapshot, error) {
+	configJSON, err := projectconfig.Marshal(config)
+	if err != nil {
+		return configMutationSnapshot{}, err
+	}
+	digest, err := effective.Digest()
+	if err != nil {
+		return configMutationSnapshot{}, err
+	}
+	return configMutationSnapshot{config: configJSON, rules: projectconfig.RenderOrigins(rules), policyDigest: digest}, nil
+}
+
+func (s configMutationSnapshot) equal(other configMutationSnapshot) bool {
+	return s.policyDigest == other.policyDigest && bytes.Equal(s.config, other.config) && bytes.Equal(s.rules, other.rules)
+}
+
+func (a *app) verifyConfigMutationSnapshot(policyPath string, projectID string, expected configMutationSnapshot) error {
+	latestEffective, _, err := policy.LoadAndMigrate(policyPath, time.Now())
+	if err != nil {
+		return err
+	}
+	configStore, err := a.projectConfigStore()
+	if err != nil {
+		return err
+	}
+	latestConfig, latestRules, err := configStore.Load(projectID)
+	if err != nil {
+		return err
+	}
+	latest, err := captureConfigMutationSnapshot(latestConfig, latestRules, latestEffective)
+	if err != nil {
+		return err
+	}
+	if !expected.equal(latest) {
+		return fmt.Errorf("Project configuration changed while it was being applied; no configuration files were overwritten")
+	}
+	return nil
+}
+
+func (a *app) applyProjectConfig(ctx context.Context, config projectconfig.Config, rules []webgateway.OriginRule, effective policy.ProjectPolicy, policyPath, projectState string, saveDeclarative bool, expected *configMutationSnapshot) (policy.ProjectPolicy, error) {
+	if err := a.ensureConfigApplyAllowed(ctx, effective, projectState); err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	manifestDigest, err := dependency.ManifestSHA256()
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	pinned := dependency.MustPinned()
+	effective.Dependency = policy.DependencyPolicy{
+		ManifestSHA256: manifestDigest, OpenCode: dependency.OpenCodeVersion,
+		AppleContainer: dependency.AppleContainerVersion, AgentImage: pinned.AgentImage.Tag,
+	}
+	blocklistPath, blocklistDigest := "", ""
+	if config.Web.Enabled {
+		blocklistPath, blocklistDigest, err = existingWebBlocklist(effective, projectState, time.Now())
+		if err != nil {
+			blocklistPath, blocklistDigest, _, err = a.fetchAndPersistWebBlocklist(ctx, projectState)
+		}
+		if err != nil {
+			return policy.ProjectPolicy{}, err
+		}
+	}
+	compiled, err := projectconfig.Compile(config, rules, effective, blocklistPath, blocklistDigest, time.Now())
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	if expected != nil {
+		if err := a.verifyConfigMutationSnapshot(policyPath, effective.ProjectID, *expected); err != nil {
+			return policy.ProjectPolicy{}, err
+		}
+	}
+	if saveDeclarative {
+		configStore, err := a.projectConfigStore()
+		if err != nil {
+			return policy.ProjectPolicy{}, err
+		}
+		if err := configStore.Save(effective.ProjectID, config, rules); err != nil {
+			return policy.ProjectPolicy{}, err
+		}
+	}
+	if err := policy.Save(policyPath, compiled); err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	return compiled, nil
 }
 
 func policyJSON(value policy.ProjectPolicy) ([]byte, error) {

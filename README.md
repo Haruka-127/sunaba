@@ -80,12 +80,13 @@ Projectごとの起動設定はProject worktree外の`${XDG_CONFIG_HOME:-$HOME/.
 
 ```sh
 bin/sunaba config path --dir /absolute/project/path
+bin/sunaba config edit --dir /absolute/project/path
 bin/sunaba config validate --dir /absolute/project/path
 bin/sunaba config diff --dir /absolute/project/path
 bin/sunaba config apply --dir /absolute/project/path
 ```
 
-未適用の変更がある間は`up`、`agent`、`shell`を拒否します。停止・export・recreate後に明示適用してください。既存のModel/Git/Web設定CLIも同じhost設定を同期して更新します。
+`config edit`はhost上で`y/n`と番号を入力し、mode、Model、Git remote、Web origin presetとProject固有origin、resource/quotaを設定して、その場で検証・適用します。安全に検出できたProjectのlocal Git remoteは候補表示しますが、自動登録しません。最終確認まではfileを変更しません。未適用の変更がある間は`up`、`agent`、`shell`を拒否します。停止・export・recreate後に明示適用してください。既存のModel/Git/Web設定CLIも同じhost設定を同期して更新します。
 
 ```sh
 bin/sunaba git remote add --name origin --url https://git.example/owner/repository.git --dir /absolute/project/path

@@ -30,7 +30,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 	a := &app{output: &output}
 	usage(a.output)
 	text := output.String()
-	for _, expected := range []string{"credentials openai", "project init", "config path|validate|diff|apply|show", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
+	for _, expected := range []string{"credentials openai", "project init", "config path|edit|validate|diff|apply|show", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -734,5 +734,81 @@ func TestHostProjectConfigurationMustBeAppliedBeforeUse(t *testing.T) {
 	output.Reset()
 	if err := a.config(context.Background(), []string{"path", "--dir", project}); err != nil || !strings.Contains(output.String(), paths.WebOrigins) {
 		t.Fatalf("path output=%q error=%v", output.String(), err)
+	}
+}
+
+func TestDetectedGitRemoteParserKeepsOnlyBoundedSafeHTTPSRemotes(t *testing.T) {
+	data := []byte(strings.Join([]string{
+		"remote.origin.url https://git.example/team/project.git",
+		"remote.unsafe.url https://token@git.example/private.git",
+		"remote.Bad_Name.url https://git.example/bad.git",
+		"remote.duplicate.url https://git.example/team/project.git",
+		"not-a-remote value",
+	}, "\n"))
+	remotes := parseDetectedGitRemotes(data)
+	if len(remotes) != 1 || remotes[0].Name != "origin" || remotes[0].URL != "https://git.example/team/project.git" {
+		t.Fatalf("unsafe detected remotes were not filtered: %+v", remotes)
+	}
+}
+
+func TestInteractiveProjectConfigurationCancelsWithoutWritesThenAppliesGitGateway(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	var output bytes.Buffer
+	a := &app{store: store, configs: configs, output: &output, errors: &output}
+	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	paths, err := configs.ProjectPaths(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(store.Root, "projects", projectID, "policy.json")
+	configBefore, err := os.ReadFile(paths.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyBefore, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.input = strings.NewReader("\n\n\n\n\nn\n")
+	output.Reset()
+	if err := a.config(context.Background(), []string{"edit", "--dir", project}); err != nil {
+		t.Fatal(err)
+	}
+	configAfterCancel, _ := os.ReadFile(paths.Project)
+	policyAfterCancel, _ := os.ReadFile(policyPath)
+	if !bytes.Equal(configBefore, configAfterCancel) || !bytes.Equal(policyBefore, policyAfterCancel) || !strings.Contains(output.String(), "変更されませんでした") {
+		t.Fatalf("canceled wizard changed files or omitted result: %s", output.String())
+	}
+
+	a.input = strings.NewReader("\n\ny\n\norigin\nhttps://git.example/team/project.git\n\n\n\ny\n")
+	output.Reset()
+	if err := a.config(context.Background(), []string{"edit", "--dir", project}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, err := a.loadPolicy(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, rules, err := configs.Load(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Git.Remotes) != 1 || loaded.Git.Remotes[0].Name != "origin" || !projectconfig.Matches(config, rules, loaded) {
+		t.Fatalf("interactive configuration was not synchronized: policy=%+v config=%+v", loaded.Git, config.Git)
+	}
+	if !strings.Contains(output.String(), "保存・適用しました") {
+		t.Fatalf("success output missing: %s", output.String())
 	}
 }

@@ -35,7 +35,7 @@ grep -Eq 'ARM aarch64|ARM64' <<<"$GUEST_RELAY_FILE" || fail guest-relay 'not an 
 pass "unit/race/vet/build"
 
 HELP="$(./bin/sunaba help)"
-for REQUIRED in 'credentials openai' 'project init' 'config path|validate|diff|apply|show' 'agent' 'git remote add' 'changes export' 'changes apply' 'secure|dev' 'never bind-mounted'; do
+for REQUIRED in 'credentials openai' 'project init' 'config path|edit|validate|diff|apply|show' 'agent' 'git remote add' 'changes export' 'changes apply' 'secure|dev' 'never bind-mounted'; do
   grep -Fq "$REQUIRED" <<<"$HELP" || fail cli-help "missing $REQUIRED"
 done
 for OBSOLETE in '--no-firewall' 'env set' 'git set' 'reset --full' 'automatic approval'; do

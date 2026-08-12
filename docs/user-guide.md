@@ -82,6 +82,14 @@ bin/sunaba config show --effective --dir "$PROJECT"
 
 `project.json`ではmode、CPU/memory/disk/process上限、session TTL/idle、Model allowlist/quota、Git remote、Webの組み込みorigin presetとquota、export上限、audit retentionを管理する。dependency digest、credential、capability、preset内容/digest、blocklist digest、push承認必須、Protected Pathはsunabaが生成するため記述できない。設定directoryはmode `0700`、fileはmode `0600`であり、VMにはmount/copyされない。
 
+通常はhost上の対話ウィザードで設定できる。現在値を既定として、secure/dev、Model認証と許可model、Git Gateway remote、Web Gatewayの組み込みpresetとProject固有origin、必要に応じてresourceとquotaを順に質問する。Git Gatewayを有効にすると、安全に検証できたProjectのlocal Git remoteを候補表示し、`y`で選択できる。候補がない場合や別remoteを使う場合は、固定remote名とcredentialを含まないHTTPS `.git` URLを入力する。候補は自動登録しない。dev modeまたはWeb Gatewayを選ぶと、その時点で保証範囲の警告を表示する。最終確認で`y`を入力するまでは設定fileも実効policyも変更しない。
+
+```sh
+bin/sunaba config edit --dir "$PROJECT"
+```
+
+`config edit`は設定を保存して同じ操作内で適用するため、active/paused VMまたはpending Change Setがある場合は開始を拒否する。先に変更をexportして`recreate`するか、pending Change Setを処理する。credentialはウィザードへ入力せず、`credentials` commandでKeychainへ別途登録する。
+
 編集後は次の順序で明示適用する。未適用または不正な設定がある間、`up`、`agent`、`shell`は起動を拒否する。`status`と停止・export・recreate・destroyは復旧のため引き続き使用できる。active/paused VMまたはpending Change Setがある場合は、先に`changes export`または`recreate`を行う。
 
 ```sh

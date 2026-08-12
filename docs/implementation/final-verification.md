@@ -32,6 +32,8 @@ SUNABA_FUZZ=1 scripts/verify.sh
 
 2026-08-12のWeb origin preset追加では、同じ通常gateを再実行してPASSした。指定Projectのsource SHA-256 `986b65106d38478b8fae51a8822110a794587c89b408059de6420e7bd25dc763`、190 rule、HTTP 2 rule、subdomain 8 ruleを組み込み`common-development` presetとして固定し、Project設定schema v1からv2の読込、policy v5からv6の非拡張migration、preset単独・不使用・Project固有追加・重複除去・digest差分をunit/race/vet/build/static gateで検証した。preset更新の実Internet互換性と実Agent VM通信は外部状態を伴うため通常gateでは再実行していない。
 
+2026-08-12のhost対話設定追加でも通常gateを再実行してPASSした。`config edit`のcancel/EOF/input上限、dev警告、固定Model catalog選択、検出Git remoteの明示選択、Git Gateway remote構成、宣言設定と実効policyの同期適用をunit/CLI testで固定した。fuzzとApple Container実機integrationはこの変更では再実行していない。
+
 ## 最新の実機gate
 
 2026-08-11の最新HEADで次を直接実行した。

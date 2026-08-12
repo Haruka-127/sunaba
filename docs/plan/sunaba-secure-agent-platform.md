@@ -875,6 +875,8 @@ Project固有のWeb allowlist追加分は同じhost-only directoryの固定名`w
 
 設定変更は`config validate`と`config diff`で検査し、active/paused Agent Session、pending Change Setがない状態で`config apply`により実効policyへ明示適用する。未適用または不正な設定がある場合、`up`、`agent`、`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
 
+`config edit`は同じhost-only宣言設定とcompile経路に対する対話frontendとする。候補は最終確認までmemoryだけに保持し、確定時に上記apply条件を再検証して宣言設定と実効policyを同期更新する。別schema、VM内設定、credential入力、生成fieldの上書き経路を作らない。
+
 実効Project policyはホスト側に保存し、VMから変更できないようにする。最低限、次を含める。
 
 - `mode`: `secure`または`dev`
@@ -1103,6 +1105,7 @@ sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
 sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
 sunaba project init <path>       Project登録と初期snapshot
 sunaba config path               host-only Project設定fileのpath表示
+sunaba config edit               host上の対話ウィザードで宣言設定を編集・検証・適用
 sunaba config validate/diff      declarative設定の厳格検証と実効policyとの差分表示
 sunaba config apply              停止状態で設定を実効Project policyへcompile
 sunaba config show [--effective] declarative設定または内部の実効policyを表示
@@ -1129,6 +1132,9 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 - devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。background supervisorへdirect egressを残さない。
 - `sunaba shell`はraw execや未検証PTYではなく、bounded line commandの全出力をhost terminal sanitizerへ通す。
 - Model Gatewayの存在を会話やツール選択で意識する必要はない。
+- `sunaba config edit`はHost CLIだけで動くboundedな行入力式ウィザードとし、VM、OpenCode server、Host TUIへ設定入力を委ねない。既存のhost-only宣言設定を候補としてmemory上で編集し、最終確認まではfileや実効policyを変更しない。cancel、EOF、入力上限超過では変更を残さない。
+- 対話設定も手編集と同じ厳格validatorとcompile経路を使い、dependency、credential、capability、blocklist binding、push承認必須、Protected Pathを入力項目にしない。Projectのlocal Git configはinclude、system/global config、promptを無効にしたboundedなread-only probeだけで候補を得て、検証済み固定HTTPS remoteを人間が明示選択した場合だけ登録する。dev modeとWeb Gatewayの残余リスクを選択時に表示し、固定catalog外model、credential付きGit URL、曖昧なWeb origin、上限外quotaを保存前に拒否する。
+- 対話設定の適用は既存の`config apply`と同じ停止状態、owned VM、pending Change Set、blocklist条件を満たす場合だけ行う。対話中に宣言設定または実効policyが変化した場合は競合として拒否し、別processの変更を上書きしない。
 - secureで一般Webが未提供なら、コマンドが明確なnetwork policy errorで失敗する。
 - devへ切り替える場合は、情報流出防止を保証しない旨を明示する。
 - Git Gateway実装後も通常のGitコマンドを使う。push requestはhost側のpending approvalとなり、OpenCode TUIと分離したTrusted Approval UIで確認する。

@@ -128,7 +128,7 @@ Usage:
   sunaba model set --model <id>... [--dir <path>]
   sunaba model list [--dir <path>]
   sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]
-  sunaba config path|validate|diff|apply|show [--effective] [--dir <path>]
+  sunaba config path|edit|validate|diff|apply|show [--effective] [--dir <path>]
   sunaba up [--dir <path>] [--mode secure|dev]
   sunaba agent [--dir <path>]
   sunaba shell [--dir <path>]
