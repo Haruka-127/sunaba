@@ -35,11 +35,21 @@ bin/sunaba help
 
 ## 3. OpenAI credentialを登録する
 
-API keyは環境変数ではなく、macOS login Keychainの固定itemへ登録する。
+新規ProjectのModel認証はOAuthが既定である。ChatGPT subscriptionを使う場合はdevice flowでログインする。表示されたURLをブラウザで開き、表示されたcodeを入力する。sunaba自身はブラウザを起動しない。
+
+```sh
+bin/sunaba credentials openai oauth login
+bin/sunaba credentials openai oauth status
+```
+
+OAuth tokenは固定account `codex-oauth`へ保存され、期限前にhost側でrefreshされる。削除は`bin/sunaba credentials openai oauth delete`で行う。
+
+従量課金API keyを使う場合は、環境変数ではなくmacOS login Keychainの固定itemへ登録し、Project初期化時に`--model-auth api-key`を指定する。
 
 ```sh
 bin/sunaba credentials openai api-key set
 bin/sunaba credentials openai api-key status
+bin/sunaba project init . --model-auth api-key
 ```
 
 `set`を実行するとKeychain自身がpassword入力を求める。入力値はterminalに表示されず、argv、Project file、sunaba policy、auditへ保存されない。固定identityはservice `dev.sunaba.openai`、account `openai-api-key`である。
@@ -50,24 +60,19 @@ bin/sunaba credentials openai api-key status
 bin/sunaba credentials openai api-key delete
 ```
 
-ChatGPT subscriptionを使う場合はdevice flowでログインする。表示されたURLをブラウザで開き、表示されたcodeを入力する。sunaba自身はブラウザを起動しない。
-
-```sh
-bin/sunaba credentials openai oauth login
-bin/sunaba credentials openai oauth status
-```
-
-OAuth tokenは固定account `codex-oauth`へ保存され、期限前にhost側でrefreshされる。削除は`bin/sunaba credentials openai oauth delete`で行う。
-
 ## 4. 最短のsecure mode利用手順
 
-`PROJECT`には既存Projectの絶対pathを指定する。
+Project directoryで初期化する場合、path指定は不要である。相対pathまたは絶対pathを明示することもでき、いずれも内部ではsymlink解決済みのcanonical absolute pathとして登録される。以下では`SUNABA`にbuild済みbinaryの絶対pathを設定する。
 
 ```sh
-PROJECT=/absolute/project/path
-bin/sunaba project init "$PROJECT" --mode secure
-bin/sunaba up --dir "$PROJECT"
-bin/sunaba agent --dir "$PROJECT"
+SUNABA=/absolute/path/to/sunaba
+PROJECT=/path/to/project
+(
+  cd "$PROJECT"
+  "$SUNABA" project init
+  "$SUNABA" up
+  "$SUNABA" agent
+)
 ```
 
 `project init`はhost-onlyなProject設定と、そこからcompileした実効policyを作る。`up`はhost worktreeの安全なSnapshotからnetworkなしのVMを準備し、検証後にpauseして返す。`agent`は同じVMをresumeし、VM内rootかつOpenCode tool確認を全許可したOpenCode serverへ、隔離済みhost TUIを接続する。TUIを終了するとGatewayをinactiveにしてVMを再びpauseする。期限内の次回`agent`は同じVMと編集状態を再利用する。root権限はVM内に限定され、host Project、直接network、Gateway quota、Git pushとChange Set適用のHost承認は迂回できない。
@@ -99,11 +104,11 @@ bin/sunaba config diff --dir "$PROJECT"
 bin/sunaba config apply --dir "$PROJECT"
 ```
 
-OAuthを使うProjectは初期化時に認証方式を指定する。OAuthの既定allowlistには認証別catalogの全モデルが入り、先頭の推奨モデルがOpenCodeの既定modelになる。既存Projectはactive sessionを終了した後に切り替えられる。認証方式を変えたとき、現在のmodel allowlistが移行先で使えなければ同じ認証別既定allowlistへ置き換わる。既存Projectで明示済みの有効なallowlistは自動拡張しない。
+新規ProjectはOAuthを既定とし、その認証別catalogの全モデルをallowlistへ入れ、先頭の推奨モデルをOpenCodeの既定modelにする。API keyを使う場合だけ初期化時に`--model-auth api-key`を指定する。既存Projectはactive sessionを終了した後に切り替えられる。認証方式を変えたとき、現在のmodel allowlistが移行先で使えなければ同じ認証別既定allowlistへ置き換わる。既存Projectで明示済みの有効なallowlistは自動拡張しない。
 
 ```sh
-bin/sunaba project init "$PROJECT" --mode secure --model-auth oauth
-# または既存Projectで
+bin/sunaba project init . --model-auth api-key
+# 既存Projectを切り替える場合
 bin/sunaba model auth oauth --dir "$PROJECT"
 ```
 

@@ -31,7 +31,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 	a := &app{output: &output}
 	usage(a.output)
 	text := output.String()
-	for _, expected := range []string{"credentials openai", "project init", "project list", "config path|edit|validate|diff|apply|show", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
+	for _, expected := range []string{"credentials openai", "project init [path]", "--model-auth oauth|api-key", "project list", "config path|edit|validate|diff|apply|show", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -40,6 +40,50 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		if strings.Contains(text, obsolete) {
 			t.Fatalf("help retained obsolete prototype behavior %q", obsolete)
 		}
+	}
+}
+
+func TestProjectInitDefaultsToCurrentDirectoryAndOAuth(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "current-project")
+	apiProject := filepath.Join(base, "api-project")
+	for _, directory := range []string{project, apiProject} {
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(project); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	store := &state.Store{Root: filepath.Join(base, "state")}
+	a := &app{store: store, output: io.Discard, errors: io.Discard}
+	if err := a.project(context.Background(), []string{"init", "--mode", "secure"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
+	expectedOAuth, defaultsErr := modelcatalog.DefaultModels(modelcatalog.AuthOAuth)
+	if err != nil || defaultsErr != nil || loaded.ProjectRoot != project || loaded.Model.AuthMode != modelcatalog.AuthOAuth || strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expectedOAuth, ",") {
+		t.Fatalf("default Project policy=%+v error=%v defaults_error=%v", loaded, err, defaultsErr)
+	}
+	if err := a.project(context.Background(), []string{"init", apiProject, "--model-auth", "api-key"}); err != nil {
+		t.Fatal(err)
+	}
+	apiPolicy, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(apiProject), "policy.json"), time.Now())
+	expectedAPI, defaultsErr := modelcatalog.DefaultModels(modelcatalog.AuthAPIKey)
+	if err != nil || defaultsErr != nil || apiPolicy.Model.AuthMode != modelcatalog.AuthAPIKey || strings.Join(apiPolicy.Model.AllowedModels, ",") != strings.Join(expectedAPI, ",") {
+		t.Fatalf("API key Project policy=%+v error=%v defaults_error=%v", apiPolicy, err, defaultsErr)
 	}
 }
 
@@ -291,7 +335,7 @@ func TestModelAuthenticationPolicySwitchesToOAuthCatalogDefault(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output}
-	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+	if err := a.project(context.Background(), []string{"init", project, "--model-auth", "api-key"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.modelPolicy(context.Background(), []string{"auth", "oauth", "--dir", project}); err != nil {

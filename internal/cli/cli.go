@@ -127,7 +127,7 @@ Usage:
   sunaba model auth api-key|oauth [--dir <path>]
   sunaba model set --model <id>... [--dir <path>]
   sunaba model list [--dir <path>]
-  sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]
+  sunaba project init [path] [--mode secure|dev] [--model-auth oauth|api-key]
   sunaba project list [--active] [--json]
   sunaba config path|edit|validate|diff|apply|show [--effective] [--dir <path>]
   sunaba up [--dir <path>] [--mode secure|dev]
@@ -161,21 +161,23 @@ func (a *app) project(ctx context.Context, args []string) error {
 		return a.projectList(ctx, args[1:])
 	}
 	if len(args) == 0 || args[0] != "init" {
-		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth] | sunaba project list [--active] [--json]")
+		return fmt.Errorf("usage: sunaba project init [path] [--mode secure|dev] [--model-auth oauth|api-key] | sunaba project list [--active] [--json]")
 	}
-	if len(args) < 2 || strings.HasPrefix(args[1], "-") {
-		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]")
+	projectArgument := "."
+	optionArguments := args[1:]
+	if len(optionArguments) > 0 && !strings.HasPrefix(optionArguments[0], "-") {
+		projectArgument = optionArguments[0]
+		optionArguments = optionArguments[1:]
 	}
-	projectArgument := args[1]
 	fs := flag.NewFlagSet("project init", flag.ContinueOnError)
 	fs.SetOutput(a.errors)
 	mode := fs.String("mode", "secure", "secure or dev")
-	modelAuth := fs.String("model-auth", "api-key", "api-key or oauth")
-	if err := fs.Parse(args[2:]); err != nil {
+	modelAuth := fs.String("model-auth", "oauth", "oauth or api-key")
+	if err := fs.Parse(optionArguments); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || (*mode != "secure" && *mode != "dev") || (*modelAuth != "api-key" && *modelAuth != "oauth") {
-		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]")
+		return fmt.Errorf("usage: sunaba project init [path] [--mode secure|dev] [--model-auth oauth|api-key]")
 	}
 	root, err := state.ResolveProjectPath(projectArgument)
 	if err != nil {
@@ -208,14 +210,16 @@ func (a *app) project(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *modelAuth == "oauth" {
-		defaultModels, err := modelcatalog.DefaultModels(modelcatalog.AuthOAuth)
-		if err != nil {
-			return err
-		}
-		projectPolicy.Model.AuthMode = modelcatalog.AuthOAuth
-		projectPolicy.Model.AllowedModels = defaultModels
+	authMode := modelcatalog.AuthOAuth
+	if *modelAuth == "api-key" {
+		authMode = modelcatalog.AuthAPIKey
 	}
+	defaultModels, err := modelcatalog.DefaultModels(authMode)
+	if err != nil {
+		return err
+	}
+	projectPolicy.Model.AuthMode = authMode
+	projectPolicy.Model.AllowedModels = defaultModels
 	configStore, err := a.projectConfigStore()
 	if err != nil {
 		return err

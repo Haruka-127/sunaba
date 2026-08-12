@@ -1103,7 +1103,7 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登録・確認・削除
 sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
 sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
-sunaba project init <path>       Project登録と初期snapshot
+sunaba project init [path]       Project登録と初期snapshot。path省略時はcurrent directory、Model認証はOAuthが既定
 sunaba project list [--active]   登録ProjectとSupervisor・VM状態をread-onlyで一覧
 sunaba config path               host-only Project設定fileのpath表示
 sunaba config edit               host上の対話ウィザードで宣言設定を編集・検証・適用
@@ -1127,6 +1127,7 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 期待する通常体験は次である。
 
 - Agent VM内ではOpenCodeとshellを通常どおり使える。
+- `sunaba project init`はpathを省略した場合にcurrent directoryを登録し、相対pathも受け付ける。入力pathはsymlinkを解決したcanonical absolute pathへ変換してidentityを固定する。新規ProjectのModel認証はOAuthを既定とし、API keyを使う場合だけ`--model-auth api-key`を指定する。credentialの登録有無から認証方式を推測せず、既存Projectの認証方式は変更しない。
 - `sunaba project list`はhost-only stateの直接の子だけをboundedに列挙し、Project policy、owner-only Supervisor locator、sunaba所有labelが完全一致するVMから状態を判定する。一覧取得はpolicy migration、stale locator回収、orphan cleanup、VM lifecycle操作を行わない。`--active`は到達可能なSupervisorまたはrunning状態のowned VMがあるProjectだけを表示し、VMがpause中でもSupervisorがactiveなら除外しない。
 - secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後にVMを停止して返す。返却時はLocal Attach Relay、Gateway gate、永続leaseがinactiveであり、一般session channelは到達不能である。
 - secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway gate、leaseをinactiveへして同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineでも同じfail-closed pauseを行う。期限内の再実行は同じVM/upperをresumeするが、TTL到達後はresumeせずexportまたはrecreateを要求する。`changes export`またはdestroyでcapability、listener、credentialを最終失効する。
