@@ -87,33 +87,94 @@ func TestInteractiveStoreKeepsSecretOutOfArguments(t *testing.T) {
 	}
 }
 
-func TestCodexOAuthStoreUsesFixedAccountAndStdin(t *testing.T) {
+func TestCodexOAuthStoreUsesNativeFixedLoginKeychainItem(t *testing.T) {
 	root := t.TempDir()
-	arguments := filepath.Join(root, "arguments")
-	stdin := filepath.Join(root, "stdin")
 	fake := filepath.Join(root, "security")
-	script := "#!/bin/sh\nif test \"$1\" = login-keychain; then printf '\"%s\"\\n' \"$SUNABA_TEST_KEYCHAIN\"; exit; fi\nprintf '%s\\n' \"$*\" > \"$SUNABA_TEST_ARGUMENTS\"\n/bin/cat > \"$SUNABA_TEST_STDIN\"\n"
+	script := "#!/bin/sh\nif test \"$1\" = login-keychain; then printf '\"%s\"\\n' \"$SUNABA_TEST_KEYCHAIN\"; exit; fi\nexit 99\n"
 	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	previous := commandPath
 	commandPath = fake
 	t.Cleanup(func() { commandPath = previous })
-	t.Setenv("SUNABA_TEST_ARGUMENTS", arguments)
-	t.Setenv("SUNABA_TEST_STDIN", stdin)
-	t.Setenv("SUNABA_TEST_KEYCHAIN", filepath.Join(root, "login.keychain-db"))
+	keychain := filepath.Join(root, "login.keychain-db")
+	t.Setenv("SUNABA_TEST_KEYCHAIN", keychain)
+	previousStore := storeGenericPassword
+	var storedKeychain, storedService, storedAccount string
+	var storedSecret []byte
+	storeGenericPassword = func(keychain, service, account string, secret []byte) error {
+		storedKeychain, storedService, storedAccount = keychain, service, account
+		storedSecret = append([]byte(nil), secret...)
+		return nil
+	}
+	t.Cleanup(func() { storeGenericPassword = previousStore })
 	credential := CodexOAuthCredential{AccessToken: "access-token", RefreshToken: "refresh-token", IDToken: "identity-token", AccountID: "account-id", ExpiresAt: 1_800_000_000}
 	if err := StoreCodexOAuth(context.Background(), credential); err != nil {
 		t.Fatal(err)
 	}
-	args, _ := os.ReadFile(arguments)
-	secret, _ := os.ReadFile(stdin)
-	if strings.Contains(string(args), "access-token") || !strings.Contains(string(args), "-a "+CodexOAuthAccount) || !strings.HasSuffix(strings.TrimSpace(string(args)), "-w") {
-		t.Fatalf("unsafe OAuth Keychain arguments=%q", args)
+	if storedKeychain != keychain || storedService != OpenAIService || storedAccount != CodexOAuthAccount {
+		t.Fatalf("Keychain identity=(%q, %q, %q)", storedKeychain, storedService, storedAccount)
 	}
 	var stored CodexOAuthCredential
-	if json.Unmarshal(secret, &stored) != nil || stored != credential {
-		t.Fatalf("stored OAuth credential=%q", secret)
+	if json.Unmarshal(storedSecret, &stored) != nil || stored != credential {
+		t.Fatalf("stored OAuth credential is invalid")
+	}
+}
+
+func TestCodexOAuthReadStatusAndDeleteUseNativeFixedLoginKeychainItem(t *testing.T) {
+	root := t.TempDir()
+	fake := filepath.Join(root, "security")
+	script := "#!/bin/sh\nif test \"$1\" = login-keychain; then printf '\"%s\"\\n' \"$SUNABA_TEST_KEYCHAIN\"; exit; fi\nexit 99\n"
+	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	previousCommand := commandPath
+	commandPath = fake
+	t.Cleanup(func() { commandPath = previousCommand })
+	keychain := filepath.Join(root, "login.keychain-db")
+	t.Setenv("SUNABA_TEST_KEYCHAIN", keychain)
+
+	credential := CodexOAuthCredential{AccessToken: "access-token", RefreshToken: "refresh-token", IDToken: "identity-token", AccountID: "account-id", ExpiresAt: 1_800_000_000}
+	encoded, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousLoad, previousExists, previousDelete := loadGenericPassword, genericPasswordExists, deleteGenericPassword
+	var identities [][3]string
+	loadGenericPassword = func(keychain, service, account string) ([]byte, error) {
+		identities = append(identities, [3]string{keychain, service, account})
+		return append([]byte(nil), encoded...), nil
+	}
+	genericPasswordExists = func(keychain, service, account string) error {
+		identities = append(identities, [3]string{keychain, service, account})
+		return nil
+	}
+	deleteGenericPassword = func(keychain, service, account string) error {
+		identities = append(identities, [3]string{keychain, service, account})
+		return nil
+	}
+	t.Cleanup(func() {
+		loadGenericPassword, genericPasswordExists, deleteGenericPassword = previousLoad, previousExists, previousDelete
+	})
+
+	loaded, err := LoadCodexOAuth(context.Background())
+	if err != nil || loaded != credential {
+		t.Fatalf("loaded=%+v error=%v", loaded, err)
+	}
+	if err := CodexOAuthExists(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteCodexOAuth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantIdentity := [3]string{keychain, OpenAIService, CodexOAuthAccount}
+	if len(identities) != 3 {
+		t.Fatalf("native Keychain calls=%d, want 3", len(identities))
+	}
+	for _, identity := range identities {
+		if identity != wantIdentity {
+			t.Fatalf("Keychain identity=%q, want %q", identity, wantIdentity)
+		}
 	}
 }
 

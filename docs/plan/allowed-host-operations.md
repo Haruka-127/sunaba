@@ -82,18 +82,15 @@ sunaba credentials openai oauth delete
 /usr/bin/security find-generic-password -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path>
 /usr/bin/security find-generic-password -a openai-api-key -s dev.sunaba.openai -w <verified-login-keychain-path>
 /usr/bin/security delete-generic-password -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path>
-/usr/bin/security add-generic-password -U -a codex-oauth -s dev.sunaba.openai <verified-login-keychain-path> -w
-/usr/bin/security find-generic-password -a codex-oauth -s dev.sunaba.openai <verified-login-keychain-path>
-/usr/bin/security find-generic-password -a codex-oauth -s dev.sunaba.openai -w <verified-login-keychain-path>
-/usr/bin/security delete-generic-password -a codex-oauth -s dev.sunaba.openai <verified-login-keychain-path>
 ```
 
-- `add-generic-password`の`-w`は必ず最後の引数とする。API keyはKeychain自身の対話promptから入力し、OAuth credentialのbounded JSONはsunaba processから固定`security` processのstdinだけへ渡す。secretをargv、environment、Project file、auditへ渡さない
+- `add-generic-password`の`-w`は必ず最後の引数とし、API keyはKeychain自身の対話promptから入力する。OAuth credentialは`security -w`の対話入力上限を超え得るため、このコマンドでは保存しない
+- OAuth credentialの保存・読取・存在確認・rotation・削除に限り、Security.frameworkの`SecKeychainOpen`、`SecKeychainFindGenericPassword`、`SecKeychainAddGenericPassword`、`SecKeychainItemModifyAttributesAndData`、`SecKeychainItemFreeContent`、`SecKeychainItemDelete`を使って、検証済みlogin Keychainのservice `dev.sunaba.openai`、account `codex-oauth`だけを操作してよい。bounded JSONはsunaba process memoryとAPIの間だけで受け渡し、argv、environment、file、auditへ載せない
 - OAuth device flowとrefreshでは固定OpenAI endpointへのHTTPS通信だけを行う。verification URLを表示するがブラウザやGUI applicationを自動起動しない
 - `login-keychain`のbounded outputからquoted absolute clean pathだけを受理し、同じ操作内の明示的なkeychain引数として使う
-- service/account、security executable、Keychain search listをguestまたはProject policyから変更させない
+- service/account、security executable、native Keychain API、Keychain search listをguestまたはProject policyから変更させない
 - `-A`、password値付き`-w`、任意itemの列挙・削除、login Keychain以外の作成、Keychain設定変更を行わない
-- 実Keychainを変更するintegration testは自動実行しない。固定command pathをlink-time test seamで差し替えたfakeだけを使う
+- 実Keychainを変更するintegration testは自動実行しない。固定command pathとnative storeをtest seamで差し替えたfakeだけを使う
 
 ## 許可する container 操作
 

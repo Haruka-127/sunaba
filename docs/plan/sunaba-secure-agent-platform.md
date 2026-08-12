@@ -663,7 +663,7 @@ pushとChange Set applyの承認はOpenCode TUIへ表示された文字列やser
 
 LLMアクセスは、エージェントへ公開する明示的なtool callではない。OpenCode runtime自身がprovider通信としてModel Gatewayを呼び、エージェントは通常どおりモデル上で動作する。Agent VMからModel Gatewayのupstream設定や実credentialを参照・変更する経路は設けない。
 
-実API keyはmacOS login Keychainの固定generic password（service `dev.sunaba.openai`、account `openai-api-key`）へ保存する。OAuth credentialは同じserviceの固定account `codex-oauth`へ、access token、refresh token、ID token、account ID、有効期限だけをbounded JSONとして保存する。Model Gatewayだけが`/usr/bin/security`の固定queryで選択されたcredentialを読む。login Keychain pathも同じ固定commandから取得し、quoted absolute clean pathとして検証して各item操作へ明示する。API keyの登録はKeychain自身の対話promptを使い、OAuth credentialの保存・更新はsecret JSONを固定`security` processのstdinだけへ渡す。どちらもsecretをargv、environment、Project file、設定、監査へ載せない。
+実API keyはmacOS login Keychainの固定generic password（service `dev.sunaba.openai`、account `openai-api-key`）へ保存する。OAuth credentialは同じserviceの固定account `codex-oauth`へ、access token、refresh token、ID token、account ID、有効期限だけをbounded JSONとして保存する。Model Gatewayだけが選択されたcredentialを読む。login Keychain pathは固定`/usr/bin/security login-keychain`から取得し、quoted absolute clean pathとして検証して各item操作へ明示する。API keyの登録・読取・削除は固定`security` commandとKeychain自身の対話promptを使う。OAuth credentialの保存・読取・存在確認・更新・削除はSecurity.frameworkの固定APIだけを使い、検証済みlogin Keychainの固定service/accountとの間でsecret JSONをprocess memoryから直接受け渡す。どちらもsecretをargv、environment、Project file、設定、監査へ載せない。
 
 OAuthログインはCodex public clientのdevice authorization flowを使う。sunabaは固定したOpenAI auth endpointへだけ接続し、verification URLとuser codeをterminalへ表示する。ブラウザを自動起動せず、15分以内に得たauthorization codeをPKCE verifierと交換する。token refreshは有効期限直前にホスト側で直列化し、rotated refresh tokenを同じKeychain itemへ原子的に更新する。JWT claimはaccount IDの抽出にだけ使い、sunabaによるtoken検証や認可判断には使わない。upstreamがBearer token自体を検証する。
 

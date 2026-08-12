@@ -30,6 +30,16 @@ type CodexOAuthCredential struct {
 // absolute macOS security(1) path and do not accept an environment override.
 var commandPath = "/usr/bin/security"
 
+// These are test seams for the native, fixed-login-Keychain OAuth item path.
+// Production passes the secret directly between Go memory and Security.framework
+// and never places it in argv, the environment, or a file.
+var (
+	loadGenericPassword   = platformLoadGenericPassword
+	storeGenericPassword  = platformStoreGenericPassword
+	genericPasswordExists = platformGenericPasswordExists
+	deleteGenericPassword = platformDeleteGenericPassword
+)
+
 func LoadOpenAIKey(ctx context.Context) (string, error) {
 	keychain, err := loginKeychainPath(ctx)
 	if err != nil {
@@ -92,12 +102,16 @@ func DeleteOpenAIKey(ctx context.Context) error {
 }
 
 func LoadCodexOAuth(ctx context.Context) (CodexOAuthCredential, error) {
-	secret, err := loadSecret(ctx, CodexOAuthAccount)
+	keychain, err := loginKeychainPath(ctx)
+	if err != nil {
+		return CodexOAuthCredential{}, err
+	}
+	secret, err := loadGenericPassword(keychain, OpenAIService, CodexOAuthAccount)
 	if err != nil {
 		return CodexOAuthCredential{}, fmt.Errorf("Codex OAuth credential is unavailable in the macOS Keychain; run 'sunaba credentials openai oauth login'")
 	}
 	var credential CodexOAuthCredential
-	if json.Unmarshal([]byte(secret), &credential) != nil || validateCodexOAuth(credential) != nil {
+	if json.Unmarshal(secret, &credential) != nil || validateCodexOAuth(credential) != nil {
 		return CodexOAuthCredential{}, fmt.Errorf("Codex OAuth credential in the macOS Keychain is invalid")
 	}
 	return credential, nil
@@ -115,17 +129,18 @@ func StoreCodexOAuth(ctx context.Context, credential CodexOAuthCredential) error
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, commandPath, "add-generic-password", "-U", "-a", CodexOAuthAccount, "-s", OpenAIService, keychain, "-w")
-	command.Stdin = strings.NewReader(string(encoded) + "\n")
-	command.Stdout, command.Stderr = io.Discard, io.Discard
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("store Codex OAuth credential in the macOS Keychain: operation failed")
+	if err := storeGenericPassword(keychain, OpenAIService, CodexOAuthAccount, encoded); err != nil {
+		return fmt.Errorf("store Codex OAuth credential in the macOS Keychain: %w", err)
 	}
 	return nil
 }
 
 func CodexOAuthExists(ctx context.Context) error {
-	if err := secretExists(ctx, CodexOAuthAccount); err != nil {
+	keychain, err := loginKeychainPath(ctx)
+	if err != nil {
+		return err
+	}
+	if err := genericPasswordExists(keychain, OpenAIService, CodexOAuthAccount); err != nil {
 		return fmt.Errorf("Codex OAuth credential is not configured in the macOS Keychain")
 	}
 	return nil
@@ -136,10 +151,8 @@ func DeleteCodexOAuth(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, commandPath, "delete-generic-password", "-a", CodexOAuthAccount, "-s", OpenAIService, keychain)
-	command.Stdout, command.Stderr = io.Discard, io.Discard
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("delete Codex OAuth credential from the macOS Keychain: operation failed")
+	if err := deleteGenericPassword(keychain, OpenAIService, CodexOAuthAccount); err != nil {
+		return fmt.Errorf("delete Codex OAuth credential from the macOS Keychain: %w", err)
 	}
 	return nil
 }
@@ -166,30 +179,6 @@ func validOAuthSecretValue(value string) bool {
 		}
 	}
 	return true
-}
-
-func loadSecret(ctx context.Context, account string) (string, error) {
-	keychain, err := loginKeychainPath(ctx)
-	if err != nil {
-		return "", err
-	}
-	var output boundedWriter
-	command := exec.CommandContext(ctx, commandPath, "find-generic-password", "-a", account, "-s", OpenAIService, "-w", keychain)
-	command.Stdout, command.Stderr = &output, io.Discard
-	if err := command.Run(); err != nil {
-		return "", err
-	}
-	return strings.TrimSuffix(strings.TrimSuffix(output.String(), "\n"), "\r"), nil
-}
-
-func secretExists(ctx context.Context, account string) error {
-	keychain, err := loginKeychainPath(ctx)
-	if err != nil {
-		return err
-	}
-	command := exec.CommandContext(ctx, commandPath, "find-generic-password", "-a", account, "-s", OpenAIService, keychain)
-	command.Stdout, command.Stderr = io.Discard, io.Discard
-	return command.Run()
 }
 
 func loginKeychainPath(ctx context.Context) (string, error) {
