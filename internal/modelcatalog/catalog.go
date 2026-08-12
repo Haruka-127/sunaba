@@ -87,14 +87,30 @@ func ValidateAuthMode(mode AuthMode) error {
 	return nil
 }
 
-func DefaultModel(mode AuthMode) (string, error) {
+func DefaultModels(mode AuthMode) ([]string, error) {
 	if err := ValidateAuthMode(mode); err != nil {
-		return "", err
+		return nil, err
 	}
-	if mode == AuthOAuth {
-		return "gpt-5.5", nil
+	preferred := "gpt-5"
+	if mode == AuthAPIKey {
+		return []string{preferred}, nil
 	}
-	return "gpt-5", nil
+	preferred = "gpt-5.5"
+	available, err := Available(mode)
+	if err != nil {
+		return nil, err
+	}
+	defaults := make([]string, 0, len(available))
+	defaults = append(defaults, preferred)
+	for _, definition := range available {
+		if definition.ID != preferred {
+			defaults = append(defaults, definition.ID)
+		}
+	}
+	if _, err := Resolve(mode, defaults); err != nil {
+		return nil, fmt.Errorf("default model catalog is invalid: %w", err)
+	}
+	return defaults, nil
 }
 
 func Available(mode AuthMode) ([]Model, error) {

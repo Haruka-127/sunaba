@@ -154,7 +154,8 @@ func TestModelAuthenticationPolicySwitchesToOAuthCatalogDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
-	if err != nil || loaded.Model.AuthMode != modelcatalog.AuthOAuth || len(loaded.Model.AllowedModels) != 1 || loaded.Model.AllowedModels[0] != "gpt-5.5" {
+	expectedDefaults, defaultsErr := modelcatalog.DefaultModels(modelcatalog.AuthOAuth)
+	if err != nil || defaultsErr != nil || loaded.Model.AuthMode != modelcatalog.AuthOAuth || strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expectedDefaults, ",") {
 		t.Fatalf("model policy=%+v error=%v", loaded.Model, err)
 	}
 	if err := a.modelPolicy(context.Background(), []string{"set", "--dir", project, "--model", "gpt-5.5", "--model", "gpt-5.6-sol"}); err != nil {
@@ -163,6 +164,30 @@ func TestModelAuthenticationPolicySwitchesToOAuthCatalogDefault(t *testing.T) {
 	output.Reset()
 	if err := a.modelPolicy(context.Background(), []string{"list", "--dir", project}); err != nil || !strings.Contains(output.String(), "gpt-5.6-sol\tallowed=true\tcontext=500000\tinput=372000") {
 		t.Fatalf("model list=%q error=%v", output.String(), err)
+	}
+}
+
+func TestProjectInitWithOAuthAllowsEntireCatalogByDefault(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state")}
+	a := &app{store: store, output: io.Discard, errors: io.Discard}
+	if err := a.project(context.Background(), []string{"init", project, "--model-auth", "oauth"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := modelcatalog.DefaultModels(modelcatalog.AuthOAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expected, ",") {
+		t.Fatalf("allowed models=%v want=%v", loaded.Model.AllowedModels, expected)
 	}
 }
 

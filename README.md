@@ -49,7 +49,7 @@ bin/sunaba changes export --dir /absolute/project/path
 bin/sunaba changes apply --dir /absolute/project/path
 ```
 
-OpenAI API keyまたはCodex OAuth credentialは固定identityのmacOS login Keychain itemへ保存し、host Model Gatewayだけが読みます。OAuthを使う場合は`credentials openai oauth login`の後、Project作成時に`--model-auth oauth`を指定するか、停止中のProjectで`model auth oauth`へ切り替えます。認証別のcontext/input/output上限を持つcustom `sunaba` provider設定が生成されます。credentialは環境変数、VM、Host TUI、Project、auditへ保存しません。secureの`up`（または最初の`agent`/`shell`）はowner-only supervisorを起動し、Project VMを作成後にpausedへします。`agent`は固定OpenCode serverと隔離Host TUIを同時管理し、TUI終了時にGatewayをinactiveへして同じVMを停止します。次の`agent`/`shell`は期限内なら同じVMとupperをresumeします。`changes export`だけがVMをfreeze/export/destroyし、変更があれば検証済みMerged ViewとChange Setをsunaba state内のpending領域へ保存します。`changes apply`はhost生成nonceを表示し、同じnonceの手入力後だけtransactional applyを実行します。
+OpenAI API keyまたはCodex OAuth credentialは固定identityのmacOS login Keychain itemへ保存し、host Model Gatewayだけが読みます。OAuthを使う場合は`credentials openai oauth login`の後、Project作成時に`--model-auth oauth`を指定するか、停止中のProjectで`model auth oauth`へ切り替えます。OAuthの既定allowlistには認証別catalogの全モデルを設定し、先頭の推奨モデルをOpenCodeの既定にします。認証別のcontext/input/output上限を持つcustom `sunaba` provider設定が生成されます。credentialは環境変数、VM、Host TUI、Project、auditへ保存しません。secureの`up`（または最初の`agent`/`shell`）はowner-only supervisorを起動し、Project VMを作成後にpausedへします。`agent`は固定OpenCode serverと隔離Host TUIを同時管理し、TUI終了時にGatewayをinactiveへして同じVMを停止します。次の`agent`/`shell`は期限内なら同じVMとupperをresumeします。`changes export`だけがVMをfreeze/export/destroyし、変更があれば検証済みMerged ViewとChange Setをsunaba state内のpending領域へ保存します。`changes apply`はhost生成nonceを表示し、同じnonceの手入力後だけtransactional applyを実行します。
 
 OAuth subscriptionを使う最短例:
 
@@ -57,7 +57,6 @@ OAuth subscriptionを使う最短例:
 bin/sunaba credentials openai oauth login
 bin/sunaba project init /absolute/project/path --mode secure --model-auth oauth
 bin/sunaba model list --dir /absolute/project/path
-bin/sunaba model set --model gpt-5.5 --model gpt-5.6-sol --dir /absolute/project/path
 ```
 
 `shell`はraw `container exec`や未検証PTYを公開せず、1行ずつbounded commandを実行します。stdout/stderrのESC、OSC、BEL、C0/C1、双方向制御、不正UTF-8をhost側で可視化してから表示します。

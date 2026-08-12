@@ -80,13 +80,13 @@ func (a *app) modelPolicy(_ context.Context, args []string) error {
 		if args[1] == "oauth" {
 			mode = modelcatalog.AuthOAuth
 		}
-		defaultModel, err := modelcatalog.DefaultModel(mode)
+		defaultModels, err := modelcatalog.DefaultModels(mode)
 		if err != nil {
 			return err
 		}
 		projectPolicy.Model.AuthMode = mode
 		if _, err := modelcatalog.Resolve(mode, projectPolicy.Model.AllowedModels); err != nil {
-			projectPolicy.Model.AllowedModels = []string{defaultModel}
+			projectPolicy.Model.AllowedModels = defaultModels
 		}
 	case "set":
 		if len(models) == 0 {

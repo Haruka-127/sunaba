@@ -2,6 +2,33 @@ package modelcatalog
 
 import "testing"
 
+func TestDefaultModelsIncludesEntireOAuthCatalogWithPreferredModelFirst(t *testing.T) {
+	defaults, err := DefaultModels(AuthOAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	available, err := Available(AuthOAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaults) != len(available) || defaults[0] != "gpt-5.5" {
+		t.Fatalf("defaults=%v available=%v", defaults, available)
+	}
+	seen := make(map[string]struct{}, len(defaults))
+	for _, id := range defaults {
+		seen[id] = struct{}{}
+	}
+	for _, definition := range available {
+		if _, exists := seen[definition.ID]; !exists {
+			t.Fatalf("OAuth model %q is missing from defaults %v", definition.ID, defaults)
+		}
+	}
+	apiDefaults, err := DefaultModels(AuthAPIKey)
+	if err != nil || len(apiDefaults) != 1 || apiDefaults[0] != "gpt-5" {
+		t.Fatalf("API key defaults=%v error=%v", apiDefaults, err)
+	}
+}
+
 func TestResolveUsesAuthenticationSpecificInputLimits(t *testing.T) {
 	api, err := Resolve(AuthAPIKey, []string{"gpt-5.5", "gpt-5.6-sol"})
 	if err != nil {

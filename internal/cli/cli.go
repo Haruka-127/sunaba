@@ -189,9 +189,12 @@ func (a *app) project(_ context.Context, args []string) error {
 		return err
 	}
 	if *modelAuth == "oauth" {
-		defaultModel, _ := modelcatalog.DefaultModel(modelcatalog.AuthOAuth)
+		defaultModels, err := modelcatalog.DefaultModels(modelcatalog.AuthOAuth)
+		if err != nil {
+			return err
+		}
 		projectPolicy.Model.AuthMode = modelcatalog.AuthOAuth
-		projectPolicy.Model.AllowedModels = []string{defaultModel}
+		projectPolicy.Model.AllowedModels = defaultModels
 	}
 	if err := policy.Save(policyPath, projectPolicy); err != nil {
 		return err
