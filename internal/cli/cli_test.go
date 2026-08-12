@@ -19,6 +19,7 @@ import (
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
+	"sunaba/internal/runtime"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
 	"sunaba/internal/webgateway"
@@ -30,7 +31,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 	a := &app{output: &output}
 	usage(a.output)
 	text := output.String()
-	for _, expected := range []string{"credentials openai", "project init", "config path|edit|validate|diff|apply|show", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
+	for _, expected := range []string{"credentials openai", "project init", "project list", "config path|edit|validate|diff|apply|show", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -39,6 +40,115 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		if strings.Contains(text, obsolete) {
 			t.Fatalf("help retained obsolete prototype behavior %q", obsolete)
 		}
+	}
+}
+
+type projectListRuntime struct {
+	runtime.Runtime
+	items []runtime.Info
+	err   error
+}
+
+func (r *projectListRuntime) List(context.Context) ([]runtime.Info, error) {
+	return append([]runtime.Info(nil), r.items...), r.err
+}
+
+func TestProjectListFindsPausedSupervisorAndOwnedForegroundVM(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	store := &state.Store{Root: filepath.Join(base, "state")}
+	secureProject := filepath.Join(base, "secure-project")
+	devProject := filepath.Join(base, "dev-project")
+	for _, project := range []string{secureProject, devProject} {
+		if err := os.Mkdir(project, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	a := &app{store: store, output: &output, errors: &output, runtime: &projectListRuntime{}}
+	if err := a.project(context.Background(), []string{"init", secureProject}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.project(context.Background(), []string{"init", devProject, "--mode", "dev"}); err != nil {
+		t.Fatal(err)
+	}
+	secureID := state.ProjectID(secureProject)
+	devID := state.ProjectID(devProject)
+	sessionID := "s" + strings.Repeat("1", 24)
+	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-project-list-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(runtimeBase)
+	if err := os.Chmod(runtimeBase, 0700); err != nil {
+		t.Fatal(err)
+	}
+	controlled := &controlledSession{
+		active: &fakeSessionControlTarget{}, projectID: secureID, sessionID: sessionID,
+		container:   "sunaba-" + secureID + "-" + sessionID,
+		runtimeRoot: filepath.Join(runtimeBase, "sunaba-session-"+sessionID), workspacePath: "/workspace/sunaba-session",
+		attachURL: "http://127.0.0.1:12345", projectState: filepath.Join(store.Root, "projects", secureID), serverPassword: strings.Repeat("s", 32),
+		expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
+	}
+	control, err := startApprovalControl(controlled.projectState, runtimeBase, nil, controlled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	a.runtime = &projectListRuntime{items: []runtime.Info{{
+		Name: "sunaba-" + devID + "-sdev", State: runtime.StateRunning,
+		Labels: map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": devID, "dev.sunaba.session": "sdev", "dev.sunaba.mode": "dev"},
+	}, {
+		Name: "sunaba-foreign-s1", State: runtime.StateRunning,
+		Labels: map[string]string{"dev.sunaba.owner": "someone-else", "dev.sunaba.project": devID, "dev.sunaba.session": "s1"},
+	}}}
+	output.Reset()
+	if err := a.project(context.Background(), []string{"list", "--active"}); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, secureID+"  secure  active      paused") || !strings.Contains(text, devID+"  dev     none        running") {
+		t.Fatalf("active Project list=%q", text)
+	}
+	if strings.Contains(text, "ServerPassword") || strings.Contains(text, strings.Repeat("s", 32)) || strings.Contains(text, runtimeBase) {
+		t.Fatalf("Project list leaked Supervisor secrets: %q", text)
+	}
+}
+
+func TestProjectListReportsStaleWithoutMutatingLocatorAndEmitsJSON(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state")}
+	var output bytes.Buffer
+	a := &app{store: store, output: &output, errors: &output, runtime: &projectListRuntime{}}
+	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	projectState := filepath.Join(store.Root, "projects", projectID)
+	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-project-list-stale-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(runtimeBase)
+	if err := os.Chmod(runtimeBase, 0700); err != nil {
+		t.Fatal(err)
+	}
+	locator := filepath.Join(projectState, approvalControlLocator)
+	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := a.project(context.Background(), []string{"list", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"supervisor":"stale"`) || !strings.Contains(output.String(), `"project_id":"`+projectID+`"`) {
+		t.Fatalf("JSON Project list=%q", output.String())
+	}
+	if _, err := os.Lstat(locator); err != nil {
+		t.Fatalf("read-only list removed stale locator: %v", err)
 	}
 }
 

@@ -74,6 +74,20 @@ func TestParseInspectLabels(t *testing.T) {
 	}
 }
 
+func TestParseListPreservesOwnershipLabels(t *testing.T) {
+	items := parseList(`[{
+		"configuration": {"name": "sunaba-project-session", "labels": {
+			"dev.sunaba.owner": "sunaba-supervisor",
+			"dev.sunaba.project": "project",
+			"dev.sunaba.session": "session"
+		}},
+		"status": "running"
+	}]`)
+	if len(items) != 1 || items[0].Name != "sunaba-project-session" || items[0].State != StateRunning || items[0].Labels["dev.sunaba.owner"] != "sunaba-supervisor" {
+		t.Fatalf("parsed list=%+v", items)
+	}
+}
+
 func TestExportRejectsUnsafeOutputBeforeRuntimeAccess(t *testing.T) {
 	rt := NewAppleContainer(false)
 	if err := rt.Export(context.Background(), "other-container", "/private/tmp/sunaba-test/rootfs.tar"); err == nil {

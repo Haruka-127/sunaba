@@ -59,3 +59,37 @@ func TestGlobalStateRejectsSymlinkAndUnknownLegacyFields(t *testing.T) {
 		t.Fatal("obsolete global firewall policy was accepted")
 	}
 }
+
+func TestListProjectStatesIsReadOnlyAndIsolatesUnsafeEntries(t *testing.T) {
+	store := &Store{Root: filepath.Join(t.TempDir(), "sunaba")}
+	if projects, err := store.ListProjectStates(); err != nil || len(projects) != 0 {
+		t.Fatalf("absent state projects=%v error=%v", projects, err)
+	}
+	if _, err := os.Lstat(store.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only listing created the state root: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectsRoot := filepath.Join(store.Root, "projects")
+	if err := os.Mkdir(filepath.Join(projectsRoot, "0123456789ab"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(projectsRoot, "abcdefabcdef"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectsRoot, "not-a-project"), []byte("untrusted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := store.ListProjectStates()
+	if err != nil || len(projects) != 3 {
+		t.Fatalf("projects=%v error=%v", projects, err)
+	}
+	byID := make(map[string]ProjectState, len(projects))
+	for _, project := range projects {
+		byID[project.ProjectID] = project
+	}
+	if byID["0123456789ab"].Err != nil || byID["abcdefabcdef"].Err == nil || byID["not-a-project"].Err == nil {
+		t.Fatalf("unsafe entries were not isolated: %+v", byID)
+	}
+}

@@ -253,12 +253,15 @@ pf操作には、[`plan/allowed-host-operations.md`](./plan/allowed-host-operati
 ## 10. 状態確認、停止、再生成、破棄
 
 ```sh
+bin/sunaba project list
+bin/sunaba project list --active
 bin/sunaba status --dir "$PROJECT"
 bin/sunaba down --dir "$PROJECT"
 bin/sunaba recreate --dir "$PROJECT"
 bin/sunaba destroy --dir "$PROJECT" --yes --discard-pending
 ```
 
+- `project list`: 登録済みProjectとSupervisor、VM、pending Change Setの状態を一覧表示する。`--active`は到達可能なSupervisorまたはrunning状態のsunaba所有VMがあるProjectだけを表示する。pause中のVMでもSupervisorが起動中なら表示対象になる。自動修復や停止は行わず、機械処理には`--json`を使用できる
 - `status`: mode、VM状態、期限、resource、quota、Git/Web policy、pending Change Setを表示する
 - `down`: secure VMをpauseし、隔離されたupperを保持する
 - `recreate`: VMがあれば原則exportし、次回をclean host Snapshotから開始する。pending Change Setはapplyまたは明示破棄が必要

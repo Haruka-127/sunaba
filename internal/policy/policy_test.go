@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -243,5 +244,31 @@ func TestPolicyMigrationRejectsUnknownFieldsAndUnsafeOrigin(t *testing.T) {
 	}
 	if _, _, err := LoadAndMigrate(path, time.Now()); err == nil {
 		t.Fatal("legacy policy with IP-literal Web origin was migrated")
+	}
+}
+
+func TestLoadReadOnlyMigratesOnlyInMemory(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	now := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)
+	legacy, err := New(project, strings.Repeat("e", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.SchemaVersion = 4
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, migrated, err := LoadReadOnly(path, now)
+	if err != nil || !migrated || loaded.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("loaded schema=%d migrated=%v error=%v", loaded.SchemaVersion, migrated, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, encoded) {
+		t.Fatalf("read-only load modified policy: error=%v", err)
 	}
 }

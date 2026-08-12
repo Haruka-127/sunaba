@@ -411,7 +411,7 @@ func parseList(out string) []Info {
 	}
 	infos := make([]Info, 0, len(arr))
 	for _, m := range arr {
-		info := Info{}
+		info := Info{Labels: findStringMap(m, "labels")}
 		walk(m, func(path []string, val any) {
 			key := strings.ToLower(path[len(path)-1])
 			s, _ := val.(string)

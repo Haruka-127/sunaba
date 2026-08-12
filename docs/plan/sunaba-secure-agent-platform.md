@@ -1104,6 +1104,7 @@ sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登
 sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
 sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
 sunaba project init <path>       Project登録と初期snapshot
+sunaba project list [--active]   登録ProjectとSupervisor・VM状態をread-onlyで一覧
 sunaba config path               host-only Project設定fileのpath表示
 sunaba config edit               host上の対話ウィザードで宣言設定を編集・検証・適用
 sunaba config validate/diff      declarative設定の厳格検証と実効policyとの差分表示
@@ -1126,6 +1127,7 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 期待する通常体験は次である。
 
 - Agent VM内ではOpenCodeとshellを通常どおり使える。
+- `sunaba project list`はhost-only stateの直接の子だけをboundedに列挙し、Project policy、owner-only Supervisor locator、sunaba所有labelが完全一致するVMから状態を判定する。一覧取得はpolicy migration、stale locator回収、orphan cleanup、VM lifecycle操作を行わない。`--active`は到達可能なSupervisorまたはrunning状態のowned VMがあるProjectだけを表示し、VMがpause中でもSupervisorがactiveなら除外しない。
 - secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後にVMを停止して返す。返却時はLocal Attach Relay、Gateway gate、永続leaseがinactiveであり、一般session channelは到達不能である。
 - secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway gate、leaseをinactiveへして同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineでも同じfail-closed pauseを行う。期限内の再実行は同じVM/upperをresumeするが、TTL到達後はresumeせずexportまたはrecreateを要求する。`changes export`またはdestroyでcapability、listener、credentialを最終失効する。
 - VM再開時はtmpfsであるguestの`/run/sunaba`が空になることを前提とし、relay、provider設定、session capabilityをHost上のsession memoryからmode `0700`の単一directoryへ再生成し、1回のcopyで復元してからserverを起動する。session capabilityをVMの永続root filesystemへ退避せず、copyに使うHost runtime内一時directoryは成功・失敗を問わず直後に削除する。

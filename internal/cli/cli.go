@@ -128,6 +128,7 @@ Usage:
   sunaba model set --model <id>... [--dir <path>]
   sunaba model list [--dir <path>]
   sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]
+  sunaba project list [--active] [--json]
   sunaba config path|edit|validate|diff|apply|show [--effective] [--dir <path>]
   sunaba up [--dir <path>] [--mode secure|dev]
   sunaba agent [--dir <path>]
@@ -155,9 +156,12 @@ The Host TUI uses an isolated configuration and a loopback Local Attach Relay. H
 `)
 }
 
-func (a *app) project(_ context.Context, args []string) error {
+func (a *app) project(ctx context.Context, args []string) error {
+	if len(args) > 0 && args[0] == "list" {
+		return a.projectList(ctx, args[1:])
+	}
 	if len(args) == 0 || args[0] != "init" {
-		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]")
+		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth] | sunaba project list [--active] [--json]")
 	}
 	if len(args) < 2 || strings.HasPrefix(args[1], "-") {
 		return fmt.Errorf("usage: sunaba project init <path> [--mode secure|dev] [--model-auth api-key|oauth]")
@@ -956,7 +960,7 @@ func (a *app) loadEffectivePolicy(directory string) (policy.ProjectPolicy, strin
 	path := filepath.Join(projectState, "policy.json")
 	loaded, migrated, err := policy.LoadAndMigrate(path, time.Now())
 	if err != nil {
-		if strings.Contains(err.Error(), "mode 0600") {
+		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "mode 0600") {
 			return policy.ProjectPolicy{}, "", "", fmt.Errorf("Project is not registered; run 'sunaba project init %s'", root)
 		}
 		return policy.ProjectPolicy{}, "", "", err

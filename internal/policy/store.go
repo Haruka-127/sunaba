@@ -97,6 +97,22 @@ type legacyGitV2 struct {
 }
 
 func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
+	loaded, migrated, err := LoadReadOnly(path, now)
+	if err != nil {
+		return ProjectPolicy{}, false, err
+	}
+	if migrated {
+		if err := Save(path, loaded); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+	}
+	return loaded, migrated, nil
+}
+
+// LoadReadOnly validates and, when necessary, migrates a Project policy in
+// memory without modifying its state file. Inventory and diagnostic commands
+// use this path so observation never changes Project state.
+func LoadReadOnly(path string, now time.Time) (ProjectPolicy, bool, error) {
 	data, err := readPolicyFile(path)
 	if err != nil {
 		return ProjectPolicy{}, false, err
@@ -123,9 +139,6 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 		if err != nil {
 			return ProjectPolicy{}, false, err
 		}
-		if err := Save(path, migrated); err != nil {
-			return ProjectPolicy{}, false, err
-		}
 		return migrated, true, nil
 	case 4:
 		var legacy legacyPolicyV4
@@ -134,9 +147,6 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 		}
 		migrated, err := migrateV4(legacy, now)
 		if err != nil {
-			return ProjectPolicy{}, false, err
-		}
-		if err := Save(path, migrated); err != nil {
 			return ProjectPolicy{}, false, err
 		}
 		return migrated, true, nil
@@ -149,9 +159,6 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 		if err != nil {
 			return ProjectPolicy{}, false, err
 		}
-		if err := Save(path, migrated); err != nil {
-			return ProjectPolicy{}, false, err
-		}
 		return migrated, true, nil
 	case 2:
 		var legacy legacyPolicyV2
@@ -162,9 +169,6 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 		if err != nil {
 			return ProjectPolicy{}, false, err
 		}
-		if err := Save(path, migrated); err != nil {
-			return ProjectPolicy{}, false, err
-		}
 		return migrated, true, nil
 	case 1:
 		var legacy legacyPolicyV1
@@ -173,9 +177,6 @@ func LoadAndMigrate(path string, now time.Time) (ProjectPolicy, bool, error) {
 		}
 		migrated, err := migrateV1(legacy, now)
 		if err != nil {
-			return ProjectPolicy{}, false, err
-		}
-		if err := Save(path, migrated); err != nil {
 			return ProjectPolicy{}, false, err
 		}
 		return migrated, true, nil
@@ -338,18 +339,28 @@ func readPolicyFile(path string) ([]byte, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, fmt.Errorf("policy path must be absolute and clean")
 	}
-	var stat unix.Stat_t
-	info, err := os.Lstat(path)
-	statErr := unix.Lstat(path, &stat)
-	if err != nil || statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 || info.Size() <= 0 || info.Size() > maxPolicyBytes || stat.Uid != uint32(os.Geteuid()) {
-		return nil, fmt.Errorf("policy must be a bounded mode 0600 regular file")
-	}
-	file, err := os.Open(path)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open Project policy")
+	}
 	defer file.Close()
-	return io.ReadAll(io.LimitReader(file, maxPolicyBytes+1))
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0777 != 0600 || stat.Size <= 0 || stat.Size > maxPolicyBytes || stat.Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("policy must be a bounded mode 0600 regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxPolicyBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxPolicyBytes {
+		return nil, fmt.Errorf("policy exceeds its size bound")
+	}
+	return data, nil
 }
 
 func decodeStrict(data []byte, destination any) error {
