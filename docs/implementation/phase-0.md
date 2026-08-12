@@ -121,6 +121,7 @@ Local Attach Relayは次を強制する。
 
 - `127.0.0.1`のrandom portだけでlistenし、固定されたProject/session Unix socketだけへ接続する。
 - session固有のhigh-entropy passwordによるBasic認証、HTTP method/path allowlist、同時接続上限を適用し、OpenCodeの`/tui`、認証、instance、log、doc管理面をguestへ到達させない。
+- guestへは`Accept-Encoding: identity`を送り、OpenCodeの初期化JSONが圧縮される通常経路を避ける。guestが要求を無視して`gzip`または`deflate`を返した場合も、圧縮入力と展開後本文の両方を16 MiBで制限してからJSONを検査し、Host TUIへは`Content-Encoding`と`Content-Length`を整合させたidentity応答を返す。
 - JSONとSSEに含まれるESC、OSC構成文字、BEL、C0/C1制御文字、双方向制御文字、不正UTF-8を可視表現へ変換する。
 - `tui.command.execute`は安全側の最小command allowlistとし、`editor.open`等のhost作用を持つeventをTUIへ渡さない。
 
@@ -142,7 +143,7 @@ SUNABA_PHASE0_INTEGRATION=1 \
 go test -tags=integration -run TestPhase0SecureNetworkAndGatewayTransport -v ./test/integration
 ```
 
-attack/unit testは認証なし、管理path、許可外model、別token、並行数超過、悪意あるSSE TUI command、ANSI/OSC/BEL、双方向文字、不正UTF-8、悪意あるdiff/file名を拒否または無害化する。これによりDG-03の固定artifact、serve/attach/health契約、Host TUI分離、terminal境界、Responses subset、stream/tool/error/cancel、短命token、provider固定とmodel allowlistを満たす。
+attack/unit testは認証なし、管理path、許可外model、別token、並行数超過、悪意あるSSE TUI command、ANSI/OSC/BEL、双方向文字、不正UTF-8、悪意あるdiff/file名、`gzip`/`deflate`圧縮JSONを拒否または無害化する。これによりDG-03の固定artifact、serve/attach/health契約、Host TUI分離、terminal境界、Responses subset、stream/tool/error/cancel、短命token、provider固定とmodel allowlistを満たす。
 
 ## Project lock probe
 

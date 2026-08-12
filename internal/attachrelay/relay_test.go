@@ -1,12 +1,16 @@
 package attachrelay
 
 import (
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -26,9 +30,11 @@ func TestRelayAuthenticatesFiltersAndSanitizes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var forbiddenReached atomic.Bool
+	var identityRequested atomic.Bool
 	guestServer := &http.Server{Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/global/health":
+			identityRequested.Store(request.Header.Get("Accept-Encoding") == "identity")
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(response, `{"healthy":true,"version":"1.18.16","message":"evil\u001b]52;c;Y2xpcA==\u0007"}`)
 		case "/global/event":
@@ -72,6 +78,9 @@ func TestRelayAuthenticatesFiltersAndSanitizes(t *testing.T) {
 	_ = health.Body.Close()
 	if strings.ContainsRune(string(healthBody), '\x1b') || !strings.Contains(string(healthBody), "<U+001B>") || !strings.Contains(string(healthBody), "<U+0007>") {
 		t.Fatalf("health response was not sanitized: %q", healthBody)
+	}
+	if !identityRequested.Load() {
+		t.Fatal("attach relay did not request an identity response from the guest")
 	}
 	forbiddenRequest, _ := http.NewRequest(http.MethodPost, endpoint+"/tui/execute-command", strings.NewReader(`{"command":"editor.open"}`))
 	forbiddenRequest.SetBasicAuth("opencode", relayTestPassword)
@@ -127,5 +136,50 @@ func TestSanitizeJSONEscapesDiffAndFilenameControls(t *testing.T) {
 	}
 	if strings.ContainsRune(text, '\x1b') {
 		t.Fatalf("sanitized diff retained ESC: %q", text)
+	}
+}
+
+func TestSanitizeResponseDecodesCompressedJSON(t *testing.T) {
+	for _, encoding := range []string{"gzip", "deflate"} {
+		t.Run(encoding, func(t *testing.T) {
+			var encoded bytes.Buffer
+			var compressor io.WriteCloser
+			if encoding == "gzip" {
+				compressor = gzip.NewWriter(&encoded)
+			} else {
+				compressor = zlib.NewWriter(&encoded)
+			}
+			if _, err := io.WriteString(compressor, `{"message":"evil\u001b[31m"}`); err != nil {
+				t.Fatal(err)
+			}
+			if err := compressor.Close(); err != nil {
+				t.Fatal(err)
+			}
+			response := &http.Response{
+				Header: http.Header{
+					"Content-Type":     []string{"application/json"},
+					"Content-Encoding": []string{encoding},
+					"Content-Length":   []string{"999"},
+				},
+				Body:          io.NopCloser(bytes.NewReader(encoded.Bytes())),
+				ContentLength: int64(encoded.Len()),
+			}
+			if err := sanitizeResponse(response, nil); err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(body); !strings.Contains(got, "<U+001B>") || strings.ContainsRune(got, '\x1b') {
+				t.Fatalf("compressed JSON was not sanitized: %q", got)
+			}
+			if got := response.Header.Get("Content-Encoding"); got != "" {
+				t.Fatalf("content encoding=%q, want identity", got)
+			}
+			if response.ContentLength != int64(len(body)) || response.Header.Get("Content-Length") != strconv.Itoa(len(body)) {
+				t.Fatalf("content length field=%d header=%q body=%d", response.ContentLength, response.Header.Get("Content-Length"), len(body))
+			}
+		})
 	}
 }

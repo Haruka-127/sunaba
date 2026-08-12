@@ -3,6 +3,8 @@ package attachrelay
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -69,6 +71,11 @@ func (r Relay) ListenAndServe(ctx context.Context) (string, <-chan error, error)
 	}
 	target := &url.URL{Scheme: "http", Host: "sunaba-guest"}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	director := proxy.Director
+	proxy.Director = func(request *http.Request) {
+		director(request)
+		request.Header.Set("Accept-Encoding", "identity")
+	}
 	proxy.Transport = transport
 	proxy.ModifyResponse = func(response *http.Response) error { return sanitizeResponse(response, r.OnReject) }
 	proxy.ErrorHandler = func(response http.ResponseWriter, _ *http.Request, _ error) {
@@ -161,13 +168,9 @@ func sanitizeResponse(response *http.Response, onReject func(string)) error {
 	if !strings.Contains(contentType, "json") {
 		return nil
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maximumJSONResponse+1))
-	_ = response.Body.Close()
+	body, err := readJSONResponse(response)
 	if err != nil {
 		return err
-	}
-	if len(body) > maximumJSONResponse {
-		return fmt.Errorf("attach JSON response exceeds limit")
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		response.Body = io.NopCloser(bytes.NewReader(nil))
@@ -189,6 +192,47 @@ func sanitizeResponse(response *http.Response, onReject func(string)) error {
 	response.ContentLength = int64(len(sanitized))
 	response.Header.Set("Content-Length", strconv.Itoa(len(sanitized)))
 	return nil
+}
+
+func readJSONResponse(response *http.Response) ([]byte, error) {
+	defer response.Body.Close()
+	encoded := &io.LimitedReader{R: response.Body, N: maximumJSONResponse + 1}
+	var reader io.Reader = encoded
+	var decoder io.ReadCloser
+	var err error
+	switch encoding := strings.ToLower(strings.TrimSpace(response.Header.Get("Content-Encoding"))); encoding {
+	case "", "identity":
+	case "gzip":
+		decoder, err = gzip.NewReader(encoded)
+	case "deflate":
+		decoder, err = zlib.NewReader(encoded)
+	default:
+		return nil, fmt.Errorf("unsupported attach JSON content encoding %q", encoding)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decode attach JSON content encoding: %w", err)
+	}
+	if decoder != nil {
+		reader = decoder
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, maximumJSONResponse+1))
+	if decoder != nil {
+		err = errors.Join(err, decoder.Close())
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read attach JSON response: %w", err)
+	}
+	if len(body) > maximumJSONResponse {
+		return nil, fmt.Errorf("attach JSON response exceeds limit")
+	}
+	if _, err := io.Copy(io.Discard, encoded); err != nil {
+		return nil, fmt.Errorf("drain attach JSON response: %w", err)
+	}
+	if encoded.N == 0 {
+		return nil, fmt.Errorf("encoded attach JSON response exceeds limit")
+	}
+	response.Header.Del("Content-Encoding")
+	return body, nil
 }
 
 func newSSEFilter(source io.ReadCloser, onReject func(string)) io.ReadCloser {
