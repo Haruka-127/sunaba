@@ -174,6 +174,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		t.Fatalf("secure session startup latency regressed: %s", startupElapsed)
 	}
 	defer active.Destroy(context.Background())
+	assertOpenCodeMaximumPermissions(t, ctx, active.AttachURL, first.ServerPassword)
 	if out, err := first.Runtime.ExecOutput(ctx, active.Container, []string{"/bin/bash", "-lc", "runuser -u sunaba-agent -- /bin/bash -lc 'ulimit -u 513'"}); err == nil {
 		t.Fatalf("agent raised hard process limit: %q", out)
 	}
@@ -345,6 +346,32 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	case err := <-auditErrors:
 		t.Fatalf("Model Gateway audit append failed: %v", err)
 	default:
+	}
+}
+
+func assertOpenCodeMaximumPermissions(t *testing.T, ctx context.Context, attachURL, password string) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, attachURL+"/config", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.SetBasicAuth("opencode", password)
+	response, err := opencode.DirectHTTPClient(2 * time.Second).Do(request)
+	if err != nil {
+		t.Fatalf("read resolved OpenCode config: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("resolved OpenCode config status=%d", response.StatusCode)
+	}
+	var resolved struct {
+		Permission map[string]string `json:"permission"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&resolved); err != nil {
+		t.Fatalf("decode resolved OpenCode config: %v", err)
+	}
+	if resolved.Permission["*"] != "allow" {
+		t.Fatalf("OpenCode maximum permission was not active: %+v", resolved.Permission)
 	}
 }
 

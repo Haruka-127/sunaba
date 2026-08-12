@@ -70,7 +70,7 @@ bin/sunaba up --dir "$PROJECT"
 bin/sunaba agent --dir "$PROJECT"
 ```
 
-`project init`はProject policyを作る。`up`はhost worktreeの安全なSnapshotからnetworkなしのVMを準備し、検証後にpauseして返す。`agent`は同じVMをresumeし、VM内のOpenCode serverへ隔離済みhost TUIを接続する。TUIを終了するとGatewayをinactiveにしてVMを再びpauseする。期限内の次回`agent`は同じVMと編集状態を再利用する。
+`project init`はProject policyを作る。`up`はhost worktreeの安全なSnapshotからnetworkなしのVMを準備し、検証後にpauseして返す。`agent`は同じVMをresumeし、VM内rootかつOpenCode tool確認を全許可したOpenCode serverへ、隔離済みhost TUIを接続する。TUIを終了するとGatewayをinactiveにしてVMを再びpauseする。期限内の次回`agent`は同じVMと編集状態を再利用する。root権限はVM内に限定され、host Project、直接network、Gateway quota、Git pushとChange Set適用のHost承認は迂回できない。
 
 OAuthを使うProjectは初期化時に認証方式を指定する。OAuthの既定allowlistには認証別catalogの全モデルが入り、先頭の推奨モデルがOpenCodeの既定modelになる。既存Projectはactive sessionを終了した後に切り替えられる。認証方式を変えたとき、現在のmodel allowlistが移行先で使えなければ同じ認証別既定allowlistへ置き換わる。既存Projectで明示済みの有効なallowlistは自動拡張しない。
 

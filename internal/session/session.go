@@ -702,7 +702,7 @@ func (s *Session) guestServerCommand() string {
 	if s.cfg.WebGateway != nil {
 		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
 	}
-	return "nohup runuser -u sunaba-agent -- /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
+	return "nohup /bin/bash -lc 'set -a; . /run/sunaba/session.env; set +a; cd " + s.WorkspacePath + "; exec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " OPENCODE_CONFIG=/run/sunaba/opencode.json OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_DISABLE_DEFAULT_PLUGINS=1 opencode serve --hostname 127.0.0.1 --port 4096 --mdns=false' >/run/sunaba/server.log 2>&1 &"
 }
 
 func (s *Session) guestShellWrapper() string {
@@ -728,7 +728,7 @@ func (s *Session) guestGitEnvironment() string {
 func (s *Session) verifyGuestResources(ctx context.Context) error {
 	probe := strings.Join([]string{
 		"set -eu",
-		"pid=$(pgrep -u 1000 -f 'opencode serve' | head -n 1)",
+		"pid=$(pgrep -u 0 -f 'opencode serve' | head -n 1)",
 		"test -n \"$pid\"",
 		"echo cpu=$(getconf _NPROCESSORS_ONLN)",
 		"awk '/MemTotal:/{print \"memory_kb=\" $2}' /proc/meminfo",
@@ -759,7 +759,7 @@ func (s *Session) verifyGuestResources(ctx context.Context) error {
 		return err
 	}
 	guestMemoryCeiling := memoryBytes + (128 << 20)
-	if values["cpu"] < int64(s.cfg.CPUs) || values["cpu"] > int64(s.cfg.CPUs+1) || values["memory_kb"] <= 0 || values["memory_kb"]<<10 > guestMemoryCeiling || values["disk"] <= 0 || values["disk"] > s.cfg.DiskBytes || values["uid"] != 1000 || values["nproc"] != s.cfg.ProcessMax || values["fsize"] != s.cfg.FileSizeMax || values["nofile"] != s.cfg.OpenFileMax {
+	if values["cpu"] < int64(s.cfg.CPUs) || values["cpu"] > int64(s.cfg.CPUs+1) || values["memory_kb"] <= 0 || values["memory_kb"]<<10 > guestMemoryCeiling || values["disk"] <= 0 || values["disk"] > s.cfg.DiskBytes || values["uid"] != 0 || values["nproc"] != s.cfg.ProcessMax || values["fsize"] != s.cfg.FileSizeMax || values["nofile"] != s.cfg.OpenFileMax {
 		return fmt.Errorf("secure guest resource limits do not match host policy: %v", values)
 	}
 	return s.emit("resource.probe", fmt.Sprintf("cpu=%d,memory=%d,disk=%d,nproc=%d,fsize=%d,nofile=%d", s.cfg.CPUs, memoryBytes, s.cfg.DiskBytes, s.cfg.ProcessMax, s.cfg.FileSizeMax, s.cfg.OpenFileMax))
@@ -915,9 +915,12 @@ func (s *Session) mountPausedWorkspaceForExport(ctx context.Context) error {
 func (s *Session) prepareGuestExport(ctx context.Context) error {
 	script := strings.Join([]string{
 		"set -eu",
+		"server_pid=$(pgrep -u 0 -f '(^|/)opencode serve' | head -n 1 || true)",
+		"test -z \"$server_pid\" || kill -TERM \"$server_pid\" 2>/dev/null || true",
 		"pkill -TERM -u 1000 -f '.*' 2>/dev/null || true",
 		"pkill -TERM guest-relay 2>/dev/null || true",
 		"sleep 1",
+		"test -z \"$server_pid\" || kill -KILL \"$server_pid\" 2>/dev/null || true",
 		"pkill -KILL -u 1000 -f '.*' 2>/dev/null || true",
 		"pkill -KILL guest-relay 2>/dev/null || true",
 		"rm -f /run/sunaba/session.env /run/sunaba/apt-proxy.conf",

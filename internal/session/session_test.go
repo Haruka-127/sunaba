@@ -43,6 +43,9 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 			t.Fatalf("guest setup missing %q: %s", expected, fake.setup)
 		}
 	}
+	if strings.Contains(fake.setup, "runuser -u sunaba-agent -- /bin/bash -lc 'set -a") {
+		t.Fatal("OpenCode server was not started as VM root")
+	}
 	shellWrapper := fake.copies["/run/sunaba/shell-wrapper"]
 	for _, expected := range []string{"/run/sunaba/session.env", "cd " + s.WorkspacePath, "GIT_DIR=/var/lib/sunaba/repository", `/bin/bash -lc "$1"`} {
 		if !strings.Contains(string(shellWrapper), expected) {
@@ -627,7 +630,7 @@ func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) 
 	joined := strings.Join(command, " ")
 	f.commands = append(f.commands, joined)
 	if strings.Contains(joined, "getconf _NPROCESSORS_ONLN") {
-		return "cpu=2\nmemory_kb=1048576\ndisk=120000000\nuid=1000\nnproc=64\nfsize=134217728\nnofile=1024\n", nil
+		return "cpu=2\nmemory_kb=1048576\ndisk=120000000\nuid=0\nnproc=64\nfsize=134217728\nnofile=1024\n", nil
 	}
 	f.setup = joined
 	return "", f.setupError

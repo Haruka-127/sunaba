@@ -19,6 +19,7 @@ func TestBuildModelGatewayConfigDefinesAuthenticationSpecificCustomProvider(t *t
 	text := string(encoded)
 	for _, expected := range []string{
 		`"enabled_providers": [`, `"sunaba"`, `"gpt-5.6-sol"`,
+		`"permission": "allow"`,
 		`"whitelist": [`, `"baseURL": "http://127.0.0.1:4141/v1"`,
 		`"apiKey": "{env:SUNABA_MODEL_GATEWAY_TOKEN}"`, `"model": "sunaba/gpt-5.5"`,
 		`"npm": "@ai-sdk/openai"`, `"context": 400000`, `"input": 272000`,

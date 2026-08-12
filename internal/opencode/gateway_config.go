@@ -92,11 +92,12 @@ func BuildModelGatewayConfig(config ModelGatewayProviderConfig) ([]byte, error) 
 		Schema           string              `json:"$schema"`
 		Model            string              `json:"model"`
 		SmallModel       string              `json:"small_model"`
+		Permission       string              `json:"permission"`
 		EnabledProviders []string            `json:"enabled_providers"`
 		Providers        map[string]provider `json:"provider"`
 	}{
 		Schema: "https://opencode.ai/config.json", Model: ModelGatewayProviderID + "/" + config.DefaultModel,
-		SmallModel:       ModelGatewayProviderID + "/" + config.DefaultModel,
+		SmallModel: ModelGatewayProviderID + "/" + config.DefaultModel, Permission: "allow",
 		EnabledProviders: []string{ModelGatewayProviderID},
 		Providers: map[string]provider{
 			ModelGatewayProviderID: {

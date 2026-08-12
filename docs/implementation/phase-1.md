@@ -29,6 +29,12 @@ Model Gatewayは期限、request回数、並行数、request/response size、Pro
 
 Codex OAuth経路ではCLIProxyAPIのCodex Responses変換に合わせ、subscription backendが受理しない`max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`を上流転送前に除去する。この変換はOAuth経路だけに適用し、OpenAI API key経路ではResponses APIの同フィールドをそのまま転送する。
 
+## VM内OpenCode権限
+
+Agent VMはuntrusted sandboxであり、OpenCode serverとそのbash/tool subprocessをVM内rootで実行する。sunaba生成のOpenCode v1設定はglobal `permission`を`allow`にし、既定の`external_directory`、`.env`読取、doom-loop等の確認待ちを含めてVM内toolを自動許可する。Phase 1実機gateは固定v1.18.16が解決した`/config`で`permission.*=allow`を確認し、modelの`apply_patch`が追加承認なしで成功することと、OpenCode PIDのUIDが0であることをresource probeで検証する。
+
+この権限はVM内だけに限定する。host Project非mount、secure modeのnetwork-none、Model Gatewayのmodel allowlistとquota、Git/Web Gateway policy、Host Trusted Approval、VM resource limit、停止後のsafe export parserは変更しない。
+
 ## 対話起動latency
 
 secure VMの停止、capability失効、固定OpenCodeのdigest/version検証、server health/version検証、resource probeは維持したまま、対話経路の固定待ちを削減した。

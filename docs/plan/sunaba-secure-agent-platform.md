@@ -635,7 +635,9 @@ OpenCodeはv1系の最新stable releaseを互換試験後に固定して使う�
 
 ### 12.2 OpenCode serverとHost TUI
 
-Agent VMでは`opencode serve`をmerged workspaceで動かす。Projectの`opencode.json`、`.opencode/`、plugin、hook、MCP、AGENTS.md等はVM内serverだけが読み込み、VM内で自由に実行できる。serverは`OPENCODE_DISABLE_AUTOUPDATE=1`と`OPENCODE_DISABLE_MODELS_FETCH=1`を設定する。Model Gateway向けのmodel metadata、context/input/output上限、capabilityは、sunabaが認証方式ごとの固定catalogから生成するcustom provider設定を使う。secureモードでModels.dev、OpenAIのmodel discovery API、update endpointへの直接通信を前提にしない。
+Agent VMでは`opencode serve`をVM内rootとしてmerged workspaceで動かす。sunaba生成設定はOpenCode v1のglobal `permission`を`allow`にし、bash、edit、外部directory、`.env`読取、doom-loopを含むtool操作をOpenCode内の追加承認なしで実行できるようにする。Projectの`opencode.json`、`.opencode/`、plugin、hook、MCP、AGENTS.md等はVM内serverだけが読み込み、VM内で自由に実行できる。serverは`OPENCODE_DISABLE_AUTOUPDATE=1`と`OPENCODE_DISABLE_MODELS_FETCH=1`を設定する。Model Gateway向けのmodel metadata、context/input/output上限、capabilityは、sunabaが認証方式ごとの固定catalogから生成するcustom provider設定を使う。secureモードでModels.dev、OpenAIのmodel discovery API、update endpointへの直接通信を前提にしない。
+
+VM内rootとOpenCodeの`permission: allow`はVM外の権限を広げない。host Projectはbind mountせず、secure networkは`none`、Model/Git/Web Gatewayのallowlist・quota・Host Trusted Approval、Local Attach Relay認証、VM resource limit、停止export後のsafe parserを引き続き境界として強制する。VM内processやProject設定はuntrustedであり、root取得済みとして検証する。
 
 Project設定はuntrustedであり、OpenCode v1では`server.hostname`、`server.port`、`server.mdns`、`server.cors`も設定できる。したがって、listen先とmDNSはSupervisorがCLI引数`--hostname`、`--port`、`--mdns=false`で上書きし、CORS設定の有無をnetwork boundaryや認証の根拠にしない。v1.18.16のboolean flagは`--mdns`であり`--no-mdns`は存在しない。Local Attach RelayはOpenCodeのCORS応答とは独立して、許可したTUI接続、HTTP method/path、basic auth、Project/VM channelだけを受け付ける。
 
