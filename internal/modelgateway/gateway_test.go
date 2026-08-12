@@ -2,6 +2,7 @@ package modelgateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,19 @@ func TestGatewayUsesCodexOAuthEndpointHeadersAndRequestShape(t *testing.T) {
 			t.Errorf("path=%q headers=%v", request.URL.Path, request.Header)
 		}
 		upstreamBody, _ = io.ReadAll(request.Body)
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(upstreamBody, &payload); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for _, field := range []string{"max_output_tokens", "max_completion_tokens", "temperature", "top_p", "previous_response_id", "stream_options"} {
+			if _, exists := payload[field]; exists {
+				response.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(response, `{"detail":"Unsupported parameter: `+field+`"}`)
+				return
+			}
+		}
 		_, _ = io.WriteString(response, `{}`)
 	}))
 	defer upstream.Close()
@@ -43,14 +57,14 @@ func TestGatewayUsesCodexOAuthEndpointHeadersAndRequestShape(t *testing.T) {
 	}
 	server := httptest.NewServer(gateway)
 	defer server.Close()
-	request, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+testModel+`","stream":false,"previous_response_id":"secret","stream_options":{"include_usage":true}}`))
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+testModel+`","stream":false,"input":"hi","max_output_tokens":128000,"max_completion_tokens":128000,"temperature":0.2,"top_p":0.9,"previous_response_id":"secret","stream_options":{"include_usage":true}}`))
 	request.Header.Set("Authorization", "Bearer "+testToken)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK || strings.Contains(string(upstreamBody), "previous_response_id") || strings.Contains(string(upstreamBody), "stream_options") || !strings.Contains(string(upstreamBody), `"instructions":""`) {
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(upstreamBody), `"input":"hi"`) || !strings.Contains(string(upstreamBody), `"instructions":""`) {
 		t.Fatalf("status=%d upstream body=%s", response.StatusCode, upstreamBody)
 	}
 }
@@ -63,11 +77,13 @@ const (
 
 func TestGatewayPreservesResponsesStreamingAndToolEvents(t *testing.T) {
 	var receivedAuthorization string
+	var upstreamBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		receivedAuthorization = request.Header.Get("Authorization")
 		if request.URL.Path != "/api/v1/responses" {
 			t.Errorf("upstream path=%q", request.URL.Path)
 		}
+		upstreamBody, _ = io.ReadAll(request.Body)
 		response.Header().Set("Content-Type", "text/event-stream")
 		flusher := response.(http.Flusher)
 		for _, event := range []string{
@@ -84,7 +100,7 @@ func TestGatewayPreservesResponsesStreamingAndToolEvents(t *testing.T) {
 	gateway := testGateway(t, upstream.URL+"/api", func(event AuditEvent) { events = append(events, event) })
 	server := httptest.NewServer(gateway)
 	defer server.Close()
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+testModel+`","stream":true,"input":"hi","tools":[{"type":"function","name":"shell"}]}`))
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"`+testModel+`","stream":true,"input":"hi","max_output_tokens":256,"tools":[{"type":"function","name":"shell"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +122,9 @@ func TestGatewayPreservesResponsesStreamingAndToolEvents(t *testing.T) {
 	}
 	if receivedAuthorization != "Bearer "+testKey || strings.Contains(text, testKey) {
 		t.Fatalf("upstream auth=%q response=%q", receivedAuthorization, text)
+	}
+	if !strings.Contains(string(upstreamBody), `"max_output_tokens":256`) {
+		t.Fatalf("API key request lost max_output_tokens: %s", upstreamBody)
 	}
 	if len(events) != 1 || events[0].Status != http.StatusOK || events[0].ProjectID != "project" || events[0].ResponseBytes == 0 {
 		t.Fatalf("audit events=%+v", events)

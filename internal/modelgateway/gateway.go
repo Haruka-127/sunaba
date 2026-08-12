@@ -336,7 +336,17 @@ func normalizeOAuthRequest(body []byte) ([]byte, error) {
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, err
 	}
-	for _, field := range []string{"previous_response_id", "generate", "prompt_cache_retention", "safety_identifier", "stream_options"} {
+	for _, field := range []string{
+		"previous_response_id",
+		"generate",
+		"max_completion_tokens",
+		"max_output_tokens",
+		"prompt_cache_retention",
+		"safety_identifier",
+		"stream_options",
+		"temperature",
+		"top_p",
+	} {
 		delete(request, field)
 	}
 	if instructions, exists := request["instructions"]; !exists || bytes.Equal(bytes.TrimSpace(instructions), []byte("null")) {

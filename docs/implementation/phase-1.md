@@ -27,6 +27,8 @@ VM削除は`dev.sunaba.owner`、Project ID、session IDの完全一致をinspect
 
 Model Gatewayは期限、request回数、並行数、request/response size、Project policy由来のmodel allowlistを強制し、期限切れ、別token、許可外model、quota超過、過大bodyをupstream到達前に拒否する。既定値は1,000回、同時4回、request 32 MiB、response 64 MiBで、policy validationが過大な上限を拒否する。CPU/memoryはApple Container、server childのprocess/file上限はguest bootstrapで設定する。
 
+Codex OAuth経路ではCLIProxyAPIのCodex Responses変換に合わせ、subscription backendが受理しない`max_output_tokens`、`max_completion_tokens`、`temperature`、`top_p`を上流転送前に除去する。この変換はOAuth経路だけに適用し、OpenAI API key経路ではResponses APIの同フィールドをそのまま転送する。
+
 ## 実機証跡
 
 2026-08-11にApple Container 1.2.2、`sunaba-base:1.18.16-secure.1`、OpenCode 1.18.16で次を一続きに確認した。
