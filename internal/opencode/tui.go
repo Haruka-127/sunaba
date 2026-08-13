@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"sunaba/internal/dependency"
 )
 
 type HostTUIConfig struct {
@@ -39,6 +41,10 @@ type VerifiedHostTUIExecutable struct {
 }
 
 func VerifyHostTUIExecutable(ctx context.Context, managedToolDir, binary, expectedDigest string) (*VerifiedHostTUIExecutable, error) {
+	return VerifyHostTUIExecutableVersion(ctx, managedToolDir, binary, expectedDigest, dependency.OpenCodeVersion)
+}
+
+func VerifyHostTUIExecutableVersion(ctx context.Context, managedToolDir, binary, expectedDigest, expectedVersion string) (*VerifiedHostTUIExecutable, error) {
 	if !filepath.IsAbs(managedToolDir) || !filepath.IsAbs(binary) {
 		return nil, fmt.Errorf("managed tool directory and OpenCode binary must be absolute")
 	}
@@ -67,7 +73,7 @@ func VerifyHostTUIExecutable(ctx context.Context, managedToolDir, binary, expect
 	if err != nil {
 		return nil, fmt.Errorf("read managed OpenCode version: %w", err)
 	}
-	if err := validateOpenCodeVersion(string(output)); err != nil {
+	if err := validateOpenCodeVersionFor(string(output), expectedVersion); err != nil {
 		return nil, err
 	}
 	verifiedInfo, err := os.Lstat(canonicalBinary)

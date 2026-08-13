@@ -19,6 +19,13 @@ type Health struct {
 }
 
 func CheckPrerequisites(ctx context.Context) error {
+	return CheckPrerequisitesFor(ctx, dependency.MustPinned())
+}
+
+func CheckPrerequisitesFor(ctx context.Context, manifest dependency.Manifest) error {
+	if err := dependency.ValidateRuntimeManifest(manifest); err != nil {
+		return err
+	}
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("sunaba requires macOS with apple/container; current OS is %s", runtime.GOOS)
 	}
@@ -29,7 +36,7 @@ func CheckPrerequisites(ctx context.Context) error {
 		return fmt.Errorf("container CLI not found. Install apple/container, then run 'container system start'")
 	}
 	if _, err := exec.LookPath("opencode"); err != nil {
-		return fmt.Errorf("opencode CLI %s not found", dependency.OpenCodeVersion)
+		return fmt.Errorf("opencode CLI %s not found", manifest.OpenCode.Version)
 	}
 	var macVersion, hostVersion, containerVersionOutput, systemStatus string
 	var macErr, hostErr, containerErr, statusErr error
@@ -61,13 +68,13 @@ func CheckPrerequisites(ctx context.Context) error {
 	if hostErr != nil {
 		return fmt.Errorf("cannot determine host OpenCode version: %w", hostErr)
 	}
-	if err := validateOpenCodeVersion(hostVersion); err != nil {
+	if err := validateOpenCodeVersionFor(hostVersion, manifest.OpenCode.Version); err != nil {
 		return err
 	}
 	if containerErr != nil {
 		return fmt.Errorf("cannot determine apple/container version: %w", containerErr)
 	}
-	if err := validateAppleContainerVersion(containerVersionOutput); err != nil {
+	if err := validateAppleContainerVersionFor(containerVersionOutput, manifest.AppleContainer.Version); err != nil {
 		return err
 	}
 	if statusErr != nil || !strings.Contains(strings.ToLower(systemStatus), "running") {
@@ -77,20 +84,28 @@ func CheckPrerequisites(ctx context.Context) error {
 }
 
 func validateAppleContainerVersion(output string) error {
+	return validateAppleContainerVersionFor(output, dependency.AppleContainerVersion)
+}
+
+func validateAppleContainerVersionFor(output, expected string) error {
 	containerVersion := firstSemanticVersion(output)
 	if containerVersion == "" {
 		return fmt.Errorf("cannot parse apple/container version from %q", output)
 	}
-	if CompareVersion(containerVersion, dependency.AppleContainerVersion) != 0 {
-		return fmt.Errorf("sunaba requires exact apple/container %s; current version is %s", dependency.AppleContainerVersion, containerVersion)
+	if CompareVersion(containerVersion, expected) != 0 {
+		return fmt.Errorf("sunaba requires exact apple/container %s; current version is %s", expected, containerVersion)
 	}
 	return nil
 }
 
 func validateOpenCodeVersion(output string) error {
+	return validateOpenCodeVersionFor(output, dependency.OpenCodeVersion)
+}
+
+func validateOpenCodeVersionFor(output, expected string) error {
 	version := strings.TrimPrefix(strings.TrimSpace(output), "v")
-	if version != dependency.OpenCodeVersion {
-		return fmt.Errorf("sunaba requires exact OpenCode %s for host TUI and guest server; current host version is %s", dependency.OpenCodeVersion, version)
+	if version != expected {
+		return fmt.Errorf("sunaba requires exact OpenCode %s for host TUI and guest server; current host version is %s", expected, version)
 	}
 	return nil
 }

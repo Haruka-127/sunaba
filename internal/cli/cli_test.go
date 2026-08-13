@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"sunaba/internal/audit"
+	"sunaba/internal/dependency"
 	"sunaba/internal/gitgateway"
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
@@ -22,15 +23,44 @@ import (
 	"sunaba/internal/runtime"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
+	"sunaba/internal/versionconfig"
 	"sunaba/internal/webgateway"
 	"sunaba/internal/workspace"
 )
+
+func prepareTestSetup(t *testing.T, a *app) {
+	t.Helper()
+	if err := a.store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := a.versionStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := versions.SaveConfig(versionconfig.BootstrapConfig()); err != nil {
+		t.Fatal(err)
+	}
+	lock := versionconfig.Lock{SchemaVersion: 1, Generation: 1, ResolvedAt: time.Now().UTC(), Manifest: dependency.MustPinned()}
+	if err := versions.SaveLock(lock); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := state.NewDependencyBinding(lock.Generation, lock.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.store.SaveActiveDependency(binding); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 	var output bytes.Buffer
 	a := &app{output: &output}
 	for _, args := range [][]string{
 		{"help"},
+		{"setup", "--help"},
+		{"versions", "--help"},
+		{"update", "--help"},
 		{"project", "help"},
 		{"project", "init", "--help"},
 		{"credentials", "openai", "--help"},
@@ -45,7 +75,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		}
 	}
 	text := output.String()
-	for _, expected := range []string{"credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "remote", "add", "web", "approvals", "changes", "export", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
+	for _, expected := range []string{"setup", "--config-only", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "remote", "add", "web", "approvals", "changes", "export", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -126,6 +156,7 @@ func TestProjectInitDefaultsToCurrentDirectoryAndOAuth(t *testing.T) {
 	})
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	a := &app{store: store, output: io.Discard, errors: io.Discard}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", "--mode", "secure"}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +187,7 @@ func TestProjectIDSelectsNormalReadAndMutationCommands(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
 	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
 	a := &app{store: store, configs: configs, runtime: &projectListRuntime{}, output: io.Discard, errors: io.Discard}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +260,7 @@ func TestDestroyByProjectIDWorksWithoutOriginalProjectDirectory(t *testing.T) {
 	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
 	var output bytes.Buffer
 	a := &app{store: store, configs: configs, runtime: &projectListRuntime{}, output: &output, errors: &output}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
@@ -306,6 +339,7 @@ func TestDestroyProjectSelectorsRequireExactUnambiguousID(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
 	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
 	a := &app{store: store, configs: configs, runtime: &projectListRuntime{}, output: io.Discard, errors: io.Discard}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
@@ -410,6 +444,7 @@ func TestProjectListFindsPausedSupervisorAndOwnedForegroundVM(t *testing.T) {
 	}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output, runtime: &projectListRuntime{}}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", secureProject}); err != nil {
 		t.Fatal(err)
 	}
@@ -468,6 +503,7 @@ func TestProjectListReportsStaleWithoutMutatingLocatorAndEmitsJSON(t *testing.T)
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output, runtime: &projectListRuntime{}}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
@@ -576,6 +612,7 @@ func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *te
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
@@ -636,6 +673,7 @@ func TestModelAuthenticationPolicySwitchesToOAuthCatalogDefault(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project, "--model-auth", "api-key"}); err != nil {
 		t.Fatal(err)
 	}
@@ -664,6 +702,7 @@ func TestProjectInitWithOAuthAllowsEntireCatalogByDefault(t *testing.T) {
 	}
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	a := &app{store: store, output: io.Discard, errors: io.Discard}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project, "--model-auth", "oauth"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1115,6 +1154,7 @@ func TestProjectInitCreatesPinnedPolicyAndSafeInitialSnapshot(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(data, "sunaba")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project, "--mode", "dev"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1147,6 +1187,7 @@ func TestHostProjectConfigurationMustBeAppliedBeforeUse(t *testing.T) {
 	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
 	var output bytes.Buffer
 	a := &app{store: store, configs: configs, output: &output, errors: &output}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
@@ -1219,6 +1260,7 @@ func TestInteractiveProjectConfigurationCancelsWithoutWritesThenAppliesGitGatewa
 	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
 	var output bytes.Buffer
 	a := &app{store: store, configs: configs, output: &output, errors: &output}
+	prepareTestSetup(t, a)
 	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}

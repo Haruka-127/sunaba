@@ -288,17 +288,25 @@ func (a *app) verifyConfigMutationSnapshot(policyPath string, projectID string, 
 }
 
 func (a *app) applyProjectConfig(ctx context.Context, config projectconfig.Config, rules []webgateway.OriginRule, effective policy.ProjectPolicy, policyPath, projectState string, saveDeclarative bool, expected *configMutationSnapshot) (policy.ProjectPolicy, error) {
-	if err := a.ensureConfigApplyAllowed(ctx, effective, projectState); err != nil {
-		return policy.ProjectPolicy{}, err
-	}
-	manifestDigest, err := dependency.ManifestSHA256()
+	operationLock, err := a.store.AcquireOperationReadLock()
 	if err != nil {
 		return policy.ProjectPolicy{}, err
 	}
-	pinned := dependency.MustPinned()
+	defer operationLock.Close()
+	if err := a.ensureConfigApplyAllowed(ctx, effective, projectState); err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	activeLock, err := a.activeVersionLock()
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	manifestDigest, err := dependency.ManifestDigest(activeLock.Manifest)
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
 	effective.Dependency = policy.DependencyPolicy{
-		ManifestSHA256: manifestDigest, OpenCode: dependency.OpenCodeVersion,
-		AppleContainer: dependency.AppleContainerVersion, AgentImage: pinned.AgentImage.Tag,
+		ManifestSHA256: manifestDigest, OpenCode: activeLock.Manifest.OpenCode.Version,
+		AppleContainer: activeLock.Manifest.AppleContainer.Version, AgentImage: activeLock.Manifest.AgentImage.Tag,
 	}
 	blocklistPath, blocklistDigest := "", ""
 	if config.Web.Enabled {

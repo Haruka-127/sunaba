@@ -45,6 +45,9 @@ func TestLiveOpenAIThroughAgentVM(t *testing.T) {
 	if output, err := runSunaba("", "credentials", "openai", "status"); err != nil {
 		t.Fatalf("OpenAI Keychain credential is required: %v: %s", err, output)
 	}
+	if output, err := runSunaba("", "setup"); err != nil {
+		t.Fatalf("setup: %v: %s", err, output)
+	}
 	if output, err := runSunaba("", "project", "init", project, "--mode", "secure"); err != nil {
 		t.Fatalf("project init: %v: %s", err, output)
 	}

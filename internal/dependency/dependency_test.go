@@ -30,6 +30,46 @@ func TestPinnedManifest(t *testing.T) {
 	}
 }
 
+func TestRuntimeManifestAcceptsAnotherExactV1Release(t *testing.T) {
+	manifest := MustPinned()
+	manifest.OpenCode.Version = "1.99.0"
+	manifest.OpenCode.Host.URL = "https://github.com/anomalyco/opencode/releases/download/v1.99.0/" + manifest.OpenCode.Host.Artifact
+	manifest.OpenCode.Guest.URL = "https://github.com/anomalyco/opencode/releases/download/v1.99.0/" + manifest.OpenCode.Guest.Artifact
+	manifest.AgentImage.Tag = "sunaba-base:1.99.0-secure.1"
+	manifest.Provenance.OpenCode.Tag = "v1.99.0"
+	manifest.Provenance.OpenCode.Commit = strings.Repeat("1", 40)
+	if err := ValidateRuntimeManifest(manifest); err != nil {
+		t.Fatalf("dynamic v1 manifest rejected: %v", err)
+	}
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("dynamic manifest unexpectedly accepted as embedded bootstrap")
+	}
+	manifest.OpenCode.Version = "2.0.0"
+	if err := ValidateRuntimeManifest(manifest); err == nil {
+		t.Fatal("v2 manifest accepted")
+	}
+}
+
+func TestOpenCodeUpdateCandidateKeepsPlatformPins(t *testing.T) {
+	current := MustPinned()
+	candidate := current
+	candidate.OpenCode.Version = "1.99.0"
+	candidate.OpenCode.Host.URL = "https://github.com/anomalyco/opencode/releases/download/v1.99.0/" + candidate.OpenCode.Host.Artifact
+	candidate.OpenCode.Guest.URL = "https://github.com/anomalyco/opencode/releases/download/v1.99.0/" + candidate.OpenCode.Guest.Artifact
+	candidate.AgentImage.Tag = "sunaba-base:1.99.0-secure.1"
+	candidate.Provenance.OpenCode.Tag = "v1.99.0"
+	candidate.Provenance.OpenCode.Commit = strings.Repeat("2", 40)
+	if err := ValidateOpenCodeUpdateCandidate(current, candidate); err != nil {
+		t.Fatal(err)
+	}
+	candidate.BaseImage.IndexSHA256 = strings.Repeat("3", 64)
+	candidate.BaseImage.Reference = "docker.io/library/debian:bookworm-slim@sha256:" + candidate.BaseImage.IndexSHA256
+	candidate.Provenance.BaseImage.Digest = "sha256:" + candidate.BaseImage.IndexSHA256
+	if err := ValidateOpenCodeUpdateCandidate(current, candidate); err == nil {
+		t.Fatal("OpenCode-only update changed the base image")
+	}
+}
+
 func TestManifestPinsSourceAndBuildProvenance(t *testing.T) {
 	m := MustPinned()
 	if m.Provenance.OpenCode.Commit == "" || m.Provenance.AppleContainer.Commit != m.AppleContainer.Commit || m.Provenance.BaseImage.Digest != "sha256:"+m.BaseImage.IndexSHA256 {

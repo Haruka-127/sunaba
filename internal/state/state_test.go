@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"sunaba/internal/dependency"
 )
 
 func TestProjectID(t *testing.T) {
@@ -30,6 +32,21 @@ func TestGlobalStateRoundTripIsPrivate(t *testing.T) {
 	}
 	if info, err := os.Lstat(filepath.Join(store.Root, "config.json")); err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("private config info=%v error=%v", info, err)
+	}
+}
+
+func TestActiveDependencyRoundTrip(t *testing.T) {
+	store := &Store{Root: filepath.Join(t.TempDir(), "sunaba")}
+	binding, err := NewDependencyBinding(3, dependency.MustPinned())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveActiveDependency(binding); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadActiveDependency()
+	if err != nil || loaded != binding {
+		t.Fatalf("loaded=%+v error=%v", loaded, err)
 	}
 }
 

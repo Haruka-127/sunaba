@@ -75,6 +75,15 @@ func (a *app) projectInit(ctx context.Context, projectArgument, mode, modelAuth 
 	if modelAuth != "api-key" && modelAuth != "oauth" {
 		return fmt.Errorf("model-auth must be oauth or api-key")
 	}
+	operationLock, err := a.store.AcquireOperationReadLock()
+	if err != nil {
+		return err
+	}
+	defer operationLock.Close()
+	activeLock, err := a.activeVersionLock()
+	if err != nil {
+		return err
+	}
 	root, err := state.ResolveProjectPath(projectArgument)
 	if err != nil {
 		return err
@@ -97,12 +106,11 @@ func (a *app) projectInit(ctx context.Context, projectArgument, mode, modelAuth 
 			_ = os.RemoveAll(projectState)
 		}
 	}()
-	manifestDigest, err := dependency.ManifestSHA256()
+	manifestDigest, err := dependency.ManifestDigest(activeLock.Manifest)
 	if err != nil {
 		return err
 	}
-	pinned := dependency.MustPinned()
-	projectPolicy, err := policy.New(root, manifestDigest, dependency.OpenCodeVersion, dependency.AppleContainerVersion, pinned.AgentImage.Tag, mode, time.Now())
+	projectPolicy, err := policy.New(root, manifestDigest, activeLock.Manifest.OpenCode.Version, activeLock.Manifest.AppleContainer.Version, activeLock.Manifest.AgentImage.Tag, mode, time.Now())
 	if err != nil {
 		return err
 	}
@@ -163,6 +171,10 @@ func (a *app) up(ctx context.Context, dir, mode string) error {
 	if err != nil {
 		return err
 	}
+	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
+	if err != nil {
+		return err
+	}
 	if mode != "" {
 		if mode != "secure" && mode != "dev" {
 			return fmt.Errorf("mode must be secure or dev")
@@ -189,10 +201,10 @@ func (a *app) up(ctx context.Context, dir, mode string) error {
 	}
 	if projectPolicy.Mode == "dev" {
 		fmt.Fprintln(a.errors, "WARNING: dev mode permits direct Internet egress during the active Agent Session and does not provide exfiltration prevention.")
-		if err := opencode.CheckPrerequisites(ctx); err != nil {
+		if err := opencode.CheckPrerequisitesFor(ctx, activeLock.Manifest); err != nil {
 			return err
 		}
-		if _, err := image.Ensure(ctx, a.runtime, a.store, dependency.OpenCodeVersion); err != nil {
+		if _, err := image.EnsureManifest(ctx, a.runtime, activeLock.Manifest); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.output, "Project %s is prepared in dev mode. No VM or direct-egress session is active; run 'sunaba agent' in the foreground.\n", projectPolicy.ProjectID)
@@ -227,6 +239,10 @@ func (a *app) up(ctx context.Context, dir, mode string) error {
 
 func (a *app) agent(ctx context.Context, dir string) (returnErr error) {
 	projectPolicy, _, projectState, err := a.loadPolicy(dir)
+	if err != nil {
+		return err
+	}
+	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
 	if err != nil {
 		return err
 	}
@@ -274,7 +290,7 @@ func (a *app) agent(ctx context.Context, dir string) (returnErr error) {
 		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
 		SessionRoot: info.RuntimeRoot, ServerURL: info.AttachURL,
 		GuestWorkspace: info.WorkspacePath, Password: info.ServerPassword,
-		ExpectedExecutableSHA256: dependency.MustPinned().OpenCode.Host.ExecutableSHA256,
+		ExpectedExecutableSHA256: activeLock.Manifest.OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
 	if err != nil {
 		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -346,6 +362,9 @@ func runHostTUIWithHeartbeat(ctx context.Context, tui *exec.Cmd, idleTimeout tim
 func (a *app) shell(ctx context.Context, dir string) (returnErr error) {
 	projectPolicy, _, projectState, err := a.loadPolicy(dir)
 	if err != nil {
+		return err
+	}
+	if _, err := a.requireActiveProjectDependency(projectPolicy); err != nil {
 		return err
 	}
 	if projectPolicy.Mode == "dev" {
@@ -462,9 +481,13 @@ func (a *app) status(ctx context.Context, dir string) error {
 	} else {
 		configState = "invalid: " + configStoreErr.Error()
 	}
-	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
+	dependencyState := "active"
+	if _, err := a.requireActiveProjectDependency(projectPolicy); err != nil {
+		dependencyState = "not active: " + err.Error()
+	}
+	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nDependency lock: %s\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
 		projectPolicy.ProjectRoot, projectPolicy.ProjectID, projectPolicy.Mode, projectPolicy.SchemaVersion,
-		configPath, configState,
+		configPath, configState, dependencyState,
 		projectPolicy.Dependency.OpenCode, projectPolicy.Dependency.AppleContainer, projectPolicy.Dependency.AgentImage,
 		sessionVMs, sessionExpiry, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, pending,
 		projectPolicy.Resources.CPUs, projectPolicy.Resources.Memory, projectPolicy.Resources.DiskBytes, projectPolicy.Resources.ProcessMax, projectPolicy.Resources.FileSizeMax, projectPolicy.Resources.OpenFileMax,
@@ -830,6 +853,14 @@ func (a *app) projectConfigStore() (*projectconfig.Store, error) {
 }
 
 func (a *app) savePolicyAndConfig(policyPath string, effective policy.ProjectPolicy) error {
+	operationLock, err := a.store.AcquireOperationReadLock()
+	if err != nil {
+		return err
+	}
+	defer operationLock.Close()
+	if _, err := a.requireActiveProjectDependency(effective); err != nil {
+		return err
+	}
 	configStore, err := a.projectConfigStore()
 	if err != nil {
 		return err
@@ -861,13 +892,17 @@ func (a *app) cleanupOrphans(ctx context.Context) error {
 }
 
 func (a *app) prepareManagedOpenCode(ctx context.Context) (string, string, *opencode.VerifiedHostTUIExecutable, error) {
-	pinned := dependency.MustPinned()
-	managedDir := filepath.Join(a.store.Root, "tools", "opencode", "v"+dependency.OpenCodeVersion)
+	activeLock, err := a.activeVersionLock()
+	if err != nil {
+		return "", "", nil, err
+	}
+	manifest := activeLock.Manifest
+	managedDir := filepath.Join(a.store.Root, "tools", "opencode", "v"+manifest.OpenCode.Version)
 	if err := os.MkdirAll(managedDir, 0700); err != nil {
 		return "", "", nil, err
 	}
 	destination := filepath.Join(managedDir, "opencode")
-	verified, verifyErr := opencode.VerifyHostTUIExecutable(ctx, managedDir, destination, pinned.OpenCode.Host.ExecutableSHA256)
+	verified, verifyErr := opencode.VerifyHostTUIExecutableVersion(ctx, managedDir, destination, manifest.OpenCode.Host.ExecutableSHA256, manifest.OpenCode.Version)
 	if verifyErr == nil {
 		return managedDir, destination, verified, nil
 	}
@@ -882,10 +917,10 @@ func (a *app) prepareManagedOpenCode(ctx context.Context) (string, string, *open
 	if err != nil {
 		return "", "", nil, errors.Join(verifyErr, err)
 	}
-	if err := installManagedOpenCode(source, destination, pinned.OpenCode.Host.ExecutableSHA256, dependency.OpenCodeVersion); err != nil {
+	if err := installManagedOpenCode(source, destination, manifest.OpenCode.Host.ExecutableSHA256, manifest.OpenCode.Version); err != nil {
 		return "", "", nil, errors.Join(verifyErr, err)
 	}
-	verified, err = opencode.VerifyHostTUIExecutable(ctx, managedDir, destination, pinned.OpenCode.Host.ExecutableSHA256)
+	verified, err = opencode.VerifyHostTUIExecutableVersion(ctx, managedDir, destination, manifest.OpenCode.Host.ExecutableSHA256, manifest.OpenCode.Version)
 	if err != nil {
 		return "", "", nil, err
 	}

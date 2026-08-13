@@ -10,8 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"golang.org/x/sys/unix"
+	"sunaba/internal/dependency"
 )
 
 type Store struct {
@@ -19,7 +21,45 @@ type Store struct {
 }
 
 type GlobalConfig struct {
-	ImageVersion string `json:"image_version"`
+	SchemaVersion int                `json:"schema_version,omitempty"`
+	Active        *DependencyBinding `json:"active_dependency,omitempty"`
+	// ImageVersion is accepted only to recognize the pre-setup state format.
+	ImageVersion string `json:"image_version,omitempty"`
+}
+
+type DependencyBinding struct {
+	Generation            uint64 `json:"generation"`
+	ManifestSHA256        string `json:"manifest_sha256"`
+	OpenCodeVersion       string `json:"opencode_version"`
+	AppleContainerVersion string `json:"apple_container_version"`
+	AgentImage            string `json:"agent_image"`
+}
+
+func NewDependencyBinding(generation uint64, manifest dependency.Manifest) (DependencyBinding, error) {
+	digest, err := dependency.ManifestDigest(manifest)
+	if err != nil {
+		return DependencyBinding{}, err
+	}
+	binding := DependencyBinding{
+		Generation: generation, ManifestSHA256: digest, OpenCodeVersion: manifest.OpenCode.Version,
+		AppleContainerVersion: manifest.AppleContainer.Version, AgentImage: manifest.AgentImage.Tag,
+	}
+	return binding, binding.Validate()
+}
+
+func (b DependencyBinding) Validate() error {
+	if b.Generation == 0 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(b.ManifestSHA256) ||
+		!regexp.MustCompile(`^1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`).MatchString(b.OpenCodeVersion) || b.AppleContainerVersion == "" || b.AgentImage != "sunaba-base:"+b.OpenCodeVersion+"-secure.1" {
+		return fmt.Errorf("active dependency binding is invalid")
+	}
+	return nil
+}
+
+func (c GlobalConfig) Validate() error {
+	if c.SchemaVersion != 2 || c.Active == nil || c.ImageVersion != "" {
+		return fmt.Errorf("global state is not an active schema v2 dependency binding")
+	}
+	return c.Active.Validate()
 }
 
 func NewStore() (*Store, error) {
@@ -105,6 +145,27 @@ func (s *Store) SaveGlobal(config GlobalConfig) error {
 	}
 	encoded = append(encoded, '\n')
 	return writePrivateStateFile(filepath.Join(s.Root, "config.json"), encoded)
+}
+
+func (s *Store) LoadActiveDependency() (DependencyBinding, error) {
+	config, err := s.LoadGlobal()
+	if err != nil {
+		return DependencyBinding{}, err
+	}
+	if err := config.Validate(); err != nil {
+		if config.ImageVersion != "" {
+			return DependencyBinding{}, fmt.Errorf("sunaba setup is required to migrate legacy OpenCode %s state", config.ImageVersion)
+		}
+		return DependencyBinding{}, fmt.Errorf("sunaba setup has not completed: %w", err)
+	}
+	return *config.Active, nil
+}
+
+func (s *Store) SaveActiveDependency(binding DependencyBinding) error {
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	return s.SaveGlobal(GlobalConfig{SchemaVersion: 2, Active: &binding})
 }
 
 func ensurePrivateStateDirectory(path string) error {

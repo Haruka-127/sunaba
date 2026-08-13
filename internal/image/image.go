@@ -12,52 +12,45 @@ import (
 	sunabaassets "sunaba/assets"
 	"sunaba/internal/dependency"
 	"sunaba/internal/runtime"
-	"sunaba/internal/state"
 )
 
 func Tag(version string) string {
-	pinned := dependency.MustPinned()
-	if version == pinned.OpenCode.Version {
-		return pinned.AgentImage.Tag
-	}
-	return "sunaba-base:" + version
+	return "sunaba-base:" + version + "-secure.1"
 }
 
-func Ensure(ctx context.Context, rt runtime.Runtime, st *state.Store, explicit string) (string, error) {
-	pinned := dependency.MustPinned()
-	cfg, err := st.LoadGlobal()
-	if err != nil {
+func EnsureManifest(ctx context.Context, rt runtime.Runtime, manifest dependency.Manifest) (string, error) {
+	if err := dependency.ValidateRuntimeManifest(manifest); err != nil {
 		return "", err
 	}
-	if explicit != "" && explicit != pinned.OpenCode.Version {
-		return "", fmt.Errorf("OpenCode version %q is not permitted; dependency contract pins %s", explicit, pinned.OpenCode.Version)
+	if rt == nil {
+		return "", fmt.Errorf("container runtime is required")
 	}
-	if cfg.ImageVersion != "" && cfg.ImageVersion != pinned.OpenCode.Version {
-		return "", fmt.Errorf("configured OpenCode version %q differs from pinned dependency %s; recreate the image", cfg.ImageVersion, pinned.OpenCode.Version)
-	}
-	version := pinned.OpenCode.Version
-	exists, err := rt.ImageExists(ctx, Tag(version))
+	exists, err := rt.ImageExists(ctx, manifest.AgentImage.Tag)
 	if err != nil {
 		return "", err
 	}
 	if !exists {
-		if err := Build(ctx, rt, version); err != nil {
+		if err := BuildManifest(ctx, rt, manifest); err != nil {
 			return "", err
 		}
 	}
-	if cfg.ImageVersion != version {
-		cfg.ImageVersion = version
-		if err := st.SaveGlobal(cfg); err != nil {
-			return "", err
-		}
-	}
-	return version, nil
+	return manifest.OpenCode.Version, nil
 }
 
 func Build(ctx context.Context, rt runtime.Runtime, version string) error {
 	pinned := dependency.MustPinned()
 	if version != pinned.OpenCode.Version {
 		return fmt.Errorf("refusing to build unpinned OpenCode version %q; expected %s", version, pinned.OpenCode.Version)
+	}
+	return BuildManifest(ctx, rt, pinned)
+}
+
+func BuildManifest(ctx context.Context, rt runtime.Runtime, manifest dependency.Manifest) error {
+	if err := dependency.ValidateRuntimeManifest(manifest); err != nil {
+		return err
+	}
+	if rt == nil {
+		return fmt.Errorf("container runtime is required")
 	}
 	buildInputs := make(map[string][]byte, 2)
 	for _, name := range []string{"Containerfile", "entrypoint.sh"} {
@@ -67,7 +60,7 @@ func Build(ctx context.Context, rt runtime.Runtime, version string) error {
 		}
 		buildInputs[name] = data
 	}
-	if err := verifyBuildInputProvenance(pinned, buildInputs); err != nil {
+	if err := verifyBuildInputProvenance(manifest, buildInputs); err != nil {
 		return err
 	}
 	dir, err := os.MkdirTemp("", "sunaba-image-*")
@@ -85,9 +78,9 @@ func Build(ctx context.Context, rt runtime.Runtime, version string) error {
 			return err
 		}
 	}
-	return rt.BuildImage(ctx, Tag(version), dir, map[string]string{
-		"OPENCODE_VERSION": version,
-		"OPENCODE_SHA256":  pinned.OpenCode.Guest.SHA256,
+	return rt.BuildImage(ctx, manifest.AgentImage.Tag, dir, map[string]string{
+		"OPENCODE_VERSION": manifest.OpenCode.Version,
+		"OPENCODE_SHA256":  manifest.OpenCode.Guest.SHA256,
 	})
 }
 

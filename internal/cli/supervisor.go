@@ -12,7 +12,6 @@ import (
 
 	"sunaba/internal/audit"
 	"sunaba/internal/cleanup"
-	"sunaba/internal/dependency"
 	"sunaba/internal/devnetwork"
 	"sunaba/internal/image"
 	"sunaba/internal/modelcatalog"
@@ -22,6 +21,7 @@ import (
 	"sunaba/internal/policy"
 	"sunaba/internal/secretstore"
 	"sunaba/internal/session"
+	"sunaba/internal/state"
 )
 
 type managedSession struct {
@@ -32,16 +32,31 @@ type managedSession struct {
 	serverPassword string
 	expiresAt      time.Time
 	gitBroker      pushApprovalBroker
+	operationLock  *state.OperationLock
 }
 
 func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (*managedSession, error) {
+	operationLock, err := a.store.AcquireOperationReadLock()
+	if err != nil {
+		return nil, err
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = operationLock.Close()
+		}
+	}()
 	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil {
 		return nil, fmt.Errorf("a pending Change Set exists; apply or discard it before starting another Agent Session")
 	}
-	if err := opencode.CheckPrerequisites(ctx); err != nil {
+	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := image.Ensure(ctx, a.runtime, a.store, dependency.OpenCodeVersion); err != nil {
+	if err := opencode.CheckPrerequisitesFor(ctx, activeLock.Manifest); err != nil {
+		return nil, err
+	}
+	if _, err := image.EnsureManifest(ctx, a.runtime, activeLock.Manifest); err != nil {
 		return nil, err
 	}
 	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
@@ -175,9 +190,10 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	}
 	gatewaysHandedOff = true
 	cleanupRuntime = false
+	handedOff = true
 	return &managedSession{
 		active: active, projectPolicy: projectPolicy, projectState: projectState, runtimeBase: runtimeBase,
-		serverPassword: serverPassword, expiresAt: expiresAt, gitBroker: gateways.gitBroker,
+		serverPassword: serverPassword, expiresAt: expiresAt, gitBroker: gateways.gitBroker, operationLock: operationLock,
 	}, nil
 }
 
@@ -205,6 +221,7 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
 	defer func() {
 		if !destroyed {
@@ -271,12 +288,17 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 
 func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (returnErr error) {
 	fmt.Fprintln(a.errors, "WARNING: dev mode permits direct Internet egress only while this foreground Agent Session is active; exfiltration prevention is not provided.")
+	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
+	if err != nil {
+		return err
+	}
 	managedOpenCode := a.prepareManagedOpenCodeAsync(ctx)
 	managed, err := a.startManagedSession(ctx, projectPolicy, projectState)
 	if err != nil {
 		prepared := <-managedOpenCode
 		return errors.Join(err, prepared.err)
 	}
+	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
 	defer func() {
 		if !destroyed {
@@ -303,7 +325,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
 		SessionRoot: managed.active.Root, ServerURL: managed.active.AttachURL,
 		GuestWorkspace: managed.active.WorkspacePath, Password: managed.serverPassword,
-		ExpectedExecutableSHA256: dependency.MustPinned().OpenCode.Host.ExecutableSHA256,
+		ExpectedExecutableSHA256: activeLock.Manifest.OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
 	if err != nil {
 		return err
@@ -330,6 +352,7 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 	if err != nil {
 		return err
 	}
+	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
 	defer func() {
 		if !destroyed {

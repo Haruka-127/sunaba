@@ -15,7 +15,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 func (a *app) command() *urfavecli.Command {
 	command := &urfavecli.Command{
 		Name:                      "sunaba",
-		Usage:                     "Run OpenCode v1.18.16 securely inside a Project Agent VM",
+		Usage:                     "Run a locked OpenCode v1 release securely inside a Project Agent VM",
 		Description:               "Runs OpenCode in an isolated Project Agent VM without bind-mounting host Project files. Host Project files are never bind-mounted.",
 		HideVersion:               true,
 		EnableShellCompletion:     false,
@@ -39,6 +39,7 @@ func (a *app) command() *urfavecli.Command {
 		},
 	}
 	command.Commands = []*urfavecli.Command{
+		a.setupCommand(), a.versionsCommand(), a.updateCommand(),
 		a.projectCommand(), a.configCommand(), a.credentialsCommand(), a.modelCommand(),
 		a.simpleProjectCommand("up", "Prepare the Project VM", projectSelectorFlags(&urfavecli.StringFlag{Name: "mode", Usage: "Execution mode (secure or dev)"}), a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.up(ctx, dir, cmd.String("mode"))

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 )
@@ -116,19 +117,35 @@ func ManifestSHA256() (string, error) {
 }
 
 func (m Manifest) Validate() error {
+	if err := ValidateRuntimeManifest(m); err != nil {
+		return err
+	}
+	if m.OpenCode.Version != OpenCodeVersion {
+		return fmt.Errorf("OpenCode version %q does not match compiled bootstrap contract %q", m.OpenCode.Version, OpenCodeVersion)
+	}
+	if m.Provenance.OpenCode.Commit != OpenCodeCommit {
+		return fmt.Errorf("OpenCode source commit does not match compiled bootstrap contract")
+	}
+	return nil
+}
+
+// ValidateRuntimeManifest validates an exact, host-resolved dependency lock.
+// Unlike Manifest.Validate it does not require the embedded bootstrap OpenCode
+// release, but it always restricts the runtime to an exact v1 release.
+func ValidateRuntimeManifest(m Manifest) error {
 	if m.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported dependency manifest schema %d", m.SchemaVersion)
 	}
 	if m.AppleContainer.Version != AppleContainerVersion {
 		return fmt.Errorf("apple/container version %q does not match compiled contract %q", m.AppleContainer.Version, AppleContainerVersion)
 	}
-	if m.OpenCode.Version != OpenCodeVersion {
-		return fmt.Errorf("OpenCode version %q does not match compiled contract %q", m.OpenCode.Version, OpenCodeVersion)
+	if !regexp.MustCompile(`^1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`).MatchString(m.OpenCode.Version) {
+		return fmt.Errorf("OpenCode version %q must be an exact v1 semantic version", m.OpenCode.Version)
 	}
 	if !strings.HasSuffix(m.BaseImage.Reference, "@sha256:"+m.BaseImage.IndexSHA256) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(m.BaseImage.IndexSHA256) {
 		return fmt.Errorf("base image must be pinned by a valid index SHA-256")
 	}
-	if m.AgentImage.Tag != "sunaba-base:"+OpenCodeVersion+"-secure.1" {
+	if m.AgentImage.Tag != "sunaba-base:"+m.OpenCode.Version+"-secure.1" {
 		return fmt.Errorf("unexpected agent image tag %q", m.AgentImage.Tag)
 	}
 	if m.GoModules["golang.org/x/sys"] != "v0.30.0" {
@@ -155,10 +172,20 @@ func (m Manifest) Validate() error {
 	if err := validateProvenance(m); err != nil {
 		return err
 	}
-	if m.Provenance.OpenCode.Commit != OpenCodeCommit {
-		return fmt.Errorf("OpenCode source commit does not match compiled contract")
-	}
 	return nil
+}
+
+// ManifestDigest returns the deterministic SHA-256 of the JSON manifest.
+func ManifestDigest(manifest Manifest) (string, error) {
+	if err := ValidateRuntimeManifest(manifest); err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func ValidateUpdateCandidate(current, candidate Manifest, evidence UpdateEvidence) error {
@@ -176,6 +203,29 @@ func ValidateUpdateCandidate(current, candidate Manifest, evidence UpdateEvidenc
 	}
 	if !evidence.ArtifactDigests || !evidence.RuntimeVersion || !evidence.Lifecycle || !evidence.NetworkIsolation || !evidence.CopyExport || !evidence.ResourceLimits {
 		return fmt.Errorf("dependency update candidate lacks required integration evidence")
+	}
+	return nil
+}
+
+// ValidateOpenCodeUpdateCandidate permits a host-resolved OpenCode-only v1
+// update while requiring every platform and build input pin to remain exactly
+// the same as the active manifest.
+func ValidateOpenCodeUpdateCandidate(current, candidate Manifest) error {
+	if err := ValidateRuntimeManifest(current); err != nil {
+		return fmt.Errorf("current dependency contract is invalid: %w", err)
+	}
+	if err := ValidateRuntimeManifest(candidate); err != nil {
+		return fmt.Errorf("OpenCode update candidate is invalid: %w", err)
+	}
+	if candidate.OpenCode.Version == current.OpenCode.Version {
+		return fmt.Errorf("OpenCode %s is already the active exact version", current.OpenCode.Version)
+	}
+	if candidate.AppleContainer != current.AppleContainer || candidate.BaseImage != current.BaseImage ||
+		!reflect.DeepEqual(candidate.GoModules, current.GoModules) ||
+		candidate.Provenance.AppleContainer != current.Provenance.AppleContainer ||
+		candidate.Provenance.BaseImage != current.Provenance.BaseImage ||
+		!reflect.DeepEqual(candidate.Provenance.BuildInputs, current.Provenance.BuildInputs) {
+		return fmt.Errorf("runtime OpenCode update must not change Apple Container, base image, Go modules, or Agent image build inputs")
 	}
 	return nil
 }
@@ -238,7 +288,8 @@ func validateArtifact(a Artifact, wantOS, wantArch, version string) error {
 	if a.Artifact == "" || a.URL == "" {
 		return fmt.Errorf("artifact name and URL are required")
 	}
-	if !strings.Contains(a.URL, "/v"+version+"/") || !strings.HasSuffix(a.URL, "/"+a.Artifact) {
+	wantURL := "https://github.com/anomalyco/opencode/releases/download/v" + version + "/" + a.Artifact
+	if a.URL != wantURL {
 		return fmt.Errorf("URL %q is not bound to v%s artifact %q", a.URL, version, a.Artifact)
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(a.SHA256) {
