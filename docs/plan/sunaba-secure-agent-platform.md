@@ -100,7 +100,7 @@ sunabaの目的は、AIエージェントを単に制限することではない
 | SD-17 | Web GatewayはProject専用forward proxyとする | 実OpenCode、curl、wget、aptがproxyを利用でき、TLS MITMなしでclient証明書検証を維持できるため。HTTPS内部の操作はorigin policyとquotaで限定する |
 | SD-18 | VMは停止・再開でき、別操作としてクリーン再生成できる | 利便性と侵害からの復旧を分けて扱うため |
 | SD-19 | OpenCode serverはAgent VM、TUI clientはホストで動かす | エージェント実行を隔離しながら、利用者へ通常のTUI操作を提供するため |
-| SD-20 | OpenCode server/TUIを同じv1系の固定バージョンにする | client/server protocolと設定schemaのずれを防ぎ、再現可能にするため |
+| SD-20 | OpenCode server/TUIを同じv1系のexact versionへlockする | client/server protocolと設定schemaのずれを防ぎ、利用者が明示更新するまで再現可能にするため |
 | SD-21 | sunabaの承認はOpenCode TUI内で完結させない | 侵害済みVMによる偽承認画面とtrusted UIを分離するため |
 | SD-22 | Web Gatewayは組み込み`common-development` origin presetとProject固有追加ruleを分離する | 一般的な依存導入を容易にしつつ、preset不使用とProject単位の追加を明示選択でき、更新をpolicy適用時に固定するため |
 
@@ -204,7 +204,7 @@ sunabaの目的は、AIエージェントを単に制限することではない
 13. 監査ログはVMから変更・削除できないホスト側へ保存する。
 14. CPU、メモリ、ディスク、プロセス数、Gateway利用量をホスト境界で制限する。
 15. devモードの直接外向き通信もAgent Sessionの寿命へ束縛し、セッション終了後に残さない。
-16. OpenCode serverとHost TUIは同じ固定バージョンを使用し、不一致ならattachしない。
+16. OpenCode serverとHost TUIはhost-only version lockが示す同じv1系exact versionを使用し、不一致ならattachしない。
 17. Host TUIはhost Projectの設定、`.opencode`、plugin、hook、provider credentialを読み込まず、VM内serverだけへattachする。
 18. OpenCode serverはpublic、LAN、host一般interfaceへ公開せず、認証付きのProject専用relay経路からだけ接続する。
 19. pushとChange Set applyの承認はguest表示から分離したTrusted Approval UIで確定し、guest requestだけでは成立させない。
@@ -619,7 +619,7 @@ Gateway data planeはSupervisorの管理面から分離し、最小権限のproc
 
 ### 12.1 OpenCode v1の固定
 
-OpenCodeはv1系の最新stable releaseを互換試験後に固定して使う。本文書更新時点（2026-08-11）の固定値は`v1.18.16`である。
+OpenCodeはv1系のexact releaseをhost-only version lockへ固定して使う。本文書更新時点（2026-08-11）のbootstrap固定値は`v1.18.16`である。bootstrap値は初回setupとlegacy migrationの出発点であり、利用者は明示的なversion設定と`update check` / `update apply`により別の検証済みv1 releaseへ更新できる。
 
 | 用途 | 公式artifact | SHA-256 |
 |---|---|---|
@@ -630,9 +630,40 @@ OpenCodeはv1系の最新stable releaseを互換試験後に固定して使う�
 - download後、展開前と実行前にdigestを検証する
 - 開発時のhost TUIはgitignore済みの`bin/tools/opencode/v1.18.16/`へ置き、global installを要求しない。製品配布方式は署名・更新設計と併せて決める
 - guest serverは固定artifactをbase imageへ組み込み、image digestとOpenCode versionをpolicyへ記録する
-- `latest` URL、OpenCodeの自動update、v2系への自動移行を使わない
+- Agent Session開始時に`latest`を解決せず、OpenCode自身の自動updateとv2系への自動移行を使わない
 - v1系の新releaseへ上げるときは、server/TUIの両artifactとdigestを同じ変更で更新し、provider config、attach API、terminal、integration testを通す
 - Agent Session開始時にHost TUIの`opencode --version`とserverの`/global/health`を比較し、完全一致しなければattachしない
+
+#### 12.1.1 Host-only version設定
+
+利用者が編集するversion宣言は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/versions.json`、sunabaが生成する適用済みlockは同directoryの`versions.lock.json`を正本とする。directoryはcurrent user所有のmode `0700`、両fileはmode `0600`の通常fileに限定し、symlink、unknown field、trailing data、oversizeを拒否する。Project、Snapshot、VM、Change Setへcopyまたはmountしない。
+
+`versions.json`はOpenCodeについて次のいずれかだけを受け付ける。
+
+- `exact`: 利用者が指定したv1系exact semantic version
+- `channel`: 固定名`v1-stable`。明示的な`update check`時だけ公式releaseからexact v1 versionへ解決する
+
+runtime、Project policy、Agent image buildは`versions.lock.json`に記録されたexact version、artifact URL、SHA-256、source tag/commit、Agent image identityだけを使う。`channel`、`latest`、rangeをAgent Session開始時の入力にしない。
+
+#### 12.1.2 初回setup
+
+fresh hostでは、利用者が`sunaba setup`を明示実行する。`project init`、`up`、`agent`、`shell`はsetup完了前にfail closedで拒否する。`help`、`setup`、`versions`、`update`、`credentials`は利用できる。
+
+`setup`はbinaryへ埋め込んだbootstrap dependency contractから既定の`versions.json`を作り、macOS、Apple Container、host OpenCode version/digestを検証し、guest artifactのSHA-256を検証してAgent imageをbuildする。成功後だけ`versions.lock.json`とhost-only global active dependencyを原子的に確定する。初回から別versionを使う場合は`setup --config-only`の後に`versions set|track`、`update check`、`update apply`を使う。
+
+既存global stateまたはProject stateがある場合はfresh setupとして上書きしない。legacy dependencyと既存Projectをinventoryし、同一bootstrap contractだと検証できる場合だけ明示的なmigrationを行う。VM、pending Change Set、Project fileを暗黙に削除しない。
+
+#### 12.1.3 明示的update
+
+version更新は`sunaba update check`と`sunaba update apply`の二段階に分ける。
+
+`update check`は`versions.json`を検証し、exactまたは`v1-stable`をexact versionへ解決し、公式host/guest artifactとsource provenanceをhost quarantineへ取得してdigestを計算する。active lockやProject policyは変更せず、設定digest、current lock digest、target manifest、artifact digest、期限へ束縛したcandidate planをhost-only stateへ保存して表示する。
+
+`update apply`は直前のcandidateだけを使い、`latest`を再解決しない。macOSへインストールされたhost OpenCodeのversion/executable digest、candidate artifact、Apple Container、既存VM/Supervisor、Project policy identityを再検証する。runningまたはpaused VMとunexported変更がある場合は拒否し、利用者へ`changes export`または明示破棄を要求する。host quarantineにあるpending Change Setは保持でき、更新後も通常の`changes apply`で処理できる。
+
+applyはcandidate Agent imageをno-cache buildしてversionとidentityを検証した後、journaled transactionで全Projectのdependency binding、global active dependency、`versions.lock.json`を更新する。commit decision前はrollbackでき、commit decision後のcrashはsource/target以外のstateが混入していないことを確認してroll-forwardする。旧Agent imageと旧managed Host TUIはupdate transaction中に削除しない。
+
+自動実行を許可し得るのはread-onlyな更新確認までとする。`update apply`とAgent Session開始時のversion変更は必ず利用者の明示操作とし、secureからdevへのfallbackと同様、利便性のためにversion検証を緩めない。
 
 ### 12.2 OpenCode serverとHost TUI
 
@@ -867,7 +898,7 @@ Phase 0のprobeで既存許可範囲にない操作が必要になった場合�
 
 ## 16. ポリシーとリソース制御
 
-Projectの利用者設定は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/`を正本とし、Project worktree外のhost-only領域へ保存する。Project directory、Snapshot、VM、session input、exportへこの設定directoryをmountまたはcopyせず、VMから参照・変更できる経路を作らない。directoryはcurrent user所有のmode `0700`、`project.json`と`web-origins.txt`はmode `0600`の通常fileに限定し、symlink、未知field、trailing data、上限超過を拒否する。
+利用者共通のversion宣言と適用済みlockは`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/versions.json`と`versions.lock.json`、Projectの利用者設定は同directoryの`projects/<ProjectID>/`を正本とし、Project worktree外のhost-only領域へ保存する。Project directory、Snapshot、VM、session input、exportへこの設定directoryをmountまたはcopyせず、VMから参照・変更できる経路を作らない。directoryはcurrent user所有のmode `0700`、設定とlockはmode `0600`の通常fileに限定し、symlink、未知field、trailing data、上限超過を拒否する。
 
 `project.json`にはmode、resource、session、Model、Git remote、Webの有効状態・`origin_presets`・quota、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、組み込みpreset内容/digest、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
 
@@ -1100,6 +1131,13 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 基本操作は次のような責務を持つ。CLI名は実装時に既存CLIとの整合を確認する。
 
 ```text
+sunaba setup                       bootstrap版で前提条件を検証し、初回Agent imageとversion lockを作成
+sunaba setup --config-only         version宣言だけを作成し、初回から別のv1版を選ぶ準備をする
+sunaba versions path/show          host-only version設定pathまたは宣言・適用済みlockを表示
+sunaba versions set <version>      更新対象をv1系exact versionへ設定
+sunaba versions track v1-stable    明示check時だけ解決するv1 stable channelを設定
+sunaba update check                対象を解決・検証し、適用前candidateを保存
+sunaba update apply                保存済みcandidateを明示適用
 sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登録・確認・削除
 sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
 sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
@@ -1127,6 +1165,8 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 期待する通常体験は次である。
 
 - Agent VM内ではOpenCodeとshellを通常どおり使える。
+- fresh hostでは最初に`sunaba setup`を実行する。初回からbootstrap以外を使う場合は`setup --config-only`、`versions set|track`、`update check`、macOS側OpenCodeの同一版への更新、`update apply`の順に行う。`project init`はsetup未完了ならProject stateを作らず拒否する。
+- `versions set|track`は宣言だけを変更し、VM、Project policy、active lockを変更しない。`update check`もcandidate作成までとし、`update apply`だけが停止済みProjectを新しいexact lockへ切り替える。channel追跡を選んでもsession開始時の自動更新は行わない。
 - `sunaba project init`はpathを省略した場合にcurrent directoryを登録し、相対pathも受け付ける。入力pathはsymlinkを解決したcanonical absolute pathへ変換してidentityを固定する。新規ProjectのModel認証はOAuthを既定とし、API keyを使う場合だけ`--model-auth api-key`を指定する。credentialの登録有無から認証方式を推測せず、既存Projectの認証方式は変更しない。
 - `sunaba project list`はhost-only stateの直接の子だけをboundedに列挙し、Project policy、owner-only Supervisor locator、sunaba所有labelが完全一致するVMから状態を判定する。一覧取得はpolicy migration、stale locator回収、orphan cleanup、VM lifecycle操作を行わない。`--active`は到達可能なSupervisorまたはrunning状態のowned VMがあるProjectだけを表示し、VMがpause中でもSupervisorがactiveなら除外しない。
 - 公開Project操作の`config`、`model`、`up`、`agent`、`git`、`web`、`shell`、`status`、`changes`、`approvals`、`recreate`、`down`、`destroy`は、`--dir <path>`または`--project-id <id>`で対象を選択できる。両方の同時指定を拒否し、どちらも未指定ならcurrent directoryを使う。Project IDは`project list`が表示した12桁の小文字16進IDとの完全一致だけを受け付け、prefix、部分一致、aliasを使わない。通常操作のID指定は、owner-only stateとpolicyをread-onlyで検証し、policyのProject IDが一致し、保存されたcanonical Project rootが現存する場合だけそのrootへ解決する。`project init`、`project list`、利用者共通の`credentials`、内部ホスト操作の`firewall`と`_supervisor`はこのselectorの対象外とする。
