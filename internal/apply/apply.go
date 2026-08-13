@@ -270,16 +270,18 @@ func affectedRoots(changeSet workspace.ChangeSet) []string {
 		return paths[i] < paths[j]
 	})
 	result := make([]string, 0, len(paths))
+	selected := make(map[string]struct{}, len(paths))
 	for _, candidate := range paths {
 		covered := false
-		for _, parent := range result {
-			if candidate == parent || strings.HasPrefix(candidate, parent+"/") {
+		for parent := path.Dir(candidate); parent != "."; parent = path.Dir(parent) {
+			if _, exists := selected[parent]; exists {
 				covered = true
 				break
 			}
 		}
 		if !covered {
 			result = append(result, candidate)
+			selected[candidate] = struct{}{}
 		}
 	}
 	return result

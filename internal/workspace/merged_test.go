@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"archive/tar"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,6 +104,63 @@ func TestFirstManifestDifferenceReportsFieldWithoutContent(t *testing.T) {
 	}
 	if strings.Contains(firstManifestDifference(expected, actual), "secret-digest") {
 		t.Fatal("diagnostic disclosed content-derived metadata")
+	}
+}
+
+func TestRemoveMergedSubtreesHandlesSiblingPrefixesInOnePass(t *testing.T) {
+	state := map[string]mergedEntry{
+		"a": {}, "a/child": {}, "a-b": {}, "opaque": {}, "opaque/old": {}, "opaque-sibling": {},
+	}
+	removeMergedSubtrees(state, []mergedSubtreeDeletion{{root: "a", includeRoot: true}, {root: "opaque"}})
+	for _, removed := range []string{"a", "a/child", "opaque/old"} {
+		if _, exists := state[removed]; exists {
+			t.Fatalf("deleted path remained: %s", removed)
+		}
+	}
+	for _, retained := range []string{"a-b", "opaque", "opaque-sibling"} {
+		if _, exists := state[retained]; !exists {
+			t.Fatalf("sibling or opaque root was removed: %s", retained)
+		}
+	}
+}
+
+func TestApplyRedirectsRejectsEndpointAncestorDespiteLexicalSibling(t *testing.T) {
+	baseline := map[string]SnapshotEntry{
+		"a": {Path: "a", Type: TypeDirectory}, "a/child": {Path: "a/child", Type: TypeFile},
+		"source": {Path: "source", Type: TypeDirectory}, "source/file": {Path: "source/file", Type: TypeFile},
+	}
+	state := make(map[string]mergedEntry, len(baseline))
+	for entryPath, entry := range baseline {
+		state[entryPath] = mergedEntry{manifest: entry, lowerPath: entryPath}
+	}
+	upper := []OverlayEntry{
+		{Path: "a", Redirect: "source", Type: TypeDirectory},
+		{Path: "a/child", Redirect: "unrelated", Type: TypeFile},
+	}
+	baseline["unrelated"] = SnapshotEntry{Path: "unrelated", Type: TypeFile}
+	if err := applyRedirects(state, baseline, upper); err == nil {
+		t.Fatal("overlapping redirect endpoints were accepted")
+	}
+}
+
+func BenchmarkRemoveMergedSubtreesAdversarial(b *testing.B) {
+	const entries = 100_000
+	base := make(map[string]mergedEntry, entries)
+	deletions := make([]mergedSubtreeDeletion, 0, entries/2)
+	for index := 0; index < entries; index++ {
+		entryPath := fmt.Sprintf("dir-%06d/file", index)
+		base[entryPath] = mergedEntry{manifest: SnapshotEntry{Path: entryPath, Type: TypeFile}}
+		if index%2 == 0 {
+			deletions = append(deletions, mergedSubtreeDeletion{root: fmt.Sprintf("dir-%06d", index), includeRoot: true})
+		}
+	}
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		state := make(map[string]mergedEntry, len(base))
+		for entryPath, entry := range base {
+			state[entryPath] = entry
+		}
+		removeMergedSubtrees(state, deletions)
 	}
 }
 

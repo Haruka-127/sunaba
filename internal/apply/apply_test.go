@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -252,6 +253,17 @@ func TestApplyRejectsSymlinkParentRace(t *testing.T) {
 		t.Fatal("symlink parent race was accepted")
 	}
 	assertContent(t, filepath.Join(external, "file"), "outside")
+}
+
+func TestAffectedRootsKeepsSiblingsAndDropsDescendants(t *testing.T) {
+	changeSet := workspace.ChangeSet{Changes: []workspace.Change{
+		{Path: "a/child"}, {Path: "a"}, {Path: "a-b"}, {Path: "a/deep/item"}, {Path: "z/new", From: "z/old"},
+	}}
+	got := affectedRoots(changeSet)
+	want := []string{"a", "a-b", "z/new", "z/old"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("affected roots=%v want=%v", got, want)
+	}
 }
 
 func applyFixture(t *testing.T) Config {

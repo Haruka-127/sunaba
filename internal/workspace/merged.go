@@ -73,16 +73,17 @@ func MaterializeMergedView(snapshotRoot, destination string, baseline SnapshotMa
 	if err := applyRedirects(state, baselineByPath, frozen.Upper); err != nil {
 		return MergedView{}, err
 	}
+	deletions := make([]mergedSubtreeDeletion, 0, len(frozen.Upper))
 	for _, entry := range frozen.Upper {
 		if entry.Whiteout {
-			removeMergedSubtree(state, entry.Path, true)
+			deletions = append(deletions, mergedSubtreeDeletion{root: entry.Path, includeRoot: true})
+		} else if entry.Opaque {
+			deletions = append(deletions, mergedSubtreeDeletion{root: entry.Path})
+		} else if entry.Type != TypeDirectory {
+			deletions = append(deletions, mergedSubtreeDeletion{root: entry.Path, includeRoot: true})
 		}
 	}
-	for _, entry := range frozen.Upper {
-		if entry.Opaque {
-			removeMergedSubtree(state, entry.Path, false)
-		}
-	}
+	removeMergedSubtrees(state, deletions)
 	upper := append([]OverlayEntry(nil), frozen.Upper...)
 	sort.Slice(upper, func(i, j int) bool {
 		leftDepth, rightDepth := strings.Count(upper[i].Path, "/"), strings.Count(upper[j].Path, "/")
@@ -98,11 +99,6 @@ func MaterializeMergedView(snapshotRoot, destination string, baseline SnapshotMa
 		item, err := mergedEntryFromUpper(entry, baselineByPath, frozen.StagingDir)
 		if err != nil {
 			return MergedView{}, err
-		}
-		if item.manifest.Type != TypeDirectory {
-			removeMergedSubtree(state, entry.Path, true)
-		} else if existing, exists := state[entry.Path]; exists && existing.manifest.Type != TypeDirectory {
-			delete(state, entry.Path)
 		}
 		state[entry.Path] = item
 	}
@@ -198,32 +194,65 @@ func applyRedirects(state map[string]mergedEntry, baseline map[string]SnapshotEn
 			redirects = append(redirects, entry)
 		}
 	}
-	sort.Slice(redirects, func(i, j int) bool { return redirects[i].Path < redirects[j].Path })
-	for i, entry := range redirects {
+	if len(redirects) == 0 {
+		return nil
+	}
+	type redirectEndpoint struct {
+		path  string
+		owner int
+	}
+	endpoints := make([]redirectEndpoint, 0, len(redirects)*2)
+	for index, entry := range redirects {
 		if entry.Path == entry.Redirect || pathsOverlap(entry.Path, entry.Redirect) {
 			return fmt.Errorf("overlapping redirect %q <- %q", entry.Path, entry.Redirect)
-		}
-		for j := 0; j < i; j++ {
-			other := redirects[j]
-			if pathsOverlap(entry.Path, other.Path) || pathsOverlap(entry.Path, other.Redirect) || pathsOverlap(entry.Redirect, other.Path) || pathsOverlap(entry.Redirect, other.Redirect) {
-				return fmt.Errorf("overlapping redirects are not supported")
-			}
 		}
 		source, exists := baseline[entry.Redirect]
 		if !exists || source.Type != entry.Type {
 			return fmt.Errorf("redirect %q has missing or incompatible baseline source", entry.Path)
 		}
-		removeMergedSubtree(state, entry.Redirect, true)
-		removeMergedSubtree(state, entry.Path, true)
-		for sourcePath, sourceEntry := range baseline {
-			if sourcePath != entry.Redirect && !strings.HasPrefix(sourcePath, entry.Redirect+"/") {
+		endpoints = append(endpoints, redirectEndpoint{path: entry.Path, owner: index}, redirectEndpoint{path: entry.Redirect, owner: index})
+	}
+	sort.Slice(endpoints, func(i, j int) bool {
+		leftDepth, rightDepth := strings.Count(endpoints[i].path, "/"), strings.Count(endpoints[j].path, "/")
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		return endpoints[i].path < endpoints[j].path
+	})
+	seenEndpoints := make(map[string]int, len(endpoints))
+	for _, endpoint := range endpoints {
+		if _, exists := seenEndpoints[endpoint.path]; exists {
+			return fmt.Errorf("overlapping redirects are not supported")
+		}
+		for parent := path.Dir(endpoint.path); parent != "."; parent = path.Dir(parent) {
+			if _, exists := seenEndpoints[parent]; exists {
+				return fmt.Errorf("overlapping redirects are not supported")
+			}
+		}
+		seenEndpoints[endpoint.path] = endpoint.owner
+	}
+	deletions := make([]mergedSubtreeDeletion, 0, len(redirects)*2)
+	sources := make(map[string]OverlayEntry, len(redirects))
+	for _, entry := range redirects {
+		deletions = append(deletions,
+			mergedSubtreeDeletion{root: entry.Redirect, includeRoot: true},
+			mergedSubtreeDeletion{root: entry.Path, includeRoot: true},
+		)
+		sources[entry.Redirect] = entry
+	}
+	removeMergedSubtrees(state, deletions)
+	for sourcePath, sourceEntry := range baseline {
+		for candidate := sourcePath; candidate != "."; candidate = path.Dir(candidate) {
+			entry, exists := sources[candidate]
+			if !exists {
 				continue
 			}
-			suffix := strings.TrimPrefix(sourcePath, entry.Redirect)
+			suffix := strings.TrimPrefix(sourcePath, candidate)
 			destinationPath := entry.Path + suffix
 			cloned := sourceEntry
 			cloned.Path = destinationPath
 			state[destinationPath] = mergedEntry{manifest: cloned, lowerPath: sourcePath}
+			break
 		}
 	}
 	return nil
@@ -294,10 +323,33 @@ func validateMergedParents(state map[string]mergedEntry) error {
 	return nil
 }
 
-func removeMergedSubtree(state map[string]mergedEntry, root string, includeRoot bool) {
+type mergedSubtreeDeletion struct {
+	root        string
+	includeRoot bool
+}
+
+func removeMergedSubtrees(state map[string]mergedEntry, deletions []mergedSubtreeDeletion) {
+	if len(deletions) == 0 {
+		return
+	}
+	exact := make(map[string]struct{}, len(deletions))
+	descendants := make(map[string]struct{}, len(deletions))
+	for _, deletion := range deletions {
+		descendants[deletion.root] = struct{}{}
+		if deletion.includeRoot {
+			exact[deletion.root] = struct{}{}
+		}
+	}
 	for entryPath := range state {
-		if (includeRoot && entryPath == root) || strings.HasPrefix(entryPath, root+"/") {
+		if _, exists := exact[entryPath]; exists {
 			delete(state, entryPath)
+			continue
+		}
+		for parent := path.Dir(entryPath); parent != "."; parent = path.Dir(parent) {
+			if _, exists := descendants[parent]; exists {
+				delete(state, entryPath)
+				break
+			}
 		}
 	}
 }
