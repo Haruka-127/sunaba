@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -124,6 +125,60 @@ func TestDNSAndOriginPolicyFailClosed(t *testing.T) {
 				t.Fatalf("status=%d event=%+v", response.StatusCode, event)
 			}
 		})
+	}
+}
+
+func TestCompiledPolicyIndexMatchesExactSubdomainAndLabelBoundaries(t *testing.T) {
+	policy := Policy{
+		Rules: []OriginRule{
+			{Host: "example.com", Port: 80, Category: "general", AllowHTTP: true, IncludeSubdomains: true},
+			{Host: "blocked.example", Port: 80, Category: "general", AllowHTTP: true, IncludeSubdomains: true},
+		},
+		BlockedDomains: []string{"blocked.example"},
+	}
+	beforeDigest, err := policy.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := policy.canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, exact, suffix := compilePolicyIndex(canonical)
+	gateway := &Gateway{policy: canonical, blockedDomains: blocked, exactRules: exact, suffixRules: suffix}
+	tests := map[string]bool{
+		"example.com": true, "sub.example.com": true, "deep.sub.example.com": true,
+		"badexample.com": false, "example.com.evil": false,
+		"blocked.example": false, "sub.blocked.example": false,
+	}
+	for host, want := range tests {
+		if _, got := gateway.allowedRule(host, 80, false); got != want {
+			t.Fatalf("host %q allowed=%t want=%t", host, got, want)
+		}
+	}
+	afterDigest, err := gateway.policy.Digest()
+	if err != nil || afterDigest != beforeDigest {
+		t.Fatalf("compiled index changed canonical policy digest: before=%s after=%s error=%v", beforeDigest, afterDigest, err)
+	}
+}
+
+func BenchmarkAllowedRuleWithLargeBlocklist(b *testing.B) {
+	policy := Policy{Rules: []OriginRule{{Host: "safe.example", Port: 443, Category: "general", AllowConnect: true, IncludeSubdomains: true}}}
+	policy.BlockedDomains = make([]string, 100_000)
+	for index := range policy.BlockedDomains {
+		policy.BlockedDomains[index] = fmt.Sprintf("blocked-%06d.example", index)
+	}
+	canonical, err := policy.canonical()
+	if err != nil {
+		b.Fatal(err)
+	}
+	blocked, exact, suffix := compilePolicyIndex(canonical)
+	gateway := &Gateway{blockedDomains: blocked, exactRules: exact, suffixRules: suffix}
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if _, allowed := gateway.allowedRule("deep.sub.safe.example", 443, true); !allowed {
+			b.Fatal("indexed rule lookup unexpectedly rejected host")
+		}
 	}
 }
 

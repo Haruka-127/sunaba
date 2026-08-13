@@ -183,16 +183,30 @@ type Config struct {
 }
 
 type Gateway struct {
-	policy     Policy
-	capability Capability
-	resolver   Resolver
-	dial       func(context.Context, string, string) (net.Conn, error)
-	audit      func(AuditEvent) error
-	now        func() time.Time
-	semaphore  chan struct{}
-	requests   atomic.Int64
-	totalBytes atomic.Int64
-	revoked    atomic.Bool
+	policy         Policy
+	blockedDomains map[string]struct{}
+	exactRules     map[ruleLookup]indexedOriginRule
+	suffixRules    map[ruleLookup]indexedOriginRule
+	capability     Capability
+	resolver       Resolver
+	dial           func(context.Context, string, string) (net.Conn, error)
+	audit          func(AuditEvent) error
+	now            func() time.Time
+	semaphore      chan struct{}
+	requests       atomic.Int64
+	totalBytes     atomic.Int64
+	revoked        atomic.Bool
+}
+
+type ruleLookup struct {
+	host    string
+	port    uint16
+	connect bool
+}
+
+type indexedOriginRule struct {
+	rule  OriginRule
+	index int
 }
 
 func New(config Config) (*Gateway, error) {
@@ -227,10 +241,41 @@ func New(config Config) (*Gateway, error) {
 	if now == nil {
 		now = time.Now
 	}
+	blockedDomains, exactRules, suffixRules := compilePolicyIndex(policy)
 	return &Gateway{
-		policy: policy, capability: capability, resolver: resolver, dial: dial, audit: config.Audit, now: now,
+		policy: policy, blockedDomains: blockedDomains, exactRules: exactRules, suffixRules: suffixRules,
+		capability: capability, resolver: resolver, dial: dial, audit: config.Audit, now: now,
 		semaphore: make(chan struct{}, capability.MaxConcurrent),
 	}, nil
+}
+
+func compilePolicyIndex(policy Policy) (map[string]struct{}, map[ruleLookup]indexedOriginRule, map[ruleLookup]indexedOriginRule) {
+	blocked := make(map[string]struct{}, len(policy.BlockedDomains))
+	for _, domain := range policy.BlockedDomains {
+		blocked[domain] = struct{}{}
+	}
+	exact := make(map[ruleLookup]indexedOriginRule, len(policy.Rules)*2)
+	suffix := make(map[ruleLookup]indexedOriginRule, len(policy.Rules)*2)
+	for index, rule := range policy.Rules {
+		for _, protocol := range []struct {
+			connect bool
+			allowed bool
+		}{{connect: false, allowed: rule.AllowHTTP}, {connect: true, allowed: rule.AllowConnect}} {
+			if !protocol.allowed {
+				continue
+			}
+			key := ruleLookup{host: rule.Host, port: rule.Port, connect: protocol.connect}
+			if _, exists := exact[key]; !exists {
+				exact[key] = indexedOriginRule{rule: rule, index: index}
+			}
+			if rule.IncludeSubdomains {
+				if _, exists := suffix[key]; !exists {
+					suffix[key] = indexedOriginRule{rule: rule, index: index}
+				}
+			}
+		}
+	}
+	return blocked, exact, suffix
 }
 
 func (g *Gateway) Revoke() { g.revoked.Store(true) }
@@ -456,16 +501,31 @@ func (g *Gateway) authorized(header string) bool {
 }
 
 func (g *Gateway) allowedRule(host string, port uint16, connect bool) (OriginRule, bool) {
-	for _, blocked := range g.policy.BlockedDomains {
-		if host == blocked || strings.HasSuffix(host, "."+blocked) {
+	for suffix := host; ; {
+		if _, blocked := g.blockedDomains[suffix]; blocked {
 			return OriginRule{}, false
 		}
-	}
-	for _, rule := range g.policy.Rules {
-		matched := host == rule.Host || rule.IncludeSubdomains && strings.HasSuffix(host, "."+rule.Host)
-		if matched && port == rule.Port && ((connect && rule.AllowConnect) || (!connect && rule.AllowHTTP)) {
-			return rule, true
+		dot := strings.IndexByte(suffix, '.')
+		if dot < 0 {
+			break
 		}
+		suffix = suffix[dot+1:]
+	}
+	key := ruleLookup{host: host, port: port, connect: connect}
+	best, matched := g.exactRules[key]
+	for suffix := host; ; {
+		key.host = suffix
+		if candidate, exists := g.suffixRules[key]; exists && (!matched || candidate.index < best.index) {
+			best, matched = candidate, true
+		}
+		dot := strings.IndexByte(suffix, '.')
+		if dot < 0 {
+			break
+		}
+		suffix = suffix[dot+1:]
+	}
+	if matched {
+		return best.rule, true
 	}
 	return OriginRule{}, false
 }
