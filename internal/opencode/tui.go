@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"sunaba/internal/dependency"
+	"sunaba/internal/securefs"
 )
 
 type HostTUIConfig struct {
@@ -190,14 +191,7 @@ func verifyExecutableDigest(binary, expected string) error {
 }
 
 func ensurePrivateDirectory(directory string) error {
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
-		return fmt.Errorf("Host TUI directory is not a mode 0700 directory: %q", directory)
-	}
-	return nil
+	return securefs.EnsureOwnedDir(directory)
 }
 
 func isolatedHostTUIEnvironment(hostEnvironment []string, tuiRoot, password string) []string {

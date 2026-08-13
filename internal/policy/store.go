@@ -1,20 +1,14 @@
 package policy
 
 import (
-	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/modelgateway"
+	"sunaba/internal/securefs"
 	"sunaba/internal/webgateway"
 )
 
@@ -288,89 +282,26 @@ func Save(path string, policy ProjectPolicy) error {
 		return err
 	}
 	encoded = append(encoded, '\n')
-	random := make([]byte, 8)
-	if _, err := rand.Read(random); err != nil {
-		return err
-	}
-	temporary := filepath.Join(parent, ".sunaba-policy-"+filepath.Base(path)+"-"+hex.EncodeToString(random)+".tmp")
-	fd, err := unix.Open(temporary, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
-	if err != nil {
-		return err
-	}
-	file := os.NewFile(uintptr(fd), temporary)
-	cleanup := true
-	defer func() {
-		_ = file.Close()
-		if cleanup {
-			_ = os.Remove(temporary)
-		}
-	}()
-	if _, err := file.Write(encoded); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if info, err := os.Lstat(path); err == nil {
-		var stat unix.Stat_t
-		if statErr := unix.Lstat(path, &stat); statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) {
-			return fmt.Errorf("existing policy file is unsafe")
-		}
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		return err
-	}
-	cleanup = false
-	directory, err := os.Open(parent)
-	if err != nil {
-		return err
-	}
-	syncErr := directory.Sync()
-	closeErr := directory.Close()
-	return errors.Join(syncErr, closeErr)
+	return securefs.AtomicWriteOwned(path, encoded)
 }
 
 func readPolicyFile(path string) ([]byte, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, fmt.Errorf("policy path must be absolute and clean")
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	data, err := securefs.ReadOwnedRegular(path, maxPolicyBytes)
 	if err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("open Project policy")
-	}
-	defer file.Close()
-	var stat unix.Stat_t
-	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0777 != 0600 || stat.Size <= 0 || stat.Size > maxPolicyBytes || stat.Uid != uint32(os.Geteuid()) {
-		return nil, fmt.Errorf("policy must be a bounded mode 0600 regular file")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxPolicyBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxPolicyBytes {
-		return nil, fmt.Errorf("policy exceeds its size bound")
+	if len(data) == 0 {
+		return nil, fmt.Errorf("policy must not be empty")
 	}
 	return data, nil
 }
 
 func decodeStrict(data []byte, destination any) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
+	if err := securefs.DecodeStrictJSON(data, destination); err != nil {
 		return fmt.Errorf("decode Project policy: %w", err)
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return fmt.Errorf("Project policy contains trailing data")
 	}
 	return nil
 }
@@ -406,15 +337,5 @@ func migrateV1(legacy legacyPolicyV1, now time.Time) (ProjectPolicy, error) {
 }
 
 func ensurePrivatePolicyDirectory(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	var stat unix.Stat_t
-	statErr := unix.Lstat(path, &stat)
-	canonical, canonicalErr := filepath.EvalSymlinks(path)
-	if err != nil || statErr != nil || canonicalErr != nil || canonical != path || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("policy directory must be mode 0700 and not a symlink")
-	}
-	return nil
+	return securefs.EnsureOwnedDir(path)
 }

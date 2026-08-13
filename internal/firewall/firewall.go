@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -545,7 +546,7 @@ func writeValidatedFile(path string, data []byte, mode os.FileMode, validate fun
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
+	if _, err := io.Copy(tmp, bytes.NewReader(data)); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -559,7 +560,14 @@ func writeValidatedFile(path string, data []byte, mode os.FileMode, validate fun
 	if err := validate(tmpPath); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
 }
 
 func networkInspect(ctx context.Context) (Network, bool) {

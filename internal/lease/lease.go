@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"sunaba/internal/securefs"
 )
 
 type State string
@@ -202,48 +203,11 @@ func (r *Registry) write(record Record) error {
 		return err
 	}
 	filename := r.filename(record.SessionID)
-	temporary, err := os.CreateTemp(filepath.Dir(filename), ".sunaba-lease-")
-	if err != nil {
-		return err
-	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(0600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(append(encoded, '\n')); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryName, filename); err != nil {
-		return err
-	}
-	directory, err := os.Open(filepath.Dir(filename))
-	if err != nil {
-		return err
-	}
-	err = directory.Sync()
-	_ = directory.Close()
-	return err
+	return securefs.AtomicWriteOwned(filename, append(encoded, '\n'))
 }
 
 func (r *Registry) ensureDirectory() error {
-	if err := os.MkdirAll(r.Root, 0700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(r.Root)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
-		return fmt.Errorf("lease registry must be a mode 0700 directory")
-	}
-	return nil
+	return securefs.EnsureOwnedDir(r.Root)
 }
 
 func (r *Registry) validate() error {
@@ -263,22 +227,5 @@ func (r *Registry) now() time.Time {
 func validIdentity(value string) bool { return identityPattern.MatchString(value) }
 
 func readLeaseFile(filename string) ([]byte, error) {
-	fd, err := unix.Open(filename, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), filename)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("open lease file")
-	}
-	defer file.Close()
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return nil, err
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0777 != 0600 || stat.Uid != uint32(os.Geteuid()) {
-		return nil, fmt.Errorf("lease file must be a mode 0600 regular file owned by the current user")
-	}
-	return io.ReadAll(io.LimitReader(file, 1<<20))
+	return securefs.ReadOwnedRegular(filename, 1<<20)
 }

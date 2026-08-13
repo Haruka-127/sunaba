@@ -13,6 +13,7 @@ import (
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
+	"sunaba/internal/securefs"
 	"sunaba/internal/webgateway"
 )
 
@@ -228,37 +229,10 @@ func writePrivateBytes(path string, data []byte) error {
 		return fmt.Errorf("private artifact path or content is invalid")
 	}
 	parent := filepath.Dir(path)
-	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+	if err := securefs.CheckOwnedDir(parent); err != nil {
 		return fmt.Errorf("private artifact directory is unsafe")
 	}
-	temporary, err := os.CreateTemp(parent, ".sunaba-web-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if current, err := os.Lstat(path); err == nil && (!current.Mode().IsRegular() || current.Mode()&os.ModeSymlink != 0 || current.Mode().Perm() != 0600) {
-		return fmt.Errorf("existing private artifact is unsafe")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return os.Rename(temporaryPath, path)
+	return securefs.AtomicWriteOwned(path, data)
 }
 
 func refuseActivePolicyChange(projectState string) error {

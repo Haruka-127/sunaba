@@ -4,8 +4,6 @@ package projectconfig
 import (
 	"bufio"
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +19,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"sunaba/internal/policy"
+	"sunaba/internal/securefs"
 	"sunaba/internal/state"
 	"sunaba/internal/webgateway"
 )
@@ -502,7 +501,7 @@ func ensurePrivateDirectory(path string) error {
 		return fmt.Errorf("Project configuration directory must be absolute and clean")
 	}
 	if _, err := os.Lstat(path); err == nil {
-		return checkPrivateDirectory(path)
+		return securefs.CheckOwnedDir(path)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -517,40 +516,15 @@ func ensurePrivateDirectory(path string) error {
 	if err := os.Mkdir(path, 0700); err != nil {
 		return err
 	}
-	return checkPrivateDirectory(path)
+	return securefs.CheckOwnedDir(path)
 }
 
 func checkPrivateDirectory(path string) error {
-	info, err := os.Lstat(path)
-	var stat unix.Stat_t
-	statErr := unix.Lstat(path, &stat)
-	canonical, canonicalErr := filepath.EvalSymlinks(path)
-	if err != nil || statErr != nil || canonicalErr != nil || canonical != path || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("Project configuration directory must be mode 0700, current-user owned, and not a symlink")
-	}
-	return nil
+	return securefs.CheckOwnedDir(path)
 }
 
 func readPrivateFile(path string, maximum int64) ([]byte, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("open Project configuration file")
-	}
-	defer file.Close()
-	var stat unix.Stat_t
-	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0777 != 0600 || stat.Size < 0 || stat.Size > maximum {
-		return nil, fmt.Errorf("Project configuration file must be a bounded mode 0600 regular file owned by the current user")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
-	if err != nil || int64(len(data)) > maximum {
-		return nil, fmt.Errorf("read bounded Project configuration file")
-	}
-	return data, nil
+	return securefs.ReadOwnedRegular(path, maximum)
 }
 
 func writePrivateFile(path string, data []byte) error {
@@ -561,47 +535,5 @@ func writePrivateFile(path string, data []byte) error {
 	if err := ensurePrivateDirectory(parent); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(path); err == nil {
-		var stat unix.Stat_t
-		if unix.Lstat(path, &stat) != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) {
-			return fmt.Errorf("existing Project configuration file is unsafe")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	random := make([]byte, 8)
-	if _, err := rand.Read(random); err != nil {
-		return err
-	}
-	temporary := filepath.Join(parent, ".sunaba-config-"+hex.EncodeToString(random)+".tmp")
-	fd, err := unix.Open(temporary, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
-	if err != nil {
-		return err
-	}
-	file := os.NewFile(uintptr(fd), temporary)
-	cleanup := true
-	defer func() {
-		_ = file.Close()
-		if cleanup {
-			_ = os.Remove(temporary)
-		}
-	}()
-	if _, err := file.Write(data); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		return err
-	}
-	cleanup = false
-	directory, err := os.Open(parent)
-	if err != nil {
-		return err
-	}
-	return errors.Join(directory.Sync(), directory.Close())
+	return securefs.AtomicWriteOwned(path, data)
 }

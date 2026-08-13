@@ -1,19 +1,17 @@
 package state
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 
-	"golang.org/x/sys/unix"
 	"sunaba/internal/dependency"
+	"sunaba/internal/securefs"
 )
 
 type Store struct {
@@ -124,13 +122,8 @@ func (s *Store) LoadGlobal() (GlobalConfig, error) {
 	if err != nil {
 		return config, err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&config); err != nil {
+	if err := securefs.DecodeStrictJSON(data, &config); err != nil {
 		return config, fmt.Errorf("decode global state: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return config, fmt.Errorf("decode global state: trailing data")
 	}
 	return config, nil
 }
@@ -169,46 +162,11 @@ func (s *Store) SaveActiveDependency(binding DependencyBinding) error {
 }
 
 func ensurePrivateStateDirectory(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("state path must be a private directory")
-	}
-	var stat unix.Stat_t
-	if unix.Lstat(path, &stat) != nil || stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("state directory must be owned by the current user")
-	}
-	if err := os.Chmod(path, 0700); err != nil {
-		return err
-	}
-	return nil
+	return securefs.EnsureOwnedDir(path)
 }
 
 func readPrivateStateFile(path string, maximum int64) ([]byte, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("open state file")
-	}
-	defer file.Close()
-	var stat unix.Stat_t
-	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0777 != 0600 || stat.Size < 0 || stat.Size > maximum {
-		return nil, fmt.Errorf("state file must be a bounded mode 0600 regular file owned by the current user")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
-	if err != nil {
-		return nil, fmt.Errorf("read bounded state file: %w", err)
-	}
-	if int64(len(data)) > maximum {
-		return nil, fmt.Errorf("state file exceeds its size bound")
-	}
-	return data, nil
+	return securefs.ReadOwnedRegular(path, maximum)
 }
 
 func writePrivateStateFile(path string, data []byte) error {
@@ -216,48 +174,5 @@ func writePrivateStateFile(path string, data []byte) error {
 	if err := ensurePrivateStateDirectory(directory); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(path); err == nil {
-		var stat unix.Stat_t
-		if unix.Lstat(path, &stat) != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) {
-			return fmt.Errorf("existing state file is unsafe")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	file, err := os.CreateTemp(directory, ".sunaba-state-"+filepath.Base(path)+"-*")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	cleanup := func() {
-		_ = file.Close()
-		_ = os.Remove(temporary)
-	}
-	if err := file.Chmod(0600); err != nil {
-		cleanup()
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		cleanup()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	directoryFile, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	err = directoryFile.Sync()
-	closeErr := directoryFile.Close()
-	return errors.Join(err, closeErr)
+	return securefs.AtomicWriteOwned(path, data)
 }

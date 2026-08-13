@@ -17,12 +17,11 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"sunaba/internal/audit"
 	"sunaba/internal/boundedexec"
 	"sunaba/internal/gitgateway"
 	"sunaba/internal/policy"
+	"sunaba/internal/securefs"
 	"sunaba/internal/session"
 	"sunaba/internal/webgateway"
 )
@@ -400,12 +399,9 @@ func configureWebGateway(projectPolicy policy.ProjectPolicy, projectState, vmID,
 }
 
 func readOwnedPrivateFile(path string, maximum int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	var stat unix.Stat_t
-	statErr := unix.Lstat(path, &stat)
-	canonical, canonicalErr := filepath.EvalSymlinks(path)
-	if err != nil || statErr != nil || canonicalErr != nil || canonical != path || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 || info.Size() <= 0 || info.Size() > maximum || stat.Uid != uint32(os.Geteuid()) {
+	data, err := securefs.ReadOwnedRegular(path, maximum)
+	if err != nil || len(data) == 0 {
 		return nil, fmt.Errorf("private policy artifact is unsafe: %s", filepath.Base(path))
 	}
-	return os.ReadFile(path)
+	return data, nil
 }

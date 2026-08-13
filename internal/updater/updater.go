@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"sunaba/internal/dependency"
+	"sunaba/internal/securefs"
 	"sunaba/internal/state"
 	"sunaba/internal/versionconfig"
 )
@@ -461,15 +461,7 @@ func relativeTo(root, path string) string {
 }
 
 func ensurePrivateDirectory(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return err
-	}
-	var stat unix.Stat_t
-	info, err := os.Lstat(path)
-	if err != nil || unix.Lstat(path, &stat) != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("update directory must be owned by the current user and not a symlink")
-	}
-	return os.Chmod(path, 0700)
+	return securefs.EnsureOwnedDir(path)
 }
 
 func savePrivateJSON(path string, value any) error {
@@ -481,87 +473,26 @@ func savePrivateJSON(path string, value any) error {
 	if len(data) > maxCandidateBytes {
 		return fmt.Errorf("candidate exceeds its size bound")
 	}
-	if info, err := os.Lstat(path); err == nil {
-		var stat unix.Stat_t
-		if unix.Lstat(path, &stat) != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) {
-			return fmt.Errorf("existing candidate file is unsafe")
-		}
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".sunaba-candidate-*")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	defer os.Remove(temporary)
-	if err := file.Chmod(0600); err != nil {
-		file.Close()
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		return err
-	}
-	directory, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	err = directory.Sync()
-	return errors.Join(err, directory.Close())
+	return securefs.AtomicWriteOwned(path, data)
 }
 
 func loadPrivateJSON(path string, target any) error {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	data, err := securefs.ReadOwnedRegular(path, maxCandidateBytes)
 	if err != nil {
 		return err
 	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return fmt.Errorf("open candidate")
-	}
-	defer file.Close()
-	var stat unix.Stat_t
-	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0777 != 0600 || stat.Size > maxCandidateBytes {
-		return fmt.Errorf("candidate must be a bounded mode 0600 regular file owned by the current user")
-	}
-	decoder := json.NewDecoder(io.LimitReader(file, maxCandidateBytes+1))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
+	if err := securefs.DecodeStrictJSON(data, target); err != nil {
 		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return fmt.Errorf("candidate contains trailing data")
 	}
 	return nil
 }
 
 func hashPrivateFile(path string, maximum int64) (string, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	file, err := securefs.OpenOwnedRegularNoFollow(path, maximum)
 	if err != nil {
 		return "", err
 	}
-	file := os.NewFile(uintptr(fd), path)
-	if file == nil {
-		_ = unix.Close(fd)
-		return "", fmt.Errorf("open quarantined artifact")
-	}
 	defer file.Close()
-	var stat unix.Stat_t
-	if unix.Fstat(fd, &stat) != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0777 != 0600 || stat.Size < 0 || stat.Size > maximum {
-		return "", fmt.Errorf("quarantined artifact is unsafe")
-	}
 	hash := sha256.New()
 	if _, err := io.Copy(hash, io.LimitReader(file, maximum+1)); err != nil {
 		return "", err

@@ -1,16 +1,15 @@
 package cli
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
 
 	"sunaba/internal/policy"
+	"sunaba/internal/securefs"
 	"sunaba/internal/session"
 	"sunaba/internal/workspace"
 )
@@ -75,24 +74,15 @@ func loadPending(projectState string, projectPolicy policy.ProjectPolicy) (pendi
 		return pendingChange{}, err
 	}
 	path := filepath.Join(projectState, "pending", "change.json")
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+	data, err := securefs.ReadOwnedRegular(path, 16<<20)
+	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return pendingChange{}, fmt.Errorf("no pending Change Set")
 		}
 		return pendingChange{}, fmt.Errorf("pending Change Set metadata is unsafe")
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return pendingChange{}, err
-	}
-	if len(data) > 16<<20 {
-		return pendingChange{}, fmt.Errorf("pending Change Set metadata exceeds size limit")
-	}
 	var pending pendingChange
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&pending); err != nil || decoder.Decode(&struct{}{}) != io.EOF || pending.Version != 2 || pending.ProjectRoot != projectPolicy.ProjectRoot || pending.ProjectID != projectPolicy.ProjectID || pending.MergedRoot != filepath.Join(projectState, "pending", "merged") {
+	if err := securefs.DecodeStrictJSON(data, &pending); err != nil || pending.Version != 2 || pending.ProjectRoot != projectPolicy.ProjectRoot || pending.ProjectID != projectPolicy.ProjectID || pending.MergedRoot != filepath.Join(projectState, "pending", "merged") {
 		return pendingChange{}, fmt.Errorf("pending Change Set identity or schema does not match Project")
 	}
 	if pending.ExportPolicyDigest != compiled.Digest {
@@ -131,29 +121,8 @@ func writePrivateJSON(path string, value any) error {
 	}
 	data = append(data, '\n')
 	parent := filepath.Dir(path)
-	if err := os.MkdirAll(parent, 0700); err != nil {
+	if err := securefs.EnsureOwnedDir(parent); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(parent, ".sunaba-pending-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, path)
+	return securefs.AtomicWriteOwned(path, data)
 }

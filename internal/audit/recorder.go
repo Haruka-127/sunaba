@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"sunaba/internal/securefs"
 	"sunaba/internal/terminal"
 )
 
@@ -165,16 +166,7 @@ func validateBoundaryEvent(event BoundaryEvent) error {
 }
 
 func ensurePrivateDirectory(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	var stat unix.Stat_t
-	statErr := unix.Lstat(path, &stat)
-	if err != nil || statErr != nil || !info.IsDir() || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("audit directory must be mode 0700 and owned by the current user")
-	}
-	return nil
+	return securefs.EnsureOwnedDir(path)
 }
 
 func appendDurable(filename string, encoded []byte) error {

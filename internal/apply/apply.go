@@ -14,6 +14,7 @@ import (
 
 	"sunaba/internal/approval"
 	"sunaba/internal/audit"
+	"sunaba/internal/securefs"
 	"sunaba/internal/state"
 	"sunaba/internal/workspace"
 )
@@ -226,12 +227,12 @@ func RecoverLocked(projectRoot, projectID string, snapshotPolicy workspace.Snaps
 			return fmt.Errorf("unexpected transaction entry %q", entry.Name())
 		}
 		transactionRoot := filepath.Join(transactions, entry.Name())
-		encoded, err := os.ReadFile(filepath.Join(transactionRoot, "journal.json"))
+		encoded, err := securefs.ReadOwnedRegular(filepath.Join(transactionRoot, "journal.json"), 64<<20)
 		if err != nil {
 			return fmt.Errorf("read recovery journal: %w", err)
 		}
 		var j journal
-		if json.Unmarshal(encoded, &j) != nil || j.Version != 1 || j.ProjectID != projectID || len(j.Entries) > snapshotPolicy.MaxEntries {
+		if securefs.DecodeStrictJSON(encoded, &j) != nil || j.Version != 1 || j.ProjectID != projectID || len(j.Entries) > snapshotPolicy.MaxEntries {
 			return fmt.Errorf("invalid recovery journal")
 		}
 		backupFD, err := openDirectory(filepath.Join(transactionRoot, "backup"))
@@ -300,14 +301,7 @@ func newTransactionRoot(projectRoot, projectID string) (string, error) {
 }
 
 func ensurePrivateDirectory(directory string) error {
-	if err := os.Mkdir(directory, 0700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
-	}
-	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
-		return fmt.Errorf("managed transaction path must be a mode 0700 directory")
-	}
-	return nil
+	return securefs.EnsureOwnedDir(directory)
 }
 
 func writeJournal(filename string, value journal) error {
@@ -315,29 +309,7 @@ func writeJournal(filename string, value journal) error {
 	if err != nil {
 		return err
 	}
-	temporary := filename + ".tmp"
-	if err := os.WriteFile(temporary, append(encoded, '\n'), 0600); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(temporary, os.O_RDONLY, 0)
-	if err != nil {
-		return err
-	}
-	err = file.Sync()
-	_ = file.Close()
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, filename); err != nil {
-		return err
-	}
-	directory, err := os.Open(filepath.Dir(filename))
-	if err != nil {
-		return err
-	}
-	err = directory.Sync()
-	_ = directory.Close()
-	return err
+	return securefs.AtomicWriteOwned(filename, append(encoded, '\n'))
 }
 
 func rollback(rootFD, backupFD int, j journal) error {
