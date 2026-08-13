@@ -130,22 +130,6 @@ func HasAnchorBlock(conf string) bool {
 		strings.Contains(conf, endMarker)
 }
 
-func Detect(ctx context.Context, stateRoot string, containerIP string) (Network, error) {
-	if n, ok := networkInspect(ctx); ok {
-		return n, cacheNetwork(stateRoot, n)
-	}
-	if containerIP != "" {
-		if n, ok := fromIPAndIfconfig(ctx, containerIP); ok {
-			return n, cacheNetwork(stateRoot, n)
-		}
-	}
-	if n, err := readCached(stateRoot); err == nil {
-		return n, nil
-	}
-	n := Network{Interface: "bridge100", Subnet: "192.168.64.0/24", Gateway: "192.168.64.1"}
-	return n, cacheNetwork(stateRoot, n)
-}
-
 func Enable(ctx context.Context, n Network) error {
 	if err := ValidateNetwork(n); err != nil {
 		return err
@@ -343,15 +327,6 @@ func Status(ctx context.Context) (string, error) {
 		return "sunaba firewall: loaded", nil
 	}
 	return fmt.Sprintf("sunaba firewall: not loaded (pf-enabled=%t main-anchor=%t ipv4-block=%t ipv6-block=%t)", live.Enabled, live.MainAnchor, live.IPv4Block, live.IPv6Block), nil
-}
-
-func IsLoaded(ctx context.Context) bool {
-	n, ok := networkInspect(ctx)
-	if !ok {
-		return false
-	}
-	live, err := inspectLivePF(ctx, n)
-	return err == nil && live.loaded()
 }
 
 func inspectLivePF(ctx context.Context, n Network) (livePFState, error) {
@@ -604,24 +579,6 @@ func networkInspect(ctx context.Context) (Network, bool) {
 	return Network{Interface: iface, Subnet: subnet, Gateway: gw, IPv6Subnet: ipv6Subnet}, true
 }
 
-func fromIPAndIfconfig(ctx context.Context, ip string) (Network, bool) {
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return Network{}, false
-	}
-	p4 := parsed.To4()
-	if p4 == nil {
-		return Network{}, false
-	}
-	gw := fmt.Sprintf("%d.%d.%d.1", p4[0], p4[1], p4[2])
-	subnet := fmt.Sprintf("%d.%d.%d.0/24", p4[0], p4[1], p4[2])
-	iface := interfaceForGateway(ctx, gw)
-	if iface == "" {
-		iface = "bridge100"
-	}
-	return Network{Interface: iface, Subnet: subnet, Gateway: gw}, true
-}
-
 func interfaceForGateway(ctx context.Context, gw string) string {
 	c, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -640,26 +597,6 @@ func interfaceForGateway(ctx context.Context, gw string) string {
 		}
 	}
 	return ""
-}
-
-func cacheNetwork(root string, n Network) error {
-	if err := os.MkdirAll(root, 0700); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(n, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(root, "network.json"), append(b, '\n'), 0600)
-}
-
-func readCached(root string) (Network, error) {
-	var n Network
-	b, err := os.ReadFile(filepath.Join(root, "network.json"))
-	if err != nil {
-		return n, err
-	}
-	return n, json.Unmarshal(b, &n)
 }
 
 func walk(v any, fn func(string, any)) {
