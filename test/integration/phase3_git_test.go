@@ -28,6 +28,7 @@ import (
 	"sunaba/internal/session"
 	"sunaba/internal/state"
 	"sunaba/internal/trustedui"
+	"sunaba/internal/workspace"
 )
 
 func TestPhase3GitGatewayInAgentVM(t *testing.T) {
@@ -209,6 +210,7 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelToken: modelToken,
 		GitGateway: gitHandler, GitRemotes: []session.GitRemote{{Name: "origin", Token: gitToken}, {Name: "upstream", Token: gitToken2}}, GitGatewayClose: broker.Close,
 		ServerPassword: serverPassword, LeaseTTL: 5 * time.Minute, Audit: auditRecorder,
+		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 	}
 	active, err := session.Start(ctx, cfg)
 	if err != nil {

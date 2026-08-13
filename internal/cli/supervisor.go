@@ -160,6 +160,10 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 			}
 		}
 	}()
+	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	if err != nil {
+		return nil, err
+	}
 	config := session.Config{
 		Store: a.store, Runtime: a.runtime, ProjectRoot: projectPolicy.ProjectRoot, RuntimeBase: runtimeBase,
 		SessionID: sessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
@@ -169,6 +173,7 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
 		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
 		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second, Audit: recorder,
+		SnapshotPolicy: exportPolicy.Snapshot, ExportPolicy: exportPolicy.Export, ExportPolicyDigest: exportPolicy.Digest,
 	}
 	var devBoundary *devnetwork.Boundary
 	if projectPolicy.Mode == "dev" {
@@ -337,7 +342,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 	cancel()
 	destroyed = exportErr == nil
 	if exportErr == nil {
-		if pending, err := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID); err == nil {
+		if pending, err := loadPending(projectState, projectPolicy); err == nil {
 			fmt.Fprintf(a.output, "Dev Agent Session ended; direct egress was quiesced and Change Set %s (%d changes) was exported.\n", pending.ChangeSet.Digest, len(pending.ChangeSet.Changes))
 		} else {
 			fmt.Fprintln(a.output, "Dev Agent Session ended; direct egress was quiesced and the VM was removed with no Project changes.")

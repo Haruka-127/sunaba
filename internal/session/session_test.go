@@ -21,6 +21,7 @@ import (
 	"sunaba/internal/opencode"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
+	"sunaba/internal/workspace"
 )
 
 func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
@@ -118,6 +119,16 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	}
 	if strings.Contains(string(encodedAudit), cfg.ModelToken) || strings.Contains(string(encodedAudit), cfg.ServerPassword) {
 		t.Fatal("session secret was written to host audit")
+	}
+}
+
+func TestStartEnforcesConfiguredExportFileLimit(t *testing.T) {
+	cfg, _ := sessionFixture(t)
+	cfg.SnapshotPolicy.MaxFileSize = 4
+	cfg.SnapshotPolicy.MaxTotalSize = 16
+	cfg.ExportPolicy.Workspace = cfg.SnapshotPolicy
+	if _, err := Start(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "exceeds maximum size 4") {
+		t.Fatalf("configured export limit was not enforced: %v", err)
 	}
 }
 
@@ -545,6 +556,7 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		ModelGateway: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
 		ModelToken:   strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
 		LeaseTTL: time.Minute, Audit: auditRecorder,
+		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 		OnEvent: func(Event) {},
 	}, fake
 }

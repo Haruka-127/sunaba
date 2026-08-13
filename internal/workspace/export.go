@@ -14,9 +14,11 @@ import (
 )
 
 const (
-	lowerPrefix  = "var/lib/sunaba/lower"
-	upperPrefix  = "var/lib/sunaba/upper"
-	mergedPrefix = "var/lib/sunaba/merged-export"
+	lowerPrefix                 = "var/lib/sunaba/lower"
+	upperPrefix                 = "var/lib/sunaba/upper"
+	mergedPrefix                = "var/lib/sunaba/merged-export"
+	MaximumArchiveEntries       = 500_000
+	MaximumArchiveSize    int64 = 8 << 30
 )
 
 var whiteoutLinkPattern = regexp.MustCompile(`^var/lib/sunaba/work/(?:index|work)/#[0-9]+$`)
@@ -30,8 +32,8 @@ type ExportPolicy struct {
 func DefaultExportPolicy() ExportPolicy {
 	return ExportPolicy{
 		Workspace:         DefaultSnapshotPolicy(),
-		MaxArchiveEntries: 500_000,
-		MaxArchiveSize:    8 << 30,
+		MaxArchiveEntries: MaximumArchiveEntries,
+		MaxArchiveSize:    MaximumArchiveSize,
 	}
 }
 

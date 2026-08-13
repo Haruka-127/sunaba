@@ -19,16 +19,17 @@ import (
 )
 
 type Config struct {
-	Store       *state.Store
-	ProjectRoot string
-	ProjectID   string
-	MergedRoot  string
-	Baseline    workspace.SnapshotManifest
-	Merged      workspace.SnapshotManifest
-	ChangeSet   workspace.ChangeSet
-	Approvals   *approval.Manager
-	Grant       *approval.Grant
-	Audit       *audit.Recorder
+	Store          *state.Store
+	ProjectRoot    string
+	ProjectID      string
+	MergedRoot     string
+	Baseline       workspace.SnapshotManifest
+	Merged         workspace.SnapshotManifest
+	ChangeSet      workspace.ChangeSet
+	Approvals      *approval.Manager
+	Grant          *approval.Grant
+	Audit          *audit.Recorder
+	SnapshotPolicy workspace.SnapshotPolicy
 }
 
 type journalEntry struct {
@@ -78,18 +79,18 @@ func Apply(cfg Config) (result workspace.SnapshotManifest, err error) {
 	if lock.ProjectID != cfg.ProjectID {
 		return workspace.SnapshotManifest{}, fmt.Errorf("Project identity mismatch")
 	}
-	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID); err != nil {
+	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID, cfg.SnapshotPolicy); err != nil {
 		return workspace.SnapshotManifest{}, err
 	}
-	current, err := workspace.BuildSnapshotManifest(cfg.ProjectRoot, workspace.DefaultSnapshotPolicy())
+	current, err := workspace.BuildSnapshotManifest(cfg.ProjectRoot, cfg.SnapshotPolicy)
 	if err != nil || current.Digest != cfg.Baseline.Digest {
 		return workspace.SnapshotManifest{}, fmt.Errorf("host baseline changed before apply")
 	}
-	actualMerged, err := workspace.BuildSnapshotManifest(cfg.MergedRoot, workspace.DefaultSnapshotPolicy())
+	actualMerged, err := workspace.BuildSnapshotManifest(cfg.MergedRoot, cfg.SnapshotPolicy)
 	if err != nil || actualMerged.Digest != cfg.Merged.Digest {
 		return workspace.SnapshotManifest{}, fmt.Errorf("Merged View does not match approved manifest")
 	}
-	rebuilt, err := workspace.BuildChangeSet(cfg.Baseline, cfg.Merged, workspace.DefaultSnapshotPolicy())
+	rebuilt, err := workspace.BuildChangeSet(cfg.Baseline, cfg.Merged, cfg.SnapshotPolicy)
 	if err != nil || rebuilt.Digest != cfg.ChangeSet.Digest {
 		return workspace.SnapshotManifest{}, fmt.Errorf("Change Set does not match approved manifests")
 	}
@@ -126,7 +127,7 @@ func applyLocked(cfg Config, hook func(string) error, rollbackOnError bool) (res
 		return workspace.SnapshotManifest{}, err
 	}
 	stageRoot := filepath.Join(transactionRoot, "stage")
-	staged, err := workspace.CreateProjectSnapshot(cfg.MergedRoot, stageRoot, workspace.DefaultSnapshotPolicy())
+	staged, err := workspace.CreateProjectSnapshot(cfg.MergedRoot, stageRoot, cfg.SnapshotPolicy)
 	if err != nil || staged.Digest != cfg.Merged.Digest {
 		return workspace.SnapshotManifest{}, fmt.Errorf("stage approved Merged View: %w", err)
 	}
@@ -196,7 +197,7 @@ func applyLocked(cfg Config, hook func(string) error, rollbackOnError bool) (res
 			}
 		}
 	}
-	result, err = workspace.BuildSnapshotManifest(cfg.ProjectRoot, workspace.DefaultSnapshotPolicy())
+	result, err = workspace.BuildSnapshotManifest(cfg.ProjectRoot, cfg.SnapshotPolicy)
 	if err != nil || result.Digest != cfg.Merged.Digest {
 		return workspace.SnapshotManifest{}, fmt.Errorf("post-apply manifest mismatch")
 	}
@@ -206,7 +207,7 @@ func applyLocked(cfg Config, hook func(string) error, rollbackOnError bool) (res
 	return result, nil
 }
 
-func RecoverLocked(projectRoot, projectID string) error {
+func RecoverLocked(projectRoot, projectID string, snapshotPolicy workspace.SnapshotPolicy) error {
 	transactions := filepath.Join(projectRoot, ".sunaba", "transactions")
 	entries, err := os.ReadDir(transactions)
 	if errors.Is(err, os.ErrNotExist) {
@@ -230,7 +231,7 @@ func RecoverLocked(projectRoot, projectID string) error {
 			return fmt.Errorf("read recovery journal: %w", err)
 		}
 		var j journal
-		if json.Unmarshal(encoded, &j) != nil || j.Version != 1 || j.ProjectID != projectID || len(j.Entries) > workspace.DefaultSnapshotPolicy().MaxEntries {
+		if json.Unmarshal(encoded, &j) != nil || j.Version != 1 || j.ProjectID != projectID || len(j.Entries) > snapshotPolicy.MaxEntries {
 			return fmt.Errorf("invalid recovery journal")
 		}
 		backupFD, err := openDirectory(filepath.Join(transactionRoot, "backup"))

@@ -49,6 +49,33 @@ func TestPolicyV6RoundTripIdentityBindingAndModelDefaults(t *testing.T) {
 	}
 }
 
+func TestCompileExportPolicyPreservesConfiguredLimitsAndHardBounds(t *testing.T) {
+	configured := ExportPolicy{MaxEntries: 321, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}
+	compiled, err := CompileExportPolicy(configured, []string{"vendor", ".git"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Snapshot.MaxEntries != configured.MaxEntries || compiled.Snapshot.MaxFileSize != configured.MaxFileBytes || compiled.Snapshot.MaxTotalSize != configured.MaxTotalBytes {
+		t.Fatalf("compiled limits=%+v configured=%+v", compiled.Snapshot, configured)
+	}
+	if !reflect.DeepEqual(compiled.Snapshot.ProtectedPaths, []string{".git", ".sunaba", "vendor"}) || len(compiled.Digest) != 64 {
+		t.Fatalf("compiled protected paths or digest are invalid: %+v", compiled)
+	}
+	changed, err := CompileExportPolicy(ExportPolicy{MaxEntries: 321, MaxFileBytes: 127 << 20, MaxTotalBytes: 2 << 30}, []string{"vendor"})
+	if err != nil || changed.Digest == compiled.Digest {
+		t.Fatalf("limit change did not change digest: changed=%+v error=%v", changed, err)
+	}
+	for _, invalid := range []ExportPolicy{
+		{MaxEntries: MaximumExportEntries + 1, MaxFileBytes: 1, MaxTotalBytes: 1},
+		{MaxEntries: 1, MaxFileBytes: MaximumExportFileBytes + 1, MaxTotalBytes: MaximumExportFileBytes + 1},
+		{MaxEntries: 1, MaxFileBytes: 2, MaxTotalBytes: 1},
+	} {
+		if _, err := CompileExportPolicy(invalid, nil); err == nil {
+			t.Fatalf("invalid export policy was compiled: %+v", invalid)
+		}
+	}
+}
+
 func TestLegacyV1MigratesAtomicallyToStrictV6(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)

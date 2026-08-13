@@ -154,6 +154,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 			DiskBytes: 128 << 20, ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
 			ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken, ServerPassword: password,
 			LeaseTTL: 3 * time.Minute, Audit: auditRecorder,
+			SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 			OnEvent: func(event session.Event) {
 				now := time.Now()
 				t.Logf("session event %s (+%s)", event.Type, now.Sub(lastEventAt))

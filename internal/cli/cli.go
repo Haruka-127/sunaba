@@ -153,7 +153,11 @@ func (a *app) projectInit(ctx context.Context, projectArgument, mode, modelAuth 
 	}
 	createdState = stateWasAbsent
 	initialRoot := filepath.Join(projectState, "initial-snapshot")
-	initial, err := workspace.CreateProjectSnapshot(root, initialRoot, workspace.DefaultSnapshotPolicy())
+	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	if err != nil {
+		return err
+	}
+	initial, err := workspace.CreateProjectSnapshot(root, initialRoot, exportPolicy.Snapshot)
 	if err != nil {
 		return err
 	}
@@ -451,7 +455,7 @@ func (a *app) status(ctx context.Context, dir string) error {
 		sessionVMs = "none"
 	}
 	pending := "none"
-	if change, pendingErr := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID); pendingErr == nil {
+	if change, pendingErr := loadPending(projectState, projectPolicy); pendingErr == nil {
 		pending = fmt.Sprintf("%s (%d changes)", change.ChangeSet.Digest, len(change.ChangeSet.Changes))
 	}
 	gitState := "disabled"
@@ -504,7 +508,7 @@ func (a *app) changes(ctx context.Context, action, dir string) error {
 	}
 	switch action {
 	case "export":
-		pending, pendingErr := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+		pending, pendingErr := loadPending(projectState, projectPolicy)
 		if pendingErr != nil {
 			pendingPath := filepath.Join(projectState, "pending", "change.json")
 			if _, err := os.Lstat(pendingPath); err == nil {
@@ -526,7 +530,7 @@ func (a *app) changes(ctx context.Context, action, dir string) error {
 			if err != nil {
 				return err
 			}
-			pending, pendingErr = loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+			pending, pendingErr = loadPending(projectState, projectPolicy)
 			if pendingErr != nil {
 				if _, err := os.Lstat(pendingPath); errors.Is(err, os.ErrNotExist) {
 					fmt.Fprintln(a.output, "Export completed with no Project changes; the persistent VM was removed.")
@@ -545,7 +549,7 @@ func (a *app) changes(ctx context.Context, action, dir string) error {
 		}
 		return nil
 	case "apply":
-		pending, err := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+		pending, err := loadPending(projectState, projectPolicy)
 		if err != nil {
 			return err
 		}
@@ -569,7 +573,11 @@ func (a *app) changes(ctx context.Context, action, dir string) error {
 		if err != nil {
 			return err
 		}
-		applied, err := hostapply.Apply(hostapply.Config{Store: a.store, ProjectRoot: pending.ProjectRoot, ProjectID: pending.ProjectID, MergedRoot: pending.MergedRoot, Baseline: pending.Baseline, Merged: pending.Merged, ChangeSet: pending.ChangeSet, Approvals: approvals, Grant: grant, Audit: recorder})
+		compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+		if err != nil {
+			return err
+		}
+		applied, err := hostapply.Apply(hostapply.Config{Store: a.store, ProjectRoot: pending.ProjectRoot, ProjectID: pending.ProjectID, MergedRoot: pending.MergedRoot, Baseline: pending.Baseline, Merged: pending.Merged, ChangeSet: pending.ChangeSet, Approvals: approvals, Grant: grant, Audit: recorder, SnapshotPolicy: compiled.Snapshot})
 		if err != nil {
 			return err
 		}
@@ -598,7 +606,7 @@ func (a *app) approvals(ctx context.Context, dir string) error {
 	if approved > 0 {
 		fmt.Fprintf(a.output, "Approved %d Git push request(s). Retry the unchanged push in the Agent VM before the approval expires.\n", approved)
 	}
-	pending, pendingErr := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
+	pending, pendingErr := loadPending(projectState, projectPolicy)
 	if pendingErr == nil {
 		fmt.Fprintf(a.output, "Pending apply: %s (%d changes). Run 'sunaba changes apply'.\n", pending.ChangeSet.Digest, len(pending.ChangeSet.Changes))
 		return nil

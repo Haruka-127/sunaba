@@ -34,6 +34,7 @@ import (
 	"sunaba/internal/session"
 	"sunaba/internal/state"
 	"sunaba/internal/webgateway"
+	"sunaba/internal/workspace"
 )
 
 type phase4Resolver map[string][]netip.Addr
@@ -220,6 +221,7 @@ func TestPhase4WebGatewayInAgentVM(t *testing.T) {
 		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelToken: modelToken,
 		WebGateway: webGateway, WebToken: webToken, WebGatewayClose: func() error { webGateway.Revoke(); return nil },
 		ServerPassword: serverPassword, LeaseTTL: 5 * time.Minute, Audit: auditRecorder,
+		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 	}
 	active, err := session.Start(ctx, cfg)
 	if err != nil {

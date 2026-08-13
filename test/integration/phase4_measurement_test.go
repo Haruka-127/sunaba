@@ -22,6 +22,7 @@ import (
 	sunabaruntime "sunaba/internal/runtime"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
+	"sunaba/internal/workspace"
 )
 
 type measuredWebRequest struct {
@@ -137,6 +138,7 @@ func TestPhase4MeasureWebClients(t *testing.T) {
 		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelToken: modelToken,
 		GitGateway: proxy, GitRemotes: []session.GitRemote{{Name: "origin", Token: proxyToken}}, GitGatewayClose: func() error { return nil },
 		ServerPassword: serverPassword, LeaseTTL: 4 * time.Minute, Audit: auditRecorder,
+		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 	}
 	active, err := session.Start(ctx, cfg)
 	if err != nil {

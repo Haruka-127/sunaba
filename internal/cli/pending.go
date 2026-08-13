@@ -10,21 +10,23 @@ import (
 	"path/filepath"
 	"time"
 
+	"sunaba/internal/policy"
 	"sunaba/internal/session"
 	"sunaba/internal/workspace"
 )
 
 type pendingChange struct {
-	Version     int                        `json:"version"`
-	ProjectID   string                     `json:"project_id"`
-	ProjectRoot string                     `json:"project_root"`
-	VMID        string                     `json:"vm_id"`
-	SessionID   string                     `json:"session_id"`
-	MergedRoot  string                     `json:"merged_root"`
-	Baseline    workspace.SnapshotManifest `json:"baseline"`
-	Merged      workspace.SnapshotManifest `json:"merged"`
-	ChangeSet   workspace.ChangeSet        `json:"change_set"`
-	CreatedAt   time.Time                  `json:"created_at"`
+	Version            int                        `json:"version"`
+	ProjectID          string                     `json:"project_id"`
+	ProjectRoot        string                     `json:"project_root"`
+	VMID               string                     `json:"vm_id"`
+	SessionID          string                     `json:"session_id"`
+	MergedRoot         string                     `json:"merged_root"`
+	Baseline           workspace.SnapshotManifest `json:"baseline"`
+	Merged             workspace.SnapshotManifest `json:"merged"`
+	ChangeSet          workspace.ChangeSet        `json:"change_set"`
+	ExportPolicyDigest string                     `json:"export_policy_digest"`
+	CreatedAt          time.Time                  `json:"created_at"`
 }
 
 func persistPending(projectState string, active *session.Session, result session.ExportResult) (pendingChange, error) {
@@ -47,18 +49,18 @@ func persistPending(projectState string, active *session.Session, result session
 		}
 	}()
 	mergedRoot := filepath.Join(pendingRoot, "merged")
-	merged, err := workspace.CreateProjectSnapshot(result.MergedRoot, mergedRoot, workspace.DefaultSnapshotPolicy())
+	merged, err := workspace.CreateProjectSnapshot(result.MergedRoot, mergedRoot, active.SnapshotPolicy)
 	if err != nil || merged.Digest != result.Merged.Digest {
 		return pendingChange{}, fmt.Errorf("persist verified Merged View: %w", err)
 	}
-	rebuilt, err := workspace.BuildChangeSet(active.Baseline, merged, workspace.DefaultSnapshotPolicy())
+	rebuilt, err := workspace.BuildChangeSet(active.Baseline, merged, active.SnapshotPolicy)
 	if err != nil || rebuilt.Digest != result.ChangeSet.Digest {
 		return pendingChange{}, fmt.Errorf("persisted Change Set digest changed")
 	}
 	pending := pendingChange{
-		Version: 1, ProjectID: active.ProjectID, ProjectRoot: active.ProjectRoot, VMID: active.Container,
+		Version: 2, ProjectID: active.ProjectID, ProjectRoot: active.ProjectRoot, VMID: active.Container,
 		SessionID: active.SessionID, MergedRoot: mergedRoot, Baseline: active.Baseline, Merged: merged,
-		ChangeSet: rebuilt, CreatedAt: time.Now().UTC(),
+		ChangeSet: rebuilt, ExportPolicyDigest: active.ExportPolicyDigest, CreatedAt: time.Now().UTC(),
 	}
 	if err := writePrivateJSON(filepath.Join(pendingRoot, "change.json"), pending); err != nil {
 		return pendingChange{}, err
@@ -67,7 +69,11 @@ func persistPending(projectState string, active *session.Session, result session
 	return pending, nil
 }
 
-func loadPending(projectState, projectRoot, projectID string) (pendingChange, error) {
+func loadPending(projectState string, projectPolicy policy.ProjectPolicy) (pendingChange, error) {
+	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	if err != nil {
+		return pendingChange{}, err
+	}
 	path := filepath.Join(projectState, "pending", "change.json")
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
@@ -86,14 +92,17 @@ func loadPending(projectState, projectRoot, projectID string) (pendingChange, er
 	var pending pendingChange
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&pending); err != nil || decoder.Decode(&struct{}{}) != io.EOF || pending.Version != 1 || pending.ProjectRoot != projectRoot || pending.ProjectID != projectID || pending.MergedRoot != filepath.Join(projectState, "pending", "merged") {
+	if err := decoder.Decode(&pending); err != nil || decoder.Decode(&struct{}{}) != io.EOF || pending.Version != 2 || pending.ProjectRoot != projectPolicy.ProjectRoot || pending.ProjectID != projectPolicy.ProjectID || pending.MergedRoot != filepath.Join(projectState, "pending", "merged") {
 		return pendingChange{}, fmt.Errorf("pending Change Set identity or schema does not match Project")
 	}
-	actual, err := workspace.BuildSnapshotManifest(pending.MergedRoot, workspace.DefaultSnapshotPolicy())
+	if pending.ExportPolicyDigest != compiled.Digest {
+		return pendingChange{}, fmt.Errorf("pending Change Set export policy no longer matches Project policy")
+	}
+	actual, err := workspace.BuildSnapshotManifest(pending.MergedRoot, compiled.Snapshot)
 	if err != nil || actual.Digest != pending.Merged.Digest {
 		return pendingChange{}, fmt.Errorf("pending Merged View no longer matches its manifest")
 	}
-	rebuilt, err := workspace.BuildChangeSet(pending.Baseline, pending.Merged, workspace.DefaultSnapshotPolicy())
+	rebuilt, err := workspace.BuildChangeSet(pending.Baseline, pending.Merged, compiled.Snapshot)
 	if err != nil || rebuilt.Digest != pending.ChangeSet.Digest {
 		return pendingChange{}, fmt.Errorf("pending Change Set no longer matches its manifests")
 	}

@@ -1118,19 +1118,29 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline}
+	testPolicy := policy.ProjectPolicy{ProjectID: "project", ProjectRoot: project, Export: policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30}, ProtectedPaths: []string{".git"}}
+	compiled, err := policy.CompileExportPolicy(testPolicy.Export, testPolicy.ProtectedPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotPolicy: compiled.Snapshot, ExportPolicyDigest: compiled.Digest}
 	persisted, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedSource, Merged: merged, ChangeSet: changes})
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := loadPending(projectState, project, "project")
+	loaded, err := loadPending(projectState, testPolicy)
 	if err != nil || loaded.ChangeSet.Digest != persisted.ChangeSet.Digest {
 		t.Fatalf("loaded=%+v error=%v", loaded, err)
+	}
+	changedPolicy := testPolicy
+	changedPolicy.Export.MaxFileBytes--
+	if _, err := loadPending(projectState, changedPolicy); err == nil || !strings.Contains(err.Error(), "export policy") {
+		t.Fatalf("changed export policy was accepted: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(loaded.MergedRoot, "file.txt"), []byte("tampered\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadPending(projectState, project, "project"); err == nil {
+	if _, err := loadPending(projectState, testPolicy); err == nil {
 		t.Fatal("tampered pending Merged View was accepted")
 	}
 	if err := removePending(projectState); err != nil {

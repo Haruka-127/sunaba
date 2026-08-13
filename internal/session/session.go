@@ -33,6 +33,7 @@ import (
 var sessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{5,63}$`)
 var secretPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{32,256}$`)
 var gitRemoteNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+var exportPolicyDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const guestResourceProbeBegin = "SUNABA_RESOURCE_PROBE_BEGIN"
 const guestResourceProbeEnd = "SUNABA_RESOURCE_PROBE_END"
@@ -51,49 +52,54 @@ type Event struct {
 }
 
 type Config struct {
-	Store             *state.Store
-	Runtime           runtime.Runtime
-	ProjectRoot       string
-	RuntimeBase       string
-	SessionID         string
-	Mode              string
-	DevNetworkName    string
-	DevNetworkVerify  func(context.Context) error
-	DevNetworkQuiesce func(context.Context) error
-	DevNetworkClose   func(context.Context) error
-	Image             string
-	CPUs              int
-	Memory            string
-	DiskBytes         int64
-	ProcessMax        int64
-	FileSizeMax       int64
-	OpenFileMax       int64
-	GuestRelayBinary  string
-	ProviderConfig    []byte
-	ModelGateway      http.Handler
-	ModelToken        string
-	GitGateway        http.Handler
-	GitRemotes        []GitRemote
-	GitGatewayClose   func() error
-	WebGateway        http.Handler
-	WebToken          string
-	WebGatewayClose   func() error
-	ServerPassword    string
-	LeaseTTL          time.Duration
-	Audit             *audit.Recorder
-	OnEvent           func(Event)
+	Store              *state.Store
+	Runtime            runtime.Runtime
+	ProjectRoot        string
+	RuntimeBase        string
+	SessionID          string
+	Mode               string
+	DevNetworkName     string
+	DevNetworkVerify   func(context.Context) error
+	DevNetworkQuiesce  func(context.Context) error
+	DevNetworkClose    func(context.Context) error
+	Image              string
+	CPUs               int
+	Memory             string
+	DiskBytes          int64
+	ProcessMax         int64
+	FileSizeMax        int64
+	OpenFileMax        int64
+	GuestRelayBinary   string
+	ProviderConfig     []byte
+	ModelGateway       http.Handler
+	ModelToken         string
+	GitGateway         http.Handler
+	GitRemotes         []GitRemote
+	GitGatewayClose    func() error
+	WebGateway         http.Handler
+	WebToken           string
+	WebGatewayClose    func() error
+	ServerPassword     string
+	LeaseTTL           time.Duration
+	Audit              *audit.Recorder
+	OnEvent            func(Event)
+	SnapshotPolicy     workspace.SnapshotPolicy
+	ExportPolicy       workspace.ExportPolicy
+	ExportPolicyDigest string
 }
 
 type Session struct {
-	ProjectID     string
-	ProjectRoot   string
-	SessionID     string
-	Root          string
-	Container     string
-	WorkspacePath string
-	AttachURL     string
-	Baseline      workspace.SnapshotManifest
-	SnapshotRoot  string
+	ProjectID          string
+	ProjectRoot        string
+	SessionID          string
+	Root               string
+	Container          string
+	WorkspacePath      string
+	AttachURL          string
+	Baseline           workspace.SnapshotManifest
+	SnapshotRoot       string
+	SnapshotPolicy     workspace.SnapshotPolicy
+	ExportPolicyDigest string
 
 	cfg              Config
 	lifecycleContext context.Context
@@ -140,6 +146,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	s := &Session{
 		ProjectID: projectLock.ProjectID, ProjectRoot: projectLock.ProjectRoot,
 		SessionID: cfg.SessionID, cfg: cfg, lifecycleContext: ctx, projectLock: projectLock,
+		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
 	}
 	defer func() {
 		if err != nil {
@@ -172,7 +179,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, err
 	}
 	s.SnapshotRoot = filepath.Join(s.Root, "snapshot")
-	s.Baseline, err = workspace.CreateProjectSnapshot(s.ProjectRoot, s.SnapshotRoot, workspace.DefaultSnapshotPolicy())
+	s.Baseline, err = workspace.CreateProjectSnapshot(s.ProjectRoot, s.SnapshotRoot, cfg.SnapshotPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +326,12 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.LeaseTTL <= 0 || cfg.LeaseTTL > 24*time.Hour {
 		return fmt.Errorf("secure session requires a bounded lease lifetime")
+	}
+	if cfg.SnapshotPolicy.MaxDepth <= 0 || cfg.SnapshotPolicy.MaxEntries <= 0 || cfg.SnapshotPolicy.MaxFileSize <= 0 ||
+		cfg.SnapshotPolicy.MaxTotalSize < cfg.SnapshotPolicy.MaxFileSize || cfg.SnapshotPolicy.MaxSymlinkSize <= 0 ||
+		cfg.ExportPolicy.Workspace.MaxEntries != cfg.SnapshotPolicy.MaxEntries ||
+		!exportPolicyDigestPattern.MatchString(cfg.ExportPolicyDigest) {
+		return fmt.Errorf("secure session requires a compiled export policy")
 	}
 	return nil
 }
@@ -904,21 +917,21 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	if err := s.cfg.Runtime.Export(ctx, s.Container, archive); err != nil {
 		return ExportResult{}, fmt.Errorf("export frozen session root filesystem: %w", err)
 	}
-	frozen, err := workspace.ParseFrozenRootFS(archive, quarantine, s.Baseline, workspace.DefaultExportPolicy())
+	frozen, err := workspace.ParseFrozenRootFS(archive, quarantine, s.Baseline, s.cfg.ExportPolicy)
 	if err != nil {
 		return ExportResult{}, err
 	}
 	defer frozen.Close()
 	mergedRoot := filepath.Join(quarantine, "sunaba-merged-"+s.SessionID)
-	merged, err := workspace.MaterializeMergedView(s.SnapshotRoot, mergedRoot, s.Baseline, frozen, workspace.DefaultSnapshotPolicy())
+	merged, err := workspace.MaterializeMergedView(s.SnapshotRoot, mergedRoot, s.Baseline, frozen, s.cfg.SnapshotPolicy)
 	if err != nil {
 		return ExportResult{}, err
 	}
-	current, err := workspace.BuildSnapshotManifest(s.ProjectRoot, workspace.DefaultSnapshotPolicy())
+	current, err := workspace.BuildSnapshotManifest(s.ProjectRoot, s.cfg.SnapshotPolicy)
 	if err != nil || current.Digest != s.Baseline.Digest {
 		return ExportResult{}, fmt.Errorf("host Project baseline changed during session")
 	}
-	changeSet, err := workspace.BuildChangeSet(s.Baseline, merged.Manifest, workspace.DefaultSnapshotPolicy())
+	changeSet, err := workspace.BuildChangeSet(s.Baseline, merged.Manifest, s.cfg.SnapshotPolicy)
 	if err != nil {
 		return ExportResult{}, err
 	}

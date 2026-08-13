@@ -142,7 +142,7 @@ func TestRecoverLockedRollsBackProcessCrashJournal(t *testing.T) {
 	if partial := mustManifest(t, cfg.ProjectRoot); partial.Digest == baseline.Digest {
 		t.Fatal("simulated crash did not leave a partial transaction to recover")
 	}
-	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID); err != nil {
+	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID, cfg.SnapshotPolicy); err != nil {
 		t.Fatal(err)
 	}
 	if recovered := mustManifest(t, cfg.ProjectRoot); recovered.Digest != baseline.Digest {
@@ -162,13 +162,14 @@ func TestRecoverLockedAfterActualHolderProcessExit(t *testing.T) {
 	cfg := applyFixture(t)
 	baseline := mustManifest(t, cfg.ProjectRoot)
 	payload := struct {
-		ProjectRoot string                     `json:"project_root"`
-		ProjectID   string                     `json:"project_id"`
-		MergedRoot  string                     `json:"merged_root"`
-		Baseline    workspace.SnapshotManifest `json:"baseline"`
-		Merged      workspace.SnapshotManifest `json:"merged"`
-		ChangeSet   workspace.ChangeSet        `json:"change_set"`
-	}{cfg.ProjectRoot, cfg.ProjectID, cfg.MergedRoot, cfg.Baseline, cfg.Merged, cfg.ChangeSet}
+		ProjectRoot    string                     `json:"project_root"`
+		ProjectID      string                     `json:"project_id"`
+		MergedRoot     string                     `json:"merged_root"`
+		Baseline       workspace.SnapshotManifest `json:"baseline"`
+		Merged         workspace.SnapshotManifest `json:"merged"`
+		ChangeSet      workspace.ChangeSet        `json:"change_set"`
+		SnapshotPolicy workspace.SnapshotPolicy   `json:"snapshot_policy"`
+	}{cfg.ProjectRoot, cfg.ProjectID, cfg.MergedRoot, cfg.Baseline, cfg.Merged, cfg.ChangeSet, cfg.SnapshotPolicy}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +190,7 @@ func TestRecoverLockedAfterActualHolderProcessExit(t *testing.T) {
 	if partial := mustManifest(t, cfg.ProjectRoot); partial.Digest == baseline.Digest {
 		t.Fatal("crash helper did not leave a partial transaction")
 	}
-	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID); err != nil {
+	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID, cfg.SnapshotPolicy); err != nil {
 		t.Fatal(err)
 	}
 	if recovered := mustManifest(t, cfg.ProjectRoot); recovered.Digest != baseline.Digest {
@@ -206,17 +207,18 @@ func TestApplyCrashHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	var payload struct {
-		ProjectRoot string                     `json:"project_root"`
-		ProjectID   string                     `json:"project_id"`
-		MergedRoot  string                     `json:"merged_root"`
-		Baseline    workspace.SnapshotManifest `json:"baseline"`
-		Merged      workspace.SnapshotManifest `json:"merged"`
-		ChangeSet   workspace.ChangeSet        `json:"change_set"`
+		ProjectRoot    string                     `json:"project_root"`
+		ProjectID      string                     `json:"project_id"`
+		MergedRoot     string                     `json:"merged_root"`
+		Baseline       workspace.SnapshotManifest `json:"baseline"`
+		Merged         workspace.SnapshotManifest `json:"merged"`
+		ChangeSet      workspace.ChangeSet        `json:"change_set"`
+		SnapshotPolicy workspace.SnapshotPolicy   `json:"snapshot_policy"`
 	}
 	if json.Unmarshal(encoded, &payload) != nil {
 		os.Exit(3)
 	}
-	cfg := Config{ProjectRoot: payload.ProjectRoot, ProjectID: payload.ProjectID, MergedRoot: payload.MergedRoot, Baseline: payload.Baseline, Merged: payload.Merged, ChangeSet: payload.ChangeSet}
+	cfg := Config{ProjectRoot: payload.ProjectRoot, ProjectID: payload.ProjectID, MergedRoot: payload.MergedRoot, Baseline: payload.Baseline, Merged: payload.Merged, ChangeSet: payload.ChangeSet, SnapshotPolicy: payload.SnapshotPolicy}
 	_, _ = applyLocked(cfg, func(stage string) error {
 		if strings.HasPrefix(stage, "install:") {
 			os.Exit(42)
@@ -302,6 +304,7 @@ func fixtureFromProject(t *testing.T, project string, mutate func(string)) Confi
 	return Config{
 		Store: store, ProjectRoot: canonical, ProjectID: state.ProjectID(canonical), Audit: recorder,
 		MergedRoot: mergedRoot, Baseline: baseline, Merged: merged, ChangeSet: changeSet, Approvals: approval.NewManager(nil),
+		SnapshotPolicy: workspace.DefaultSnapshotPolicy(),
 	}
 }
 
