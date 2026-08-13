@@ -1243,7 +1243,7 @@ func TestInteractiveProjectConfigurationCancelsWithoutWritesThenAppliesGitGatewa
 	}
 	configAfterCancel, _ := os.ReadFile(paths.Project)
 	policyAfterCancel, _ := os.ReadFile(policyPath)
-	if !bytes.Equal(configBefore, configAfterCancel) || !bytes.Equal(policyBefore, policyAfterCancel) || !strings.Contains(output.String(), "変更されませんでした") {
+	if !bytes.Equal(configBefore, configAfterCancel) || !bytes.Equal(policyBefore, policyAfterCancel) || !strings.Contains(output.String(), "was not changed") {
 		t.Fatalf("canceled wizard changed files or omitted result: %s", output.String())
 	}
 
@@ -1263,7 +1263,7 @@ func TestInteractiveProjectConfigurationCancelsWithoutWritesThenAppliesGitGatewa
 	if len(loaded.Git.Remotes) != 1 || loaded.Git.Remotes[0].Name != "origin" || !projectconfig.Matches(config, rules, loaded) {
 		t.Fatalf("interactive configuration was not synchronized: policy=%+v config=%+v", loaded.Git, config.Git)
 	}
-	if !strings.Contains(output.String(), "保存・適用しました") {
+	if !strings.Contains(output.String(), "Saved and applied") {
 		t.Fatalf("success output missing: %s", output.String())
 	}
 }

@@ -26,7 +26,7 @@ func TestWizardConfiguresGitGatewayAndAppliesOnlyAfterConfirmation(t *testing.T)
 	if len(result.Config.Git.Remotes) != 1 || result.Config.Git.Remotes[0].Name != "origin" || result.Config.Git.Remotes[0].URL != "https://git.example/team/project.git" {
 		t.Fatalf("unexpected Git configuration: %+v", result.Config.Git)
 	}
-	if !strings.Contains(output.String(), "Git Gatewayを使用しますか") || !strings.Contains(output.String(), "pushはhostで毎回承認") {
+	if !strings.Contains(output.String(), "Use the Git Gateway?") || !strings.Contains(output.String(), "each push requires host approval") {
 		t.Fatalf("wizard output did not describe Git configuration: %s", output.String())
 	}
 }
@@ -43,7 +43,7 @@ func TestWizardOffersDetectedProjectRemoteWithoutAutomaticallyEnablingIt(t *test
 	if len(result.Config.Git.Remotes) != 1 || result.Config.Git.Remotes[0] != suggested {
 		t.Fatalf("detected remote was not explicitly selected: %+v", result.Config.Git.Remotes)
 	}
-	if !strings.Contains(output.String(), "Projectから検出したremote") {
+	if !strings.Contains(output.String(), "detected in the Project") {
 		t.Fatalf("detected remote prompt missing: %s", output.String())
 	}
 }
@@ -78,7 +78,7 @@ func TestWizardRequiresExplicitDevConfirmationAndFixedCatalogModels(t *testing.T
 	if result.Config.Model.AuthMode != "oauth" || len(result.Config.Model.AllowedModels) != 2 {
 		t.Fatalf("unexpected Model configuration: %+v", result.Config.Model)
 	}
-	if !strings.Contains(output.String(), "情報流出防止を保証しません") || !strings.Contains(output.String(), "許可model") {
+	if !strings.Contains(output.String(), "does not guarantee prevention of data exfiltration") || !strings.Contains(output.String(), "Allowed models") {
 		t.Fatalf("wizard warning/catalog output missing: %s", output.String())
 	}
 }
@@ -94,7 +94,7 @@ func TestWizardConfiguresExplicitWebOriginAndShowsTunnelLimit(t *testing.T) {
 	if !result.Config.Web.Enabled || len(result.Rules) != 1 || result.Rules[0].Host != "docs.example" || !result.Rules[0].IncludeSubdomains {
 		t.Fatalf("unexpected Web configuration: enabled=%t rules=%+v", result.Config.Web.Enabled, result.Rules)
 	}
-	if !strings.Contains(output.String(), "TLS非終端") || !strings.Contains(output.String(), "upload内容は識別・保証できません") {
+	if !strings.Contains(output.String(), "without TLS termination") || !strings.Contains(output.String(), "uploaded content inside it cannot be identified or guaranteed") {
 		t.Fatalf("Web tunnel warning missing: %s", output.String())
 	}
 }
@@ -114,7 +114,7 @@ func TestWizardEnablesBuiltInWebPresetWithoutRequiringCustomOrigin(t *testing.T)
 	if !result.Config.Web.Enabled || len(result.Config.Web.OriginPresets) != 1 || result.Config.Web.OriginPresets[0] != webgateway.CommonDevelopmentOriginPreset || len(result.Rules) != 0 || len(resolved) == 0 {
 		t.Fatalf("unexpected preset Web configuration: config=%+v custom=%+v resolved=%d", result.Config.Web, result.Rules, len(resolved))
 	}
-	if !strings.Contains(output.String(), "広い許可集合") || !strings.Contains(output.String(), "resolved=") {
+	if !strings.Contains(output.String(), "broad allowlist") || !strings.Contains(output.String(), "resolved=") {
 		t.Fatalf("preset warning or summary missing: %s", output.String())
 	}
 }

@@ -59,7 +59,7 @@ func RunWithOptions(input io.Reader, output io.Writer, current projectconfig.Con
 	candidate.Git.Remotes = append([]policy.GitRemotePolicy(nil), current.Git.Remotes...)
 	rules := append([]webgateway.OriginRule(nil), currentRules...)
 
-	fmt.Fprintln(output, "sunaba Project設定ウィザード（qでキャンセル）")
+	fmt.Fprintln(output, "sunaba Project configuration wizard (enter q to cancel)")
 	var err error
 	if candidate.Mode, err = w.mode(candidate.Mode); err != nil {
 		return Result{}, err
@@ -73,7 +73,7 @@ func RunWithOptions(input io.Reader, output io.Writer, current projectconfig.Con
 	if candidate.Web, rules, err = w.web(candidate.Web, rules); err != nil {
 		return Result{}, err
 	}
-	advanced, err := w.yesNo("resource、session、quota、exportの詳細設定を変更しますか？", false)
+	advanced, err := w.yesNo("Change advanced resource, session, quota, and export settings?", false)
 	if err != nil {
 		return Result{}, err
 	}
@@ -83,10 +83,10 @@ func RunWithOptions(input io.Reader, output io.Writer, current projectconfig.Con
 		}
 	}
 	if err := projectconfig.Validate(candidate, rules); err != nil {
-		return Result{}, fmt.Errorf("設定候補は無効です: %w", err)
+		return Result{}, fmt.Errorf("configuration candidate is invalid: %w", err)
 	}
 	w.summary(candidate, rules)
-	confirmed, err := w.yesNo("この設定を保存して適用しますか？", false)
+	confirmed, err := w.yesNo("Save and apply this configuration?", false)
 	if err != nil {
 		return Result{}, err
 	}
@@ -101,18 +101,18 @@ func (w *wizard) mode(current string) (string, error) {
 	if current == "dev" {
 		defaultChoice = 2
 	}
-	fmt.Fprintln(w.output, "\n実行モード:")
-	fmt.Fprintln(w.output, "  1. secure（推奨、直接egressなし）")
-	fmt.Fprintln(w.output, "  2. dev（active session中は直接Internet egressあり）")
-	choice, err := w.choice("選択", defaultChoice, 2)
+	fmt.Fprintln(w.output, "\nExecution mode:")
+	fmt.Fprintln(w.output, "  1. secure (recommended, no direct egress)")
+	fmt.Fprintln(w.output, "  2. dev (direct Internet egress during an active session)")
+	choice, err := w.choice("Selection", defaultChoice, 2)
 	if err != nil {
 		return "", err
 	}
 	if choice == 1 {
 		return "secure", nil
 	}
-	fmt.Fprintln(w.output, "WARNING: dev modeは情報流出防止を保証しません。host、LAN、credential、worktreeの境界は維持されます。")
-	confirmed, err := w.yesNo("dev modeを選択しますか？", false)
+	fmt.Fprintln(w.output, "WARNING: dev mode does not guarantee prevention of data exfiltration. Host, LAN, credential, and worktree boundaries remain enforced.")
+	confirmed, err := w.yesNo("Select dev mode?", false)
 	if err != nil {
 		return "", err
 	}
@@ -123,18 +123,18 @@ func (w *wizard) mode(current string) (string, error) {
 }
 
 func (w *wizard) model(current policy.ModelPolicy) (policy.ModelPolicy, error) {
-	change, err := w.yesNo("\nModel Gateway設定を変更しますか？", false)
+	change, err := w.yesNo("\nChange Model Gateway settings?", false)
 	if err != nil || !change {
 		return current, err
 	}
-	fmt.Fprintln(w.output, "Model認証方式:")
-	fmt.Fprintln(w.output, "  1. API key（従量課金）")
-	fmt.Fprintln(w.output, "  2. OAuth（ChatGPT Codex subscription）")
+	fmt.Fprintln(w.output, "Model authentication method:")
+	fmt.Fprintln(w.output, "  1. API key (usage-based billing)")
+	fmt.Fprintln(w.output, "  2. OAuth (ChatGPT Codex subscription)")
 	defaultChoice := 1
 	if current.AuthMode == modelcatalog.AuthOAuth {
 		defaultChoice = 2
 	}
-	choice, err := w.choice("選択", defaultChoice, 2)
+	choice, err := w.choice("Selection", defaultChoice, 2)
 	if err != nil {
 		return current, err
 	}
@@ -153,7 +153,7 @@ func (w *wizard) model(current policy.ModelPolicy) (policy.ModelPolicy, error) {
 			return current, err
 		}
 	}
-	fmt.Fprintln(w.output, "許可model（入力順の先頭が既定model）:")
+	fmt.Fprintln(w.output, "Allowed models (the first entry is the default model):")
 	indexes := make(map[string]int, len(available))
 	for index, definition := range available {
 		indexes[definition.ID] = index + 1
@@ -164,7 +164,7 @@ func (w *wizard) model(current policy.ModelPolicy) (policy.ModelPolicy, error) {
 		defaults = append(defaults, strconv.Itoa(indexes[id]))
 	}
 	for {
-		line, err := w.line(fmt.Sprintf("model番号をカンマ区切りで入力 [%s]: ", strings.Join(defaults, ",")))
+		line, err := w.line(fmt.Sprintf("Enter model numbers separated by commas [%s]: ", strings.Join(defaults, ",")))
 		if err != nil {
 			return current, err
 		}
@@ -177,24 +177,24 @@ func (w *wizard) model(current policy.ModelPolicy) (policy.ModelPolicy, error) {
 			current.AllowedModels = ids
 			return current, nil
 		}
-		fmt.Fprintf(w.output, "入力エラー: %v\n", err)
+		fmt.Fprintf(w.output, "Input error: %v\n", err)
 	}
 }
 
 func parseModelSelection(raw string, available []modelcatalog.Model) ([]string, error) {
 	parts := strings.Split(raw, ",")
 	if len(parts) == 0 || len(parts) > 32 {
-		return nil, fmt.Errorf("1から32件のmodelを選択してください")
+		return nil, fmt.Errorf("select between 1 and 32 models")
 	}
 	result := make([]string, 0, len(parts))
 	seen := make(map[int]struct{}, len(parts))
 	for _, part := range parts {
 		index, err := strconv.Atoi(strings.TrimSpace(part))
 		if err != nil || index < 1 || index > len(available) {
-			return nil, fmt.Errorf("model番号が範囲外です")
+			return nil, fmt.Errorf("model number is out of range")
 		}
 		if _, exists := seen[index]; exists {
-			return nil, fmt.Errorf("同じmodelが重複しています")
+			return nil, fmt.Errorf("the same model was selected more than once")
 		}
 		seen[index] = struct{}{}
 		result = append(result, available[index-1].ID)
@@ -203,13 +203,13 @@ func parseModelSelection(raw string, available []modelcatalog.Model) ([]string, 
 }
 
 func (w *wizard) git(current, suggested []policy.GitRemotePolicy) ([]policy.GitRemotePolicy, error) {
-	enabled, err := w.yesNo("\nGit Gatewayを使用しますか？", len(current) > 0)
+	enabled, err := w.yesNo("\nUse the Git Gateway?", len(current) > 0)
 	if err != nil || !enabled {
 		return nil, err
 	}
 	kept := make([]policy.GitRemotePolicy, 0, len(current))
 	for _, remote := range current {
-		keep, err := w.yesNo(fmt.Sprintf("remote %s (%s) を保持しますか？", safe(remote.Name), safe(remote.URL)), true)
+		keep, err := w.yesNo(fmt.Sprintf("Keep remote %s (%s)?", safe(remote.Name), safe(remote.URL)), true)
 		if err != nil {
 			return nil, err
 		}
@@ -221,7 +221,7 @@ func (w *wizard) git(current, suggested []policy.GitRemotePolicy) ([]policy.GitR
 		if policy.ValidateGitRemote(remote) != nil || remoteExists(kept, remote) {
 			continue
 		}
-		use, err := w.yesNo(fmt.Sprintf("Projectから検出したremote %s (%s) をGit Gatewayに登録しますか？", safe(remote.Name), safe(remote.URL)), true)
+		use, err := w.yesNo(fmt.Sprintf("Register remote %s (%s), detected in the Project, with the Git Gateway?", safe(remote.Name), safe(remote.URL)), true)
 		if err != nil {
 			return nil, err
 		}
@@ -230,31 +230,31 @@ func (w *wizard) git(current, suggested []policy.GitRemotePolicy) ([]policy.GitR
 		}
 	}
 	for {
-		add, err := w.yesNo("Git Gateway remoteを追加しますか？", len(kept) == 0)
+		add, err := w.yesNo("Add a Git Gateway remote?", len(kept) == 0)
 		if err != nil {
 			return nil, err
 		}
 		if !add {
 			if len(kept) == 0 {
-				fmt.Fprintln(w.output, "remoteがないためGit Gatewayは無効になります。")
+				fmt.Fprintln(w.output, "The Git Gateway will be disabled because no remotes are configured.")
 			}
 			return kept, nil
 		}
-		name, err := w.requiredLine("remote名（例: origin）: ")
+		name, err := w.requiredLine("Remote name (for example, origin): ")
 		if err != nil {
 			return nil, err
 		}
-		remoteURL, err := w.requiredLine("credentialを含まないHTTPS .git URL: ")
+		remoteURL, err := w.requiredLine("HTTPS .git URL without credentials: ")
 		if err != nil {
 			return nil, err
 		}
 		candidate := policy.GitRemotePolicy{Name: name, URL: remoteURL}
 		if err := policy.ValidateGitRemote(candidate); err != nil {
-			fmt.Fprintf(w.output, "入力エラー: %v\n", err)
+			fmt.Fprintf(w.output, "Input error: %v\n", err)
 			continue
 		}
 		if remoteExists(kept, candidate) {
-			fmt.Fprintln(w.output, "入力エラー: remote名またはURLが重複しています。")
+			fmt.Fprintln(w.output, "Input error: the remote name or URL is duplicated.")
 			continue
 		}
 		kept = append(kept, candidate)
@@ -274,7 +274,7 @@ func remoteExists(remotes []policy.GitRemotePolicy, candidate policy.GitRemotePo
 }
 
 func (w *wizard) web(currentConfig projectconfig.WebConfig, current []webgateway.OriginRule) (projectconfig.WebConfig, []webgateway.OriginRule, error) {
-	enabled, err := w.yesNo("\nWeb Gatewayを使用しますか？", currentConfig.Enabled)
+	enabled, err := w.yesNo("\nUse the Web Gateway?", currentConfig.Enabled)
 	if err != nil {
 		return currentConfig, nil, err
 	}
@@ -282,9 +282,9 @@ func (w *wizard) web(currentConfig projectconfig.WebConfig, current []webgateway
 		currentConfig.Enabled = false
 		return currentConfig, append([]webgateway.OriginRule(nil), current...), nil
 	}
-	fmt.Fprintln(w.output, "NOTICE: HTTPSはTLS非終端tunnelのため、内部のmethod、path、upload内容は識別・保証できません。")
-	fmt.Fprintln(w.output, "NOTICE: common-development presetはpackage registry、CDN、public object storageを含む広い許可集合です。")
-	useCommonPreset, err := w.yesNo("組み込みcommon-development origin presetを使用しますか？", containsString(currentConfig.OriginPresets, webgateway.CommonDevelopmentOriginPreset))
+	fmt.Fprintln(w.output, "NOTICE: HTTPS uses a tunnel without TLS termination, so the method, path, and uploaded content inside it cannot be identified or guaranteed.")
+	fmt.Fprintln(w.output, "NOTICE: The common-development preset is a broad allowlist that includes package registries, CDNs, and public object storage.")
+	useCommonPreset, err := w.yesNo("Use the built-in common-development origin preset?", containsString(currentConfig.OriginPresets, webgateway.CommonDevelopmentOriginPreset))
 	if err != nil {
 		return currentConfig, nil, err
 	}
@@ -294,7 +294,7 @@ func (w *wizard) web(currentConfig projectconfig.WebConfig, current []webgateway
 	}
 	kept := make([]webgateway.OriginRule, 0, len(current))
 	for _, rule := range current {
-		keep, err := w.yesNo(fmt.Sprintf("origin %s を保持しますか？", formatOrigin(rule)), true)
+		keep, err := w.yesNo(fmt.Sprintf("Keep origin %s?", formatOrigin(rule)), true)
 		if err != nil {
 			return currentConfig, nil, err
 		}
@@ -303,7 +303,7 @@ func (w *wizard) web(currentConfig projectconfig.WebConfig, current []webgateway
 		}
 	}
 	for {
-		add, err := w.yesNo("Project固有Web originを追加しますか？", len(kept) == 0 && len(currentConfig.OriginPresets) == 0)
+		add, err := w.yesNo("Add a Project-specific Web origin?", len(kept) == 0 && len(currentConfig.OriginPresets) == 0)
 		if err != nil {
 			return currentConfig, nil, err
 		}
@@ -312,20 +312,20 @@ func (w *wizard) web(currentConfig projectconfig.WebConfig, current []webgateway
 			return currentConfig, kept, nil
 		}
 		if !add {
-			fmt.Fprintln(w.output, "Web Gatewayには少なくとも1件のoriginが必要です。")
+			fmt.Fprintln(w.output, "The Web Gateway requires at least one origin.")
 			continue
 		}
-		raw, err := w.requiredLine("HTTP(S) origin（pathなし）: ")
+		raw, err := w.requiredLine("HTTP(S) origin (without a path): ")
 		if err != nil {
 			return currentConfig, nil, err
 		}
-		include, err := w.yesNo("subdomainも許可しますか？", false)
+		include, err := w.yesNo("Also allow subdomains?", false)
 		if err != nil {
 			return currentConfig, nil, err
 		}
 		rule, err := projectconfig.ParseOrigin(raw, include)
 		if err != nil {
-			fmt.Fprintf(w.output, "入力エラー: %v\n", err)
+			fmt.Fprintf(w.output, "Input error: %v\n", err)
 			continue
 		}
 		duplicate := false
@@ -336,7 +336,7 @@ func (w *wizard) web(currentConfig projectconfig.WebConfig, current []webgateway
 			}
 		}
 		if duplicate {
-			fmt.Fprintln(w.output, "入力エラー: originが重複しています。")
+			fmt.Fprintln(w.output, "Input error: the origin is duplicated.")
 			continue
 		}
 		kept = append(kept, rule)
@@ -357,9 +357,9 @@ func containsString(values []string, target string) bool {
 }
 
 func (w *wizard) advanced(config *projectconfig.Config) error {
-	fmt.Fprintln(w.output, "\n詳細設定（Enterで現在値を維持）")
+	fmt.Fprintln(w.output, "\nAdvanced settings (press Enter to keep the current value)")
 	var err error
-	if config.Resources.CPUs, err = w.integer("CPU数", config.Resources.CPUs, 1, 32); err != nil {
+	if config.Resources.CPUs, err = w.integer("CPU count", config.Resources.CPUs, 1, 32); err != nil {
 		return err
 	}
 	if config.Resources.Memory, err = w.memory(config.Resources.Memory); err != nil {
@@ -371,10 +371,10 @@ func (w *wizard) advanced(config *projectconfig.Config) error {
 	}
 	config.Resources.DiskBytes = diskMiB << 20
 	config.Resources.FileSizeMax = config.Resources.DiskBytes
-	if config.Resources.ProcessMax, err = w.int64("process上限", config.Resources.ProcessMax, 16, 4096); err != nil {
+	if config.Resources.ProcessMax, err = w.int64("Process limit", config.Resources.ProcessMax, 16, 4096); err != nil {
 		return err
 	}
-	if config.Resources.OpenFileMax, err = w.int64("open file上限", config.Resources.OpenFileMax, 256, 1<<20); err != nil {
+	if config.Resources.OpenFileMax, err = w.int64("Open file limit", config.Resources.OpenFileMax, 256, 1<<20); err != nil {
 		return err
 	}
 	if config.Session.TTLSeconds, err = w.duration("session TTL", config.Session.TTLSeconds, 1, 86400); err != nil {
@@ -383,64 +383,64 @@ func (w *wizard) advanced(config *projectconfig.Config) error {
 	if config.Session.IdleSeconds, err = w.duration("idle timeout", config.Session.IdleSeconds, 1, config.Session.TTLSeconds); err != nil {
 		return err
 	}
-	if config.Model.MaxRequests, err = w.integer("Model request上限", config.Model.MaxRequests, 1, modelgateway.MaximumMaxRequests); err != nil {
+	if config.Model.MaxRequests, err = w.integer("Model request limit", config.Model.MaxRequests, 1, modelgateway.MaximumMaxRequests); err != nil {
 		return err
 	}
-	if config.Model.MaxConcurrent, err = w.integer("Model同時request上限", config.Model.MaxConcurrent, 1, modelgateway.MaximumMaxConcurrent); err != nil {
+	if config.Model.MaxConcurrent, err = w.integer("Concurrent Model request limit", config.Model.MaxConcurrent, 1, modelgateway.MaximumMaxConcurrent); err != nil {
 		return err
 	}
-	requestMiB, err := w.int64("Model request body上限 (MiB)", config.Model.MaxRequestBytes>>20, 1, modelgateway.MaximumMaxRequestBytes>>20)
+	requestMiB, err := w.int64("Model request body limit (MiB)", config.Model.MaxRequestBytes>>20, 1, modelgateway.MaximumMaxRequestBytes>>20)
 	if err != nil {
 		return err
 	}
-	responseMiB, err := w.int64("Model response body上限 (MiB)", config.Model.MaxResponseBytes>>20, 1, modelgateway.MaximumMaxResponseBytes>>20)
+	responseMiB, err := w.int64("Model response body limit (MiB)", config.Model.MaxResponseBytes>>20, 1, modelgateway.MaximumMaxResponseBytes>>20)
 	if err != nil {
 		return err
 	}
 	config.Model.MaxRequestBytes, config.Model.MaxResponseBytes = requestMiB<<20, responseMiB<<20
 	if config.Web.Enabled {
-		if config.Web.MaxRequests, err = w.integer("Web request上限", config.Web.MaxRequests, 1, int(^uint(0)>>1)); err != nil {
+		if config.Web.MaxRequests, err = w.integer("Web request limit", config.Web.MaxRequests, 1, int(^uint(0)>>1)); err != nil {
 			return err
 		}
-		if config.Web.MaxConcurrent, err = w.integer("Web同時接続上限", config.Web.MaxConcurrent, 1, int(^uint(0)>>1)); err != nil {
+		if config.Web.MaxConcurrent, err = w.integer("Concurrent Web connection limit", config.Web.MaxConcurrent, 1, int(^uint(0)>>1)); err != nil {
 			return err
 		}
-		if config.Web.MaxConnectSeconds, err = w.int64("Web接続時間上限 (秒)", config.Web.MaxConnectSeconds, 1, 600); err != nil {
+		if config.Web.MaxConnectSeconds, err = w.int64("Web connection time limit (seconds)", config.Web.MaxConnectSeconds, 1, 600); err != nil {
 			return err
 		}
 		maximumMiB := int64((1 << 62) >> 20)
-		uploadMiB, err := w.int64("Web upload上限 (MiB)", config.Web.MaxUploadBytes>>20, 1, maximumMiB)
+		uploadMiB, err := w.int64("Web upload limit (MiB)", config.Web.MaxUploadBytes>>20, 1, maximumMiB)
 		if err != nil {
 			return err
 		}
-		downloadMiB, err := w.int64("Web download上限 (MiB)", config.Web.MaxDownloadBytes>>20, 1, maximumMiB)
+		downloadMiB, err := w.int64("Web download limit (MiB)", config.Web.MaxDownloadBytes>>20, 1, maximumMiB)
 		if err != nil {
 			return err
 		}
-		totalMiB, err := w.int64("Web session合計上限 (MiB)", config.Web.MaxTotalBytes>>20, 1, maximumMiB)
+		totalMiB, err := w.int64("Web session total limit (MiB)", config.Web.MaxTotalBytes>>20, 1, maximumMiB)
 		if err != nil {
 			return err
 		}
 		config.Web.MaxUploadBytes, config.Web.MaxDownloadBytes, config.Web.MaxTotalBytes = uploadMiB<<20, downloadMiB<<20, totalMiB<<20
 	}
-	if config.Export.MaxEntries, err = w.integer("export entry上限", config.Export.MaxEntries, 1, 1_000_000); err != nil {
+	if config.Export.MaxEntries, err = w.integer("Export entry limit", config.Export.MaxEntries, 1, 1_000_000); err != nil {
 		return err
 	}
-	fileMiB, err := w.int64("export単一file上限 (MiB)", config.Export.MaxFileBytes>>20, 1, 8192)
+	fileMiB, err := w.int64("Export per-file limit (MiB)", config.Export.MaxFileBytes>>20, 1, 8192)
 	if err != nil {
 		return err
 	}
-	totalMiB, err := w.int64("export合計上限 (MiB)", config.Export.MaxTotalBytes>>20, fileMiB, 8192)
+	totalMiB, err := w.int64("Export total limit (MiB)", config.Export.MaxTotalBytes>>20, fileMiB, 8192)
 	if err != nil {
 		return err
 	}
 	config.Export.MaxFileBytes, config.Export.MaxTotalBytes = fileMiB<<20, totalMiB<<20
-	config.Audit.RetentionDays, err = w.integer("audit保持日数", config.Audit.RetentionDays, 1, 365)
+	config.Audit.RetentionDays, err = w.integer("Audit retention days", config.Audit.RetentionDays, 1, 365)
 	return err
 }
 
 func (w *wizard) summary(config projectconfig.Config, rules []webgateway.OriginRule) {
-	fmt.Fprintln(w.output, "\n適用する設定:")
+	fmt.Fprintln(w.output, "\nConfiguration to apply:")
 	fmt.Fprintf(w.output, "  mode: %s\n", safe(config.Mode))
 	fmt.Fprintf(w.output, "  model: auth=%s, default=%s, allowed=%s\n", safe(string(config.Model.AuthMode)), safe(config.Model.AllowedModels[0]), safe(strings.Join(config.Model.AllowedModels, ",")))
 	fmt.Fprintf(w.output, "  Git Gateway: %t (%d remote)\n", len(config.Git.Remotes) > 0, len(config.Git.Remotes))
@@ -448,7 +448,7 @@ func (w *wizard) summary(config projectconfig.Config, rules []webgateway.OriginR
 		fmt.Fprintf(w.output, "    %s -> %s\n", safe(remote.Name), safe(remote.URL))
 	}
 	if len(config.Git.Remotes) > 0 {
-		fmt.Fprintln(w.output, "    clone/fetch/pullは承認不要、pushはhostで毎回承認")
+		fmt.Fprintln(w.output, "    clone/fetch/pull require no approval; each push requires host approval")
 	}
 	resolvedRules, _, resolveErr := projectconfig.ResolveWebRules(config, rules)
 	if resolveErr != nil {
@@ -461,7 +461,7 @@ func (w *wizard) summary(config projectconfig.Config, rules []webgateway.OriginR
 	fmt.Fprintf(w.output, "  resources: cpu=%d memory=%s disk=%dMiB process=%d open-files=%d\n", config.Resources.CPUs, safe(config.Resources.Memory), config.Resources.DiskBytes>>20, config.Resources.ProcessMax, config.Resources.OpenFileMax)
 	fmt.Fprintf(w.output, "  session: ttl=%s idle=%s\n", time.Duration(config.Session.TTLSeconds)*time.Second, time.Duration(config.Session.IdleSeconds)*time.Second)
 	fmt.Fprintf(w.output, "  model quota: requests=%d concurrent=%d request=%dMiB response=%dMiB\n", config.Model.MaxRequests, config.Model.MaxConcurrent, config.Model.MaxRequestBytes>>20, config.Model.MaxResponseBytes>>20)
-	fmt.Fprintf(w.output, "  export: entries=%d file=%dMiB total=%dMiB; audit=%d日\n", config.Export.MaxEntries, config.Export.MaxFileBytes>>20, config.Export.MaxTotalBytes>>20, config.Audit.RetentionDays)
+	fmt.Fprintf(w.output, "  export: entries=%d file=%dMiB total=%dMiB; audit=%d days\n", config.Export.MaxEntries, config.Export.MaxFileBytes>>20, config.Export.MaxTotalBytes>>20, config.Audit.RetentionDays)
 }
 
 func (w *wizard) yesNo(prompt string, defaultValue bool) (bool, error) {
@@ -482,7 +482,7 @@ func (w *wizard) yesNo(prompt string, defaultValue bool) (bool, error) {
 		case "n", "no":
 			return false, nil
 		default:
-			fmt.Fprintln(w.output, "y または n を入力してください。")
+			fmt.Fprintln(w.output, "Enter y or n.")
 		}
 	}
 }
@@ -500,7 +500,7 @@ func (w *wizard) choice(prompt string, defaultValue, maximum int) (int, error) {
 		if err == nil && value >= 1 && value <= maximum {
 			return value, nil
 		}
-		fmt.Fprintf(w.output, "1から%dの番号を入力してください。\n", maximum)
+		fmt.Fprintf(w.output, "Enter a number from 1 to %d.\n", maximum)
 	}
 }
 
@@ -517,7 +517,7 @@ func (w *wizard) integer(label string, current, minimum, maximum int) (int, erro
 		if err == nil && value >= minimum && value <= maximum {
 			return value, nil
 		}
-		fmt.Fprintf(w.output, "%dから%dの整数を入力してください。\n", minimum, maximum)
+		fmt.Fprintf(w.output, "Enter an integer from %d to %d.\n", minimum, maximum)
 	}
 }
 
@@ -534,7 +534,7 @@ func (w *wizard) int64(label string, current, minimum, maximum int64) (int64, er
 		if err == nil && value >= minimum && value <= maximum {
 			return value, nil
 		}
-		fmt.Fprintf(w.output, "%dから%dの整数を入力してください。\n", minimum, maximum)
+		fmt.Fprintf(w.output, "Enter an integer from %d to %d.\n", minimum, maximum)
 	}
 }
 
@@ -552,13 +552,13 @@ func (w *wizard) duration(label string, current, minimum, maximum int64) (int64,
 		if err == nil && value == time.Duration(seconds)*time.Second && seconds >= minimum && seconds <= maximum {
 			return seconds, nil
 		}
-		fmt.Fprintf(w.output, "%sから%sの秒単位durationを入力してください（例: 30m, 2h）。\n", time.Duration(minimum)*time.Second, time.Duration(maximum)*time.Second)
+		fmt.Fprintf(w.output, "Enter a whole-second duration from %s to %s (for example, 30m or 2h).\n", time.Duration(minimum)*time.Second, time.Duration(maximum)*time.Second)
 	}
 }
 
 func (w *wizard) memory(current string) (string, error) {
 	for {
-		line, err := w.line(fmt.Sprintf("memory上限 [%s]: ", safe(current)))
+		line, err := w.line(fmt.Sprintf("Memory limit [%s]: ", safe(current)))
 		if err != nil {
 			return "", err
 		}
@@ -571,7 +571,7 @@ func (w *wizard) memory(current string) (string, error) {
 				return line, nil
 			}
 		}
-		fmt.Fprintln(w.output, "正の整数とK/M/G/T/P単位を入力してください（例: 2G）。")
+		fmt.Fprintln(w.output, "Enter a positive integer with a K, M, G, T, or P unit (for example, 2G).")
 	}
 }
 
@@ -584,7 +584,7 @@ func (w *wizard) requiredLine(prompt string) (string, error) {
 		if line != "" {
 			return line, nil
 		}
-		fmt.Fprintln(w.output, "空の値は入力できません。")
+		fmt.Fprintln(w.output, "The value cannot be empty.")
 	}
 }
 
@@ -594,7 +594,7 @@ func (w *wizard) line(prompt string) (string, error) {
 	}
 	if !w.scanner.Scan() {
 		if err := w.scanner.Err(); err != nil {
-			return "", fmt.Errorf("設定入力を読み取れません: %w", err)
+			return "", fmt.Errorf("read configuration input: %w", err)
 		}
 		return "", ErrCanceled
 	}
@@ -603,7 +603,7 @@ func (w *wizard) line(prompt string) (string, error) {
 		return "", ErrCanceled
 	}
 	if !utf8.ValidString(line) || strings.ContainsAny(line, "\x00\r\n\t\x1b") {
-		return "", fmt.Errorf("設定入力にterminal制御文字は使用できません")
+		return "", fmt.Errorf("configuration input cannot contain terminal control characters")
 	}
 	return line, nil
 }

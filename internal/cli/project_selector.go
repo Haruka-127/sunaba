@@ -25,8 +25,8 @@ type projectStateTarget struct {
 
 func projectSelectorFlags(additional ...urfavecli.Flag) []urfavecli.Flag {
 	flags := []urfavecli.Flag{
-		&urfavecli.StringFlag{Name: "dir", Value: ".", Usage: "Projectディレクトリ", OnlyOnce: true},
-		&urfavecli.StringFlag{Name: "project-id", Usage: "project listに表示された完全なProject ID", OnlyOnce: true},
+		&urfavecli.StringFlag{Name: "dir", Value: ".", Usage: "Project directory", OnlyOnce: true},
+		&urfavecli.StringFlag{Name: "project-id", Usage: "Full Project ID shown by project list", OnlyOnce: true},
 	}
 	return append(flags, additional...)
 }

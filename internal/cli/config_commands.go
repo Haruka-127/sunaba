@@ -55,14 +55,14 @@ func (a *app) config(ctx context.Context, action, dir string, effectiveOutput bo
 		}
 		result, err := configwizard.RunWithOptions(a.input, a.output, config, rules, configwizard.Options{SuggestedGitRemotes: detectProjectGitRemotes(ctx, effective.ProjectRoot)})
 		if errors.Is(err, configwizard.ErrCanceled) {
-			fmt.Fprintln(a.output, "Project設定は変更されませんでした。")
+			fmt.Fprintln(a.output, "Project configuration was not changed.")
 			return nil
 		}
 		if err != nil {
 			return err
 		}
 		if projectconfig.Matches(result.Config, result.Rules, effective) {
-			fmt.Fprintln(a.output, "Project設定に変更はありません。")
+			fmt.Fprintln(a.output, "Project configuration has no changes.")
 			return nil
 		}
 		lock, err := a.store.AcquireProjectLock(effective.ProjectRoot)
@@ -89,7 +89,7 @@ func (a *app) config(ctx context.Context, action, dir string, effectiveOutput bo
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.output, "対話設定をProject %sへ保存・適用しました。次のAgent Sessionは新しいpolicyを使用します。\n", compiled.ProjectID)
+		fmt.Fprintf(a.output, "Saved and applied the interactive configuration to Project %s. The next Agent Session will use the new policy.\n", compiled.ProjectID)
 		return nil
 	case "validate":
 		resolvedRules, _, err := projectconfig.ResolveWebRules(config, rules)
