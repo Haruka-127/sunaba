@@ -1148,6 +1148,38 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	}
 }
 
+func TestPruneProjectAuditUsesOnlyCurrentProjectRetentionAndRecordsResult(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "audit")
+	recorder, err := audit.NewRecorder(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, projectID := range []string{"current", "other"} {
+		directory := filepath.Join(root, projectID)
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "audit-20260101.jsonl"), []byte("fixture\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	projectPolicy := policy.ProjectPolicy{ProjectID: "current", Audit: policy.AuditPolicy{RetentionDays: 7}}
+	if err := pruneProjectAudit(recorder, projectPolicy, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "current", "audit-20260101.jsonl")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired current Project audit remained: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "other", "audit-20260101.jsonl")); err != nil {
+		t.Fatalf("other Project audit was changed: %v", err)
+	}
+	result, err := os.ReadFile(filepath.Join(root, "current", "audit-20260813.jsonl"))
+	if err != nil || !bytes.Contains(result, []byte(`"action":"audit.prune"`)) || !bytes.Contains(result, []byte(`"removed":"1"`)) {
+		t.Fatalf("prune result was not audited: %s error=%v", result, err)
+	}
+}
+
 func TestProjectInitCreatesPinnedPolicyAndSafeInitialSnapshot(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

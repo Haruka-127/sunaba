@@ -22,7 +22,7 @@ func TestPruneRemovesOnlyExpiredValidatedAuditLogs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	removed, err := recorder.Prune(7*24*time.Hour, time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC))
+	removed, err := recorder.PruneProject("project", 7*24*time.Hour, time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC))
 	if err != nil || removed != 1 {
 		t.Fatalf("removed=%d error=%v", removed, err)
 	}
@@ -53,11 +53,35 @@ func TestPruneRefusesSymlinkAuditLog(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(project, "audit-20200101.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recorder.Prune(24*time.Hour, time.Now()); err == nil {
+	if _, err := recorder.PruneProject("project", 24*time.Hour, time.Now()); err == nil {
 		t.Fatal("symlink audit log was not rejected")
 	}
 	outside, _ := os.ReadFile(target)
 	if string(outside) != "outside" {
 		t.Fatal("retention followed an audit symlink")
+	}
+}
+
+func TestPruneProjectDoesNotApplyRetentionToOtherProjects(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "audit")
+	recorder, err := NewRecorder(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, projectID := range []string{"short-retention", "long-retention"} {
+		project := filepath.Join(root, projectID)
+		if err := os.Mkdir(project, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(project, "audit-20260101.jsonl"), []byte("fixture\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := recorder.PruneProject("short-retention", 7*24*time.Hour, time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC))
+	if err != nil || removed != 1 {
+		t.Fatalf("removed=%d error=%v", removed, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "long-retention", "audit-20260101.jsonl")); err != nil {
+		t.Fatalf("other Project log was removed: %v", err)
 	}
 }

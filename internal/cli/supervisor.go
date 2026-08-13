@@ -63,6 +63,9 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if err != nil {
 		return nil, err
 	}
+	if err := pruneProjectAudit(recorder, projectPolicy, time.Now()); err != nil {
+		return nil, err
+	}
 	cleanupResult, err := cleanup.Run(ctx, cleanup.Config{Store: a.store, Runtime: a.runtime, Audit: recorder})
 	if err != nil {
 		return nil, err
@@ -200,6 +203,25 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		active: active, projectPolicy: projectPolicy, projectState: projectState, runtimeBase: runtimeBase,
 		serverPassword: serverPassword, expiresAt: expiresAt, gitBroker: gateways.gitBroker, operationLock: operationLock,
 	}, nil
+}
+
+func pruneProjectAudit(recorder *audit.Recorder, projectPolicy policy.ProjectPolicy, now time.Time) error {
+	retention := time.Duration(projectPolicy.Audit.RetentionDays) * 24 * time.Hour
+	removed, pruneErr := recorder.PruneProject(projectPolicy.ProjectID, retention, now)
+	outcome := "success"
+	details := map[string]string{
+		"retention_days": fmt.Sprint(projectPolicy.Audit.RetentionDays),
+		"removed":        fmt.Sprint(removed),
+	}
+	if pruneErr != nil {
+		outcome = "rejected"
+		details["reason"] = pruneErr.Error()
+	}
+	auditErr := recorder.Append(audit.BoundaryEvent{
+		At: now, Category: "audit", Action: "audit.prune", Outcome: outcome,
+		ProjectID: projectPolicy.ProjectID, Details: details,
+	})
+	return errors.Join(pruneErr, auditErr)
 }
 
 func validateGuestRelay(path string) error {
