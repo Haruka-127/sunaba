@@ -1,339 +1,402 @@
-# sunaba 利用者ガイド
+# sunaba ユーザーガイド
 
-このガイドは、Apple silicon Macでsunabaを導入し、OpenCodeを隔離されたAgent VMで利用し、成果物をhost Projectへ安全に反映するための手順を説明する。製品保証の正本は[`plan/sunaba-secure-agent-platform.md`](./plan/sunaba-secure-agent-platform.md)、許可されたhost操作は[`plan/allowed-host-operations.md`](./plan/allowed-host-operations.md)である。
+このガイドでは、sunabaを利用するための動作環境、導入、設定、主要コマンド、障害時の確認方法を説明します。実際の作業を順番に進めたい場合は、先に[利用ワークフロー](./workflows.md)を参照してください。
 
-## 1. 前提条件
+sunabaのセキュリティ保証は[セキュリティ設計・製品仕様](./plan/sunaba-secure-agent-platform.md)、`sudo`、pf、Apple Containerに対する操作範囲は[ホスト操作の許可範囲](./plan/allowed-host-operations.md)を正とします。
 
-- Apple silicon搭載MacとmacOS 26
+## sunabaの動作
+
+sunabaは、1つのプロジェクトに1台のAgent VMを割り当てます。OpenCode server、shell、build、test、依存導入などはこのVM内で動きます。ホストでは、sunabaが起動する固定versionのOpenCode TUIだけを使用します。
+
+ホストのプロジェクトはVMへbind mountされません。sunabaは開始時点のSnapshotをVMへcopyし、VM内の編集を隔離された書き込み層へ保存します。作業結果をホストへ戻すときは、VMをfreezeしてChange Setを作成し、利用者がホスト側で承認してから適用します。
+
+OpenAIやGitの実credentialはホストに保持され、VMにはsession限定のcapabilityだけが渡されます。VM内のroot権限やOpenCodeの許可設定によって、ホスト側の境界が広がることはありません。
+
+## 利用前の準備
+
+### 動作環境
+
+- Apple silicon搭載Mac
+- macOS 26
 - Apple Container exact `1.2.2`
-- OpenCode host TUI / guest server exact `1.18.16`
-- buildにGo 1.22以降
-- OpenAI APIの従量課金API key、またはCodexを利用できるChatGPT subscription
+- OpenCode host TUI exact `1.18.16`
+- Go 1.22以降（ソースからビルドする場合）
+- OpenAI API key、またはCodexを利用できるChatGPT subscription
 
-Apple Container systemは利用者が起動する。
+Apple ContainerとOpenCodeは検証済みのversionへ固定されています。範囲指定、`latest`、自動update、OpenCode v2、hostとguestのversion混在は使用できません。
+
+### Apple Containerを起動する
+
+Apple Container `1.2.2`を導入したうえで、systemを起動してversionを確認します。
 
 ```sh
 container system start
 container system version
 ```
 
-hostの`opencode`はPATH上に置く。sunabaは実行前にversionと固定SHA-256を検証するため、v2、`latest`、別buildへの自動fallbackは行わない。
+### OpenCodeをインストールする
 
-## 2. build
+macOS側へ[OpenCode v1.18.16](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)のApple silicon版をインストールし、`opencode`コマンドを実行できる状態にします。特定のdirectoryへ手動配置する必要はありません。インストール後にversionを確認してください。
 
-repository rootで3つのbinaryを同じdirectoryへbuildする。global installは不要である。
+```sh
+opencode --version
+```
+
+出力はexact `1.18.16`である必要があります。公式download archive `opencode-darwin-arm64.zip`のSHA-256は次の値です。
+
+```text
+1e670c94341a374824dc6700b6f38b2cb6634baf3ca20e645084c33ce6639320
+```
+
+sunabaは実行前に、macOSへインストールされたOpenCodeのversionと実行ファイルの固定digestを検証し、検証済みbinaryをsunabaの管理領域へcopyします。不一致の場合、別versionへ自動fallbackしません。固定値は[`internal/dependency/manifest.json`](../internal/dependency/manifest.json)で確認できます。
+
+VM側のOpenCode serverを利用者がインストールする必要はありません。sunabaはAgent imageのbuild時に固定したLinux arm64 artifactを取得し、SHA-256を検証してimageへ組み込みます。OpenCodeを更新するときは、互換性を検証したうえでhost TUIとVM側serverを同じversionへ更新します。VM側だけを独立して更新したり、`latest`へ自動追従したりはしません。
+
+### sunabaをビルドしてPATHを設定する
+
+repository rootで3つのbinaryを同じdirectoryへbuildします。
 
 ```sh
 mkdir -p bin
 go build -trimpath -o bin/sunaba ./cmd/sunaba
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o bin/sunaba-guest-relay ./cmd/sunaba-guest-relay
 go build -trimpath -o bin/sunaba-git-hook ./cmd/sunaba-git-hook
-bin/sunaba help
 ```
 
-以降はrepository rootから`bin/sunaba`を使う例を示す。別directoryへ配置する場合も3 binaryを分離しない。
+build後は、次のどちらかを行います。
 
-## 3. OpenAI credentialを登録する
+- 3つのbinaryがある`bin` directoryを`PATH`へ追加する
+- 3つのbinaryをすべて、すでに`PATH`の通っている同じdirectoryへ配置する
 
-新規ProjectのModel認証はOAuthが既定である。ChatGPT subscriptionを使う場合はdevice flowでログインする。表示されたURLをブラウザで開き、表示されたcodeを入力する。sunaba自身はブラウザを起動しない。
+現在のshellでrepositoryの`bin`を`PATH`へ追加する例:
 
 ```sh
-bin/sunaba credentials openai oauth login
-bin/sunaba credentials openai oauth status
+export PATH="/absolute/path/to/sunaba/bin:$PATH"
+sunaba help
 ```
 
-OAuth tokenは固定account `codex-oauth`へ保存され、期限前にhost側でrefreshされる。削除は`bin/sunaba credentials openai oauth delete`で行う。
+`sunaba help`が実行できることを確認してください。以降の例は、`sunaba`、`sunaba-guest-relay`、`sunaba-git-hook`が同じ`PATH`上のdirectoryに配置されている前提です。
 
-従量課金API keyを使う場合は、環境変数ではなくmacOS login Keychainの固定itemへ登録し、Project初期化時に`--model-auth api-key`を指定する。
+## OpenAI credentialを登録する
+
+新規Projectの既定はOAuthです。ChatGPT subscriptionを使う場合は、device flowでログインします。sunabaが表示したURLをブラウザで開き、user codeを入力してください。ブラウザは自動的には起動しません。
 
 ```sh
-bin/sunaba credentials openai api-key set
-bin/sunaba credentials openai api-key status
-bin/sunaba project init . --model-auth api-key
+sunaba credentials openai oauth login
+sunaba credentials openai oauth status
 ```
 
-`set`を実行するとKeychain自身がpassword入力を求める。入力値はterminalに表示されず、argv、Project file、sunaba policy、auditへ保存されない。固定identityはservice `dev.sunaba.openai`、account `openai-api-key`である。
-
-削除する場合は、先に各Projectで`changes export`または`destroy`を行い、起動中のSupervisorを終了してから実行する。既に起動しているSupervisorは、終了するまでmemory上に読み込み済みのkeyを保持し得る。
+従量課金API keyを使う場合は、macOS login Keychainへ登録します。API keyを環境変数やProject fileへ保存しないでください。
 
 ```sh
-bin/sunaba credentials openai api-key delete
+sunaba credentials openai api-key set
+sunaba credentials openai api-key status
 ```
 
-## 4. 最短のsecure mode利用手順
+`set`ではKeychain自身のpromptへkeyを入力します。credentialは固定service `dev.sunaba.openai`に保存され、VM、Host TUI、Project設定、auditへは記録されません。
 
-Project directoryで初期化する場合、path指定は不要である。相対pathまたは絶対pathを明示することもでき、いずれも内部ではsymlink解決済みのcanonical absolute pathとして登録される。以下では`SUNABA`にbuild済みbinaryの絶対pathを設定する。
+credentialを削除する場合は、先に該当Projectの作業をexportまたは破棄し、Supervisorを終了してください。起動済みのSupervisorは終了までcredentialをmemoryに保持している可能性があります。
 
 ```sh
-SUNABA=/absolute/path/to/sunaba
-PROJECT=/path/to/project
-(
-  cd "$PROJECT"
-  "$SUNABA" project init
-  "$SUNABA" up
-  "$SUNABA" agent
-)
+sunaba credentials openai oauth delete
+sunaba credentials openai api-key delete
 ```
 
-`project init`はhost-onlyなProject設定と、そこからcompileした実効policyを作る。`up`はhost worktreeの安全なSnapshotからnetworkなしのVMを準備し、検証後にpauseして返す。`agent`は同じVMをresumeし、VM内rootかつOpenCode tool確認を全許可したOpenCode serverへ、隔離済みhost TUIを接続する。TUIを終了するとGatewayをinactiveにしてVMを再びpauseする。期限内の次回`agent`は同じVMと編集状態を再利用する。root権限はVM内に限定され、host Project、直接network、Gateway quota、Git pushとChange Set適用のHost承認は迂回できない。
+## Projectを登録する
 
-Projectごとの起動設定はProject folder内ではなく、`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/project.json`に置かれる。実際のpathは次で確認できる。
+対象Projectのdirectoryで実行すると、pathを省略できます。OAuthを使う場合は次のとおりです。
 
 ```sh
-bin/sunaba config path --dir "$PROJECT"
-bin/sunaba config show --dir "$PROJECT"
-bin/sunaba config show --effective --dir "$PROJECT"
+cd /path/to/project
+sunaba project init
 ```
 
-`project.json`ではmode、CPU/memory/disk/process上限、session TTL/idle、Model allowlist/quota、Git remote、Webの組み込みorigin presetとquota、export上限、audit retentionを管理する。dependency digest、credential、capability、preset内容/digest、blocklist digest、push承認必須、Protected Pathはsunabaが生成するため記述できない。設定directoryはmode `0700`、fileはmode `0600`であり、VMにはmount/copyされない。
-
-通常はhost上の対話ウィザードで設定できる。現在値を既定として、secure/dev、Model認証と許可model、Git Gateway remote、Web Gatewayの組み込みpresetとProject固有origin、必要に応じてresourceとquotaを順に質問する。Git Gatewayを有効にすると、安全に検証できたProjectのlocal Git remoteを候補表示し、`y`で選択できる。候補がない場合や別remoteを使う場合は、固定remote名とcredentialを含まないHTTPS `.git` URLを入力する。候補は自動登録しない。dev modeまたはWeb Gatewayを選ぶと、その時点で保証範囲の警告を表示する。最終確認で`y`を入力するまでは設定fileも実効policyも変更しない。
+API keyを使うProjectは初期化時に明示します。
 
 ```sh
-bin/sunaba config edit --dir "$PROJECT"
+sunaba project init --model-auth api-key
 ```
 
-`config edit`は設定を保存して同じ操作内で適用するため、active/paused VMまたはpending Change Setがある場合は開始を拒否する。先に変更をexportして`recreate`するか、pending Change Setを処理する。credentialはウィザードへ入力せず、`credentials` commandでKeychainへ別途登録する。
-
-編集後は次の順序で明示適用する。未適用または不正な設定がある間、`up`、`agent`、`shell`は起動を拒否する。`status`と停止・export・recreate・destroyは復旧のため引き続き使用できる。active/paused VMまたはpending Change Setがある場合は、先に`changes export`または`recreate`を行う。
+別directoryからは相対pathまたは絶対pathを1つ指定できます。sunabaはsymlinkを解決したcanonical absolute pathを登録し、同じProjectの重複登録を拒否します。
 
 ```sh
-chmod 600 /path/shown/by/config/path/project.json
-bin/sunaba config validate --dir "$PROJECT"
-bin/sunaba config diff --dir "$PROJECT"
-bin/sunaba config apply --dir "$PROJECT"
+sunaba project init /path/to/project
+sunaba project list
 ```
 
-新規ProjectはOAuthを既定とし、その認証別catalogの全モデルをallowlistへ入れ、先頭の推奨モデルをOpenCodeの既定modelにする。API keyを使う場合だけ初期化時に`--model-auth api-key`を指定する。既存Projectはactive sessionを終了した後に切り替えられる。認証方式を変えたとき、現在のmodel allowlistが移行先で使えなければ同じ認証別既定allowlistへ置き換わる。既存Projectで明示済みの有効なallowlistは自動拡張しない。
+登録後の通常手順は[「初めてのプロジェクト」ワークフロー](./workflows.md#初めてのプロジェクト)を参照してください。
 
-```sh
-bin/sunaba project init . --model-auth api-key
-# 既存Projectを切り替える場合
-bin/sunaba model auth oauth --dir "$PROJECT"
-```
+## Project設定
 
-OpenCodeにはcustom `sunaba` providerが設定される。API keyとOAuthではcontext/input/output上限が別定義であり、subscriptionの小さいinput上限に合わせてOpenCodeのcompactionが開始される。model discoveryは行わず、Project policyと認証別の固定catalogにないmodelはセッション開始前に拒否される。
-
-現在の認証方式で利用可能なmodelと上限を確認し、Projectで許可するmodelを設定できる。`model set`の先頭を既定modelとしてOpenCodeへ渡す。
-
-```sh
-bin/sunaba model list --dir "$PROJECT"
-bin/sunaba model set --model gpt-5.5 --model gpt-5.6-sol --dir "$PROJECT"
-```
-
-host ProjectはVMへbind mountされない。VM内の編集は、この時点ではhost worktreeに反映されない。
-
-## 5. bounded shellを使う
-
-```sh
-bin/sunaba shell --dir "$PROJECT"
-```
-
-1行ごとにcommandを入力し、Ctrl-Dで終了する。各commandは16 KiB、2分、出力1 MiBの上限を持ち、結果はterminal sanitizerを通る。interactive TTY program、raw `container exec`、未検証PTYの代替ではない。
-
-## 6. 変更をhostへ反映する
-
-まずVMをfreeze/exportして、host側で検証済みChange Setを作る。
-
-```sh
-bin/sunaba changes export --dir "$PROJECT"
-```
-
-表示されたadd/modify/delete/renameとChange Set digestを確認する。exportはVMを破棄するが、変更がある場合はsunaba stateのpending領域へ保持する。`.git/`、path traversal、unsafe symlink/hardlink、special file、上限超過はhost worktreeへ到達する前に拒否される。
-
-問題がなければ適用する。
-
-```sh
-bin/sunaba changes apply --dir "$PROJECT"
-```
-
-Trusted Approval UIがProjectとdigest、host生成nonceを表示する。同じnonceを手入力した場合だけ、baseline競合を再検証してtransactional applyする。export後にhost worktreeが変わっていれば自動mergeせず拒否する。
-
-## 7. 複数のGit remoteを使う
-
-Agent Sessionが存在しない状態で、credentialを含まない固定HTTPS `.git` URLを名前付きで登録する。remote名は小文字英字で始まり、小文字英数字または`-`を使う。
-
-```sh
-bin/sunaba git remote add --name origin \
-  --url https://git.example/team/project.git --dir "$PROJECT"
-bin/sunaba git remote add --name upstream \
-  --url https://git.example/upstream/project.git --dir "$PROJECT"
-bin/sunaba git remote list --dir "$PROJECT"
-```
-
-session開始時に、sunabaはremoteごとにhostの非対話Git credential helperを使う。事前にhost側の通常のGit操作で各URLのcredentialが取得できる状態にしておく。tokenやpasswordをURLへ埋め込まない。
-
-VM内では通常のGit commandを使う。既定workspaceのGit historyはhost Snapshotから作るsynthetic baselineなので、外部repositoryとhistoryが一致しない場合がある。履歴が必要な作業は、固定Gateway URLを取得してVMの隔離領域へcloneする。既定のsynthetic repository用`GIT_DIR`/`GIT_WORK_TREE`はclone先で明示的に外す。
-
-```sh
-git fetch origin
-REMOTE_URL=$(git remote get-url origin)
-env -u GIT_DIR -u GIT_WORK_TREE git clone "$REMOTE_URL" /var/lib/sunaba/overlay/origin-clone
-env -u GIT_DIR -u GIT_WORK_TREE git -C /var/lib/sunaba/overlay/origin-clone pull --ff-only origin main
-env -u GIT_DIR -u GIT_WORK_TREE git -C /var/lib/sunaba/overlay/origin-clone push origin HEAD:refs/heads/main
-```
-
-clone/fetch/pullは固定remoteに対して承認なしで使える。各remoteは別の固定送信先、host bare quarantine、短命capability token、push approval bindingを持つ。一方のremoteのtokenで他方へアクセスすることはできない。
-
-pushの初回は`approval pending`として拒否される。別のhost terminalで次を実行し、remote、送信先、ref、old/new object ID、force/delete、nonceを確認して承認する。
-
-```sh
-bin/sunaba approvals --dir "$PROJECT"
-```
-
-その後、VMで内容が変わっていない同じpushを期限内に再実行する。承認はone-shotであり、object/ref/remoteが変わると再承認が必要になる。
-
-remoteを削除、または全Git Gatewayを無効化する場合も、先にVMをexportまたは破棄する。
-
-```sh
-bin/sunaba git remote remove --name upstream --dir "$PROJECT"
-bin/sunaba git disable --dir "$PROJECT"
-```
-
-Git LFS endpointとSSH transportは対象外である。submoduleは親remoteのcredentialを継承しないため、必要なrepositoryを別remoteとして明示登録する。
-
-## 8. Web Gatewayを使う
-
-secure modeの一般Web通信は既定で拒否される。新規Projectの`project.json`は、依存導入でよく使う190件のoriginを収録した組み込み`common-development` presetを選択済みにするが、`web.enabled`は`false`なので通信は開始されない。Web Gatewayを有効にするとpresetが展開される。該当部分は次の形になる（他の必須fieldは省略）。
-
-```json
-{
-  "web": {
-    "enabled": true,
-    "origin_presets": ["common-development"],
-    "origins_file": "web-origins.txt"
-  }
-}
-```
-
-`web-origins.txt`はProject固有の追加分だけを保持する。
+Project設定は作業ツリー内ではなく、ホスト専用の次のdirectoryへ保存されます。
 
 ```text
-# exact HTTPS origin
+${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/
+```
+
+実際のpathと現在の設定はCLIで確認できます。
+
+```sh
+sunaba config path --dir /path/to/project
+sunaba config show --dir /path/to/project
+sunaba config show --effective --dir /path/to/project
+```
+
+通常は対話ウィザードを使います。mode、Model、Git remote、Web access、resource、quotaを設定し、最終確認後に保存と適用を同時に行います。credentialはこのウィザードへ入力しません。
+
+```sh
+sunaba config edit --dir /path/to/project
+```
+
+直接編集する場合は、`config path`が表示した`project.json`と`web-origins.txt`だけを編集します。保存後は検証、差分確認、適用を順番に実行します。
+
+```sh
+sunaba config validate --dir /path/to/project
+sunaba config diff --dir /path/to/project
+sunaba config apply --dir /path/to/project
+```
+
+設定変更は、activeまたはpaused VMとpending Change Setがないときだけ適用できます。先に`changes export`、`changes apply`、`recreate --discard-pending`などで現在の状態を処理してください。未適用または不正な設定がある間、`up`、`agent`、`shell`はfail closedで拒否されます。
+
+`project.json`には利用者が選ぶmode、resource、session、Model、Git、Web、export、auditの設定だけを記述します。dependency digest、credential、capability、push承認方針、Protected Pathなど、sunabaが強制する値は変更できません。内部の実効policyは手作業で編集しないでください。
+
+## Modelを選ぶ
+
+現在の認証方式で利用できるmodelを確認できます。
+
+```sh
+sunaba model list --dir /path/to/project
+```
+
+Projectで許可するmodelは`--model`を複数指定して設定します。最初のmodelがOpenCodeの既定になります。
+
+```sh
+sunaba model set \
+  --model gpt-5.5 \
+  --model gpt-5.6-sol \
+  --dir /path/to/project
+```
+
+既存Projectの認証方式を変更するには、VMとpending Change Setを処理したあとで次を実行します。
+
+```sh
+sunaba model auth oauth --dir /path/to/project
+sunaba model auth api-key --dir /path/to/project
+```
+
+sunabaは認証方式ごとの固定catalogを使用し、OpenAIのmodel discovery APIへ依存しません。catalogにないmodelや、選択した認証方式で利用できないmodelが含まれるとsessionを開始しません。
+
+## secure modeとdev mode
+
+### secure mode
+
+secure modeは既定です。VMからの直接Internet、外部DNS、ホスト一般service、LAN、他のVMへの接続を拒否し、Project専用経路上の有効なGatewayだけを利用します。分離を構成・検証できなければsession開始に失敗し、dev modeへ自動的に切り替わりません。
+
+Model Gatewayは常に必要です。Git GatewayとWeb Gatewayは、Projectで設定した場合だけ有効になります。
+
+### dev mode
+
+dev modeは、foregroundの`agent`または`shell`が動いている間だけpublic Internetへの直接接続を許可します。この間の情報流出防止は保証しません。
+
+host、LAN、private/link-local/metadata、他VM、unsolicited inbound、host credential、host worktreeとの境界は維持します。session終了時はegressをdeny-allへ切り替えてからVMをexport・破棄します。同時にactiveにできるdev sessionは1つです。
+
+dev modeのpf操作は、[ホスト操作の許可範囲](./plan/allowed-host-operations.md)に記載された`sunaba firewall`操作だけに限定されます。一般的なpf変更や`pfctl -d`は使用しないでください。
+
+## Agentとshell
+
+OpenCodeを使うには`agent`を実行します。
+
+```sh
+sunaba up --dir /path/to/project
+sunaba agent --dir /path/to/project
+```
+
+secure modeの`up`はVMを作成・検証してpaused状態にします。`agent`はVM内のOpenCode serverと、ホスト上の隔離されたOpenCode TUIを同時に管理します。TUIを終了するとGatewayを失効させ、VMをpauseします。session期限内であれば、次の`agent`で同じVMと編集状態を再利用できます。
+
+単発のcommandを確認したい場合は、sanitized shellを使います。
+
+```sh
+sunaba shell --dir /path/to/project
+```
+
+shellは1行ずつcommandを受け付け、Ctrl-Dで終了します。command、時間、出力量には上限があり、出力はhost terminal sanitizerを通ります。interactive TTY、raw `container exec`、未検証PTYの代替ではありません。
+
+## 変更をホストへ反映する
+
+VM内の変更は自動ではホストへ反映されません。まずChange Setとしてexportします。
+
+```sh
+sunaba changes export --dir /path/to/project
+```
+
+exportはVMをfreeze・破棄し、追加、変更、削除、renameをホスト側で再構成します。unsafeなpath、symlink、hardlink、special file、`.git/`、sunaba管理領域、上限超過はホスト作業ツリーへ到達する前に拒否されます。
+
+表示されたpathとdigestを確認し、問題がなければ適用します。
+
+```sh
+sunaba changes apply --dir /path/to/project
+```
+
+Trusted Approval UIに表示されたhost生成nonceを手入力した場合だけ適用されます。Snapshot作成後にホスト作業ツリーが変わっている場合は自動mergeせず拒否します。競合時はホスト側の変更を整理し、新しいSnapshotからやり直してください。
+
+apply後はホスト上で通常どおりdiff、test、code reviewを行い、必要ならcommitします。VM内の`.git/`はホストへ反映されません。
+
+## Git Gateway
+
+Git Gatewayを使う場合は、VMとpending Change Setがない状態で、credentialを含まない固定HTTPS `.git` URLを登録します。SSH transportとGit LFS endpointは対象外です。
+
+```sh
+sunaba git remote add \
+  --name origin \
+  --url https://git.example/team/project.git \
+  --dir /path/to/project
+sunaba git remote list --dir /path/to/project
+```
+
+hostのGit credential helperが、このURLのcredentialを非対話で取得できるようにしておいてください。tokenやpasswordをURLへ埋め込まないでください。
+
+VM内では通常の`git fetch`、`git pull`、`git push`を使えます。clone、fetch、pullは固定remoteとquotaの範囲で承認なしに利用できます。pushの初回はpending approvalを作って拒否されます。別のhost terminalで次を実行し、remote、ref、old/new object ID、force/delete、nonceを確認してください。
+
+```sh
+sunaba approvals --dir /path/to/project
+```
+
+承認後、VM内で内容が変わっていない同じpushを期限内に再実行します。承認はone-shotで、remote、object、ref、force/deleteのいずれかが変わると再承認が必要です。
+
+VMの既定workspaceはhost Snapshotから作るsynthetic Git repositoryです。外部repositoryのhistoryが必要な作業は、登録済みGateway remoteからVM内の別directoryへcloneしてください。詳細な手順は[「外部Git履歴を使う」ワークフロー](./workflows.md#外部git履歴を使う)を参照してください。
+
+```sh
+sunaba git remote remove --name origin --dir /path/to/project
+sunaba git disable --dir /path/to/project
+```
+
+## Web Gateway
+
+secure modeの一般Web通信は既定で無効です。よく使う開発用originをまとめた組み込みpreset `common-development`は新規Projectで選択済みですが、Web Gatewayを有効にするまで通信は開始されません。
+
+presetとProject固有originを使う場合:
+
+```sh
+sunaba web enable \
+  --origin https://docs.example \
+  --dir /path/to/project
+```
+
+presetを使わず、Project固有originだけを許可する場合:
+
+```sh
+sunaba web enable \
+  --default-origins=false \
+  --origin https://packages.example \
+  --dir /path/to/project
+```
+
+`web enable`と`web refresh`は固定blocklistをhostで取得し、digestと期限に束縛したsnapshotを保存します。期限切れや検証失敗時は通信を拒否します。
+
+Project固有originは、`config path`が示す`web-origins.txt`でも管理できます。各行には`http://host`または`https://host`と、必要な場合だけ`include-subdomains`を記述します。path、query、userinfo、非標準port、IP literalは使用できません。
+
+```text
 https://docs.example
-
-# 明示した場合だけsubdomainを含める
 https://packages.example include-subdomains
-http://archive.example
 ```
 
-`project.json`の`web.enabled`を`true`にし、両fileをmode `0600`にしたうえで`config validate`、`config diff`、`config apply`を実行する。presetを使わない場合は`origin_presets`を空配列にする。各行はHTTP(S) originだけを許可し、path、query、userinfo、非標準port、IP literal、未知option、重複ruleが1件でもあればfile全体を拒否する。上限は64 KiB、preset展開後を含め1024 ruleである。
+HTTPは許可したoriginへのGET/HEADだけを許可します。HTTPSは443へのTLS非終端CONNECTです。sunabaは接続先origin、解決後IP、時間、byte量を制限しますが、暗号化されたtunnel内部のmethod、path、upload、side effectは識別できません。
 
-既存のCLIでも同じhost設定と実効policyを同期して更新できる。
+`common-development`にはpackage registry、CDN、public object storageなどのmulti-tenant originも含まれます。安全なcontentやread-only通信を意味しません。機密Projectではpresetを無効にし、必要最小限のoriginだけを設定してください。
 
 ```sh
-bin/sunaba web enable --origin https://docs.example \
-  --origin https://packages.example --dir "$PROJECT"
-# presetを使わずProject固有originだけにする場合
-bin/sunaba web enable --default-origins=false \
-  --origin https://packages.example --dir "$PROJECT"
-bin/sunaba web refresh --dir "$PROJECT"
+sunaba web refresh --dir /path/to/project
+sunaba web disable --dir /path/to/project
 ```
 
-`web enable`は既定で`common-development`を利用し、`--origin`を追加分として扱う。引数なしの`web enable`はpresetだけを有効にする。`config apply`時にpreset展開結果とdigestを実効policyへ固定するため、sunaba更新でpreset内容が変わっても既存Projectへ黙って反映されず、`config diff`と再適用が必要になる。旧Projectのoriginはmigration時にProject固有ruleとして保持され、自動的にpresetへ拡張されない。
+## Projectの指定方法
 
-`enable`と`refresh`はhostで固定blocklist sourceを取得し、digestと期限へ束縛したsnapshotを保存する。`config apply`もWebの新規有効化時または有効なsnapshotがない場合だけ取得する。期限切れや取得・検証失敗時はfail closedとなる。設定変更はactive/paused VMがある間は拒否される。
+Projectを対象にするcommandは、通常次のいずれかで対象を選びます。
 
-HTTPはallowlist originへのGET/HEADだけを許し、body/uploadを拒否する。HTTPSは443へのTLS非終端CONNECTなので、送信先origin、解決後IP、時間、byte量は制限するが、暗号化されたtunnel内部のmethod、path、upload内容は識別・保証しない。
+- `--dir /path/to/project`
+- `--project-id 0123456789ab`
+- どちらも省略し、current directoryを使用
 
-`common-development`にはpackage registry、CDN、public object storageなど第三者がcontentを公開できるoriginも含まれる。依存導入の互換性を目的とした広い許可集合であり、安全なcontentやread-only通信を意味しない。機密Projectではpresetを無効にし、必要最小限のProject固有originだけを使う。
+`--dir`と`--project-id`は同時に指定できません。Project IDは`project list`が表示した12桁の小文字16進IDを完全一致で指定します。prefixやaliasは使用できません。
+
+通常のID指定は、登録済みProject rootが存在し、policyのidentityと一致する場合だけ成功します。元のProject directoryやpolicyを失った隔離stateには、復旧用の`down`と`destroy`だけがID指定を受け付けます。
+
+## 状態確認とライフサイクル
+
+| コマンド | 用途 |
+|---|---|
+| `sunaba project list` | 登録済みProjectを一覧表示する |
+| `sunaba project list --active` | 到達可能なSupervisorまたはrunning VMがあるProjectだけを表示する |
+| `sunaba status` | mode、VM、session、quota、Gateway、pending Change Setを確認する |
+| `sunaba up` | secure VMを準備してpauseする。devではforeground session用artifactだけを準備する |
+| `sunaba agent` | OpenCode sessionを開始する |
+| `sunaba shell` | sanitized shellを開始する |
+| `sunaba down` | secure VMを停止し、隔離された状態を保持する |
+| `sunaba recreate` | 現在のVMを処理し、次回をclean Snapshotから開始する |
+| `sunaba destroy` | sunabaのProject stateとhost-only設定を削除する |
+
+`destroy`はhostのProject fileを削除しません。pendingまたは未exportの変更を破棄する場合は、明示的な確認が必要です。
 
 ```sh
-bin/sunaba web disable --dir "$PROJECT"
+sunaba destroy \
+  --dir /path/to/project \
+  --yes \
+  --discard-pending
 ```
 
-## 9. dev mode
-
-直接Internet egressが不可欠な場合だけ明示的に選ぶ。
+元のProject directoryが存在しない場合は、一覧に表示された完全なIDを使用します。
 
 ```sh
-bin/sunaba up --dir "$PROJECT" --mode dev
-bin/sunaba agent --dir "$PROJECT"
+sunaba project list
+sunaba destroy \
+  --project-id 0123456789ab \
+  --yes \
+  --discard-pending
 ```
 
-dev modeはactiveなforeground `agent`または`shell`の間だけ専用networkとpf規則を作る。host、LAN/private/link-local/metadata、他VM、unsolicited inbound、host credential、host worktreeの境界は維持するが、public Internetへの情報流出防止は保証しない。終了時はegressをdeny-allへしてからVMをexport/destroyする。
+## 保存場所
 
-pf操作には、[`plan/allowed-host-operations.md`](./plan/allowed-host-operations.md)に記載された固定の`sudo bin/sunaba firewall ...`だけを用いる。一般的なpf変更や`pfctl -d`は行わない。
+既定の保存場所は次のとおりです。
 
-## 10. 状態確認、停止、再生成、破棄
+- 利用者が編集する設定: `${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/`
+- sunaba内部state: `${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`
+- OpenAI credential: macOS login Keychainの固定item
+- 作業対象のsource: 登録したhost Project directory
 
-Projectを対象にする公開commandでは`--dir "$PROJECT"`の代わりに、`project list`が表示する完全な12桁のIDを`--project-id`へ指定できる。通常操作のID指定は、保存されたProject rootが現存しpolicyとのidentityが一致するときだけ成功する。元のProject folderやpolicyを失ったstateは`down`と`destroy`だけがIDで扱える。`--dir`と`--project-id`は同時指定できず、どちらも省略した場合はcurrent directoryが対象になる。
+内部stateには実効policy、audit、lease、managed OpenCode、pending Change Setなどが含まれます。内部stateを手作業で編集・削除せず、`config`、`changes`、`recreate`、`destroy`を使用してください。
 
-```sh
-bin/sunaba project list
-bin/sunaba project list --active
-bin/sunaba status --dir "$PROJECT"
-bin/sunaba status --project-id 0123456789ab
-bin/sunaba down --dir "$PROJECT"
-bin/sunaba recreate --dir "$PROJECT"
-bin/sunaba destroy --dir "$PROJECT" --yes --discard-pending
-# 元のProject folderが存在しない場合
-bin/sunaba destroy --project-id 0123456789ab --yes --discard-pending
-```
+## トラブルシューティング
 
-- `project list`: 登録済みProjectとSupervisor、VM、pending Change Setの状態を一覧表示する。`--active`は到達可能なSupervisorまたはrunning状態のsunaba所有VMがあるProjectだけを表示する。pause中のVMでもSupervisorが起動中なら表示対象になる。自動修復や停止は行わず、機械処理には`--json`を使用できる
-- `status`: mode、VM状態、期限、resource、quota、Git/Web policy、pending Change Setを表示する
-- `down`: secure VMをpauseし、隔離されたupperを保持する
-- `recreate`: VMがあれば原則exportし、次回をclean host Snapshotから開始する。pending Change Setはapplyまたは明示破棄が必要
-- `destroy`: sunabaのProject state、host-only Project設定、所有確認済みVMを削除する。host Project自体は削除しない。`--project-id`には`project list`が表示した12桁の小文字16進IDを完全一致で指定でき、元のProject folderが存在しない`unknown`状態も回収できる。`--dir`と`--project-id`は同時指定できない。未export/pending変更の破棄には`--discard-pending`が必要
-
-既定の利用者設定は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/`、内部stateは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`に置かれる。利用者設定は`config` commandで検証・適用し、内部stateを手作業で編集・削除しない。
-
-## 11. 障害時
-
-まず次を確認する。
+まず次を確認します。
 
 ```sh
 container system version
-bin/sunaba credentials openai api-key status
-# OAuth Projectの場合
-bin/sunaba credentials openai oauth status
-bin/sunaba status --dir "$PROJECT"
+sunaba project list
+sunaba status --dir /path/to/project
+sunaba credentials openai oauth status
+# API keyを使うProjectの場合
+sunaba credentials openai api-key status
 ```
 
-- `credential is unavailable`: Projectの認証方式に対応する`api-key set`または`oauth login`を再実行する
-- `credential helper`: host Git credential helperが該当する固定HTTPS URLを非対話で解決できるか確認する
-- `cannot change ... active`: `changes export`または明示的な破棄を完了してからpolicyを変更する
-- `capability expired`: `changes export`で成果物を保存するか、`recreate`でclean sessionへ移る
-- baseline競合: host側変更を退避・確定してから、新しいSnapshotでやり直す。自動mergeは行われない
-- Apple Container clientが停止・削除中にhangした: 対象外resourceを広く削除しない。許可された復旧手順は[`plan/allowed-host-operations.md`](./plan/allowed-host-operations.md)の「Apple Container serviceの限定復旧」を使う
+よくある状態と対応:
 
-sunabaのcleanupは完全なresource名とowner/project/session label、leaseを再検証する。単に`sunaba-` prefixがあるという理由だけでcontainer、network、volume、imageを削除しない。
+- `credential is unavailable`: Projectの認証方式に合わせて`oauth login`または`api-key set`をやり直す
+- `credential helper`: hostのGit credential helperが登録済みHTTPS URLを非対話で解決できるか確認する
+- `cannot change ... active`: 先に`changes export`または`recreate`でVMを処理する
+- pending Change Setがある: `changes apply`で反映するか、破棄を明示して`recreate`または`destroy`する
+- `capability expired`: `changes export`で成果物を保存するか、`recreate`でclean環境へ移る
+- baseline競合: host側の変更を整理し、新しいSnapshotから作業をやり直す
+- OpenCode versionまたはdigest不一致: `1.18.16`の固定artifactを再取得する
+- Web blocklist期限切れ: VMがない状態で`web refresh`を実行する
 
-## 12. 検証
+Apple Container clientが停止・削除中に応答しなくなった場合、任意のcontainerやserviceを広く停止・削除しないでください。[ホスト操作の許可範囲](./plan/allowed-host-operations.md)にある限定復旧手順を確認し、個別承認が必要な操作は実行前に承認を得てください。
 
-host設定やcontainerを変更しない通常gate:
+## 保証しないこと
 
-```sh
-scripts/verify.sh
-```
+- dev modeのactive session中におけるpublic Internetへの情報流出防止
+- Web GatewayのHTTPS tunnel内部にあるmethod、path、upload、side effectの識別
+- 許可したLLM、Web origin、Git upstream、dependency、生成物自体の安全性
+- Apple Container、macOS、guest kernel、OpenCode、Gatewayなどの未知の脆弱性によるVM escape
+- Change Set適用後にhost toolで成果物を実行したときのsupply-chain risk
 
-実Apple Container gateは明示的に有効化する。
-
-```sh
-SUNABA_INTEGRATION=1 scripts/verify.sh
-```
-
-dev network gateはdocumented sudo/pf操作を伴う。
-
-```sh
-SUNABA_INTEGRATION=1 SUNABA_DEV_INTEGRATION=1 scripts/verify.sh
-```
-
-実OpenAI gateはKeychainのAPI keyを使い、Agent VMからHost Model Gatewayを経由して少なくとも1回の従量課金requestを送る。費用と外部送信を理解した場合だけ実行する。
-
-```sh
-SUNABA_INTEGRATION=1 SUNABA_LIVE_OPENAI=1 scripts/verify.sh
-```
-
-通常gateは実credentialを使わず、同じResponses streaming/tool/error/cancel contractをmock upstreamで検証する。
-
-## 13. 保証しないこと
-
-- dev active session中のpublic Internetへの情報流出防止
-- TLS非終端Web CONNECT内部のmethod、path、upload識別
-- 許可したorigin、Git upstream、dependency、LLM生成成果物自体の安全性
-- VM escape、Apple Container、guest kernel、OpenCode、Gateway/relay/parserの未知の脆弱性
-- Git upstream push成功後にlocal ref更新だけが失敗する分散transaction窓の完全排除
-
-secure modeでもLLMへ送るsourceやpromptはOpenAIへ送信される。適用した成果物をhost toolで実行する前には、通常のcode reviewとsupply-chain確認が必要である。
+secure modeでも、LLMへ送ったsourceやpromptは選択したOpenAI endpointへ送信されます。Change Setを適用したあとは、通常のcode review、test、dependency確認を行ってください。
