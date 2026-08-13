@@ -1,54 +1,61 @@
 package opencode
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
-var semanticVersionPattern = regexp.MustCompile(`(?:^|[^0-9])v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[^0-9]|$)`)
+var (
+	coreVersionPattern  = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?$`)
+	exactVersionPattern = regexp.MustCompile(`(?:^|[ \t(:])(v?(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?)(?:$|[ \t),])`)
+)
 
-func CompareVersion(a, b string) int {
-	ap := splitVersion(a)
-	bp := splitVersion(b)
-	n := len(ap)
-	if len(bp) > n {
-		n = len(bp)
+func compareVersion(left, right string) (int, error) {
+	leftParts, err := parseCoreVersion(left)
+	if err != nil {
+		return 0, err
 	}
-	for i := 0; i < n; i++ {
-		var av, bv int
-		if i < len(ap) {
-			av = ap[i]
+	rightParts, err := parseCoreVersion(right)
+	if err != nil {
+		return 0, err
+	}
+	for index := range leftParts {
+		if leftParts[index] < rightParts[index] {
+			return -1, nil
 		}
-		if i < len(bp) {
-			bv = bp[i]
-		}
-		if av < bv {
-			return -1
-		}
-		if av > bv {
-			return 1
+		if leftParts[index] > rightParts[index] {
+			return 1, nil
 		}
 	}
-	return 0
+	return 0, nil
 }
 
-func splitVersion(v string) []int {
-	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	v = strings.Split(v, "-")[0]
-	parts := strings.Split(v, ".")
-	out := make([]int, 0, len(parts))
-	for _, p := range parts {
-		n, _ := strconv.Atoi(p)
-		out = append(out, n)
+func parseCoreVersion(value string) ([3]uint64, error) {
+	match := coreVersionPattern.FindStringSubmatch(strings.TrimSpace(value))
+	if len(match) != 4 {
+		return [3]uint64{}, fmt.Errorf("invalid core version %q", value)
 	}
-	return out
+	var result [3]uint64
+	for index := range result {
+		part := match[index+1]
+		if part == "" {
+			continue
+		}
+		parsed, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return [3]uint64{}, fmt.Errorf("invalid core version %q", value)
+		}
+		result[index] = parsed
+	}
+	return result, nil
 }
 
-func firstSemanticVersion(s string) string {
-	m := semanticVersionPattern.FindStringSubmatch(s)
-	if len(m) < 2 {
+func firstExactVersionToken(output string) string {
+	match := exactVersionPattern.FindStringSubmatch(output)
+	if len(match) != 2 {
 		return ""
 	}
-	return m[1]
+	return strings.TrimPrefix(match[1], "v")
 }

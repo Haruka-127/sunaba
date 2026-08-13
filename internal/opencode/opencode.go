@@ -62,7 +62,11 @@ func CheckPrerequisitesFor(ctx context.Context, manifest dependency.Manifest) er
 	if macErr != nil {
 		return fmt.Errorf("cannot determine macOS version: %w", macErr)
 	}
-	if CompareVersion(macVersion, "26.0.0") < 0 {
+	comparison, versionErr := compareVersion(macVersion, "26.0.0")
+	if versionErr != nil {
+		return fmt.Errorf("cannot parse macOS version %q", macVersion)
+	}
+	if comparison < 0 {
 		return fmt.Errorf("sunaba requires macOS 26 or later; current version is %s", macVersion)
 	}
 	if hostErr != nil {
@@ -88,11 +92,11 @@ func validateAppleContainerVersion(output string) error {
 }
 
 func validateAppleContainerVersionFor(output, expected string) error {
-	containerVersion := firstSemanticVersion(output)
+	containerVersion := firstExactVersionToken(output)
 	if containerVersion == "" {
 		return fmt.Errorf("cannot parse apple/container version from %q", output)
 	}
-	if CompareVersion(containerVersion, expected) != 0 {
+	if containerVersion != expected {
 		return fmt.Errorf("sunaba requires exact apple/container %s; current version is %s", expected, containerVersion)
 	}
 	return nil
