@@ -399,25 +399,24 @@ func (w *wizard) advanced(config *projectconfig.Config) error {
 	}
 	config.Model.MaxRequestBytes, config.Model.MaxResponseBytes = requestMiB<<20, responseMiB<<20
 	if config.Web.Enabled {
-		if config.Web.MaxRequests, err = w.integer("Web request limit", config.Web.MaxRequests, 1, int(^uint(0)>>1)); err != nil {
+		if config.Web.MaxRequests, err = w.integer("Web request limit", config.Web.MaxRequests, 1, webgateway.MaximumMaxRequests); err != nil {
 			return err
 		}
-		if config.Web.MaxConcurrent, err = w.integer("Concurrent Web connection limit", config.Web.MaxConcurrent, 1, int(^uint(0)>>1)); err != nil {
+		if config.Web.MaxConcurrent, err = w.integer("Concurrent Web connection limit", config.Web.MaxConcurrent, 1, webgateway.MaximumMaxConcurrent); err != nil {
 			return err
 		}
-		if config.Web.MaxConnectSeconds, err = w.int64("Web connection time limit (seconds)", config.Web.MaxConnectSeconds, 1, 600); err != nil {
+		if config.Web.MaxConnectSeconds, err = w.int64("Web connection time limit (seconds)", config.Web.MaxConnectSeconds, 1, int64(webgateway.MaximumMaxConnectTime/time.Second)); err != nil {
 			return err
 		}
-		maximumMiB := int64((1 << 62) >> 20)
-		uploadMiB, err := w.int64("Web upload limit (MiB)", config.Web.MaxUploadBytes>>20, 1, maximumMiB)
+		uploadMiB, err := w.int64("Web upload limit (MiB)", config.Web.MaxUploadBytes>>20, 1, webgateway.MaximumMaxUploadBytes>>20)
 		if err != nil {
 			return err
 		}
-		downloadMiB, err := w.int64("Web download limit (MiB)", config.Web.MaxDownloadBytes>>20, 1, maximumMiB)
+		downloadMiB, err := w.int64("Web download limit (MiB)", config.Web.MaxDownloadBytes>>20, 1, webgateway.MaximumMaxDownloadBytes>>20)
 		if err != nil {
 			return err
 		}
-		totalMiB, err := w.int64("Web session total limit (MiB)", config.Web.MaxTotalBytes>>20, 1, maximumMiB)
+		totalMiB, err := w.int64("Web session total limit (MiB)", config.Web.MaxTotalBytes>>20, 1, webgateway.MaximumMaxTotalBytes>>20)
 		if err != nil {
 			return err
 		}

@@ -132,6 +132,18 @@ func TestAdvancedWizardEditsBoundedResources(t *testing.T) {
 	}
 }
 
+func TestAdvancedWizardRejectsWebQuotaAboveGatewayMaximum(t *testing.T) {
+	config, _ := testConfig(t)
+	config.Web.Enabled = true
+	input := strings.Repeat("\n", 12) + "33\n"
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Buffer(make([]byte, 256), maximumInputLine)
+	w := &wizard{scanner: scanner, output: &bytes.Buffer{}}
+	if err := w.advanced(&config); err == nil {
+		t.Fatal("oversized Web concurrency was accepted")
+	}
+}
+
 func TestWizardRejectsOversizedAndTerminalControlInput(t *testing.T) {
 	config, rules := testConfig(t)
 	oversized := strings.Repeat("a", maximumInputLine+1) + "\n"

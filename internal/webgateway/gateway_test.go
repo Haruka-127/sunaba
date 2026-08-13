@@ -230,6 +230,45 @@ func TestCapabilityExpiryRevocationAuthenticationAndQuota(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsCapabilityLimitsOutsideProductBounds(t *testing.T) {
+	policy := Policy{Rules: []OriginRule{{Host: "allowed.example", Port: 80, Category: "general", AllowHTTP: true}}}
+	digest, err := policy.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := NewCapability(strings.Repeat("t", 32), "project", "vm", "session", digest, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]func(*Capability){
+		"requests":     func(capability *Capability) { capability.MaxRequests = MaximumMaxRequests + 1 },
+		"concurrent":   func(capability *Capability) { capability.MaxConcurrent = MaximumMaxConcurrent + 1 },
+		"connect time": func(capability *Capability) { capability.MaxConnectTime = MaximumMaxConnectTime + time.Second },
+		"upload":       func(capability *Capability) { capability.MaxUploadBytes = MaximumMaxUploadBytes + 1 },
+		"download":     func(capability *Capability) { capability.MaxDownloadBytes = MaximumMaxDownloadBytes + 1 },
+		"total":        func(capability *Capability) { capability.MaxTotalBytes = MaximumMaxTotalBytes + 1 },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			capability := base
+			mutate(&capability)
+			if _, err := New(Config{Policy: policy, Capability: capability, Audit: func(AuditEvent) error { return nil }}); err == nil {
+				t.Fatal("oversized capability was accepted")
+			}
+		})
+	}
+	maximum := base
+	maximum.MaxRequests = MaximumMaxRequests
+	maximum.MaxConcurrent = MaximumMaxConcurrent
+	maximum.MaxConnectTime = MaximumMaxConnectTime
+	maximum.MaxUploadBytes = MaximumMaxUploadBytes
+	maximum.MaxDownloadBytes = MaximumMaxDownloadBytes
+	maximum.MaxTotalBytes = MaximumMaxTotalBytes
+	if _, err := New(Config{Policy: policy, Capability: maximum, Audit: func(AuditEvent) error { return nil }}); err != nil {
+		t.Fatalf("maximum capability was rejected: %v", err)
+	}
+}
+
 func TestPolicyNormalizationAndPublicAddressClassification(t *testing.T) {
 	policy := Policy{Rules: []OriginRule{{Host: "EXAMPLE.COM.", Port: 443, Category: "general", AllowConnect: true}}}
 	digest1, err := policy.Digest()

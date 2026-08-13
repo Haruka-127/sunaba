@@ -76,6 +76,25 @@ func TestCompileExportPolicyPreservesConfiguredLimitsAndHardBounds(t *testing.T)
 	}
 }
 
+func TestPolicyRejectsWebQuotaAboveGatewayMaximum(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	candidate, err := New(project, strings.Repeat("a", 64), "1.18.16", "1.2.2", "sunaba-base:test", "secure", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.Web.Enabled = true
+	candidate.Web.Rules = []webgateway.OriginRule{{Host: "allowed.example", Port: 443, Category: "user", AllowConnect: true}}
+	candidate.Web.CustomRules = append([]webgateway.OriginRule(nil), candidate.Web.Rules...)
+	candidate.Web.OriginPresets = nil
+	candidate.Web.OriginPresetSHA256 = ""
+	candidate.Web.BlocklistManifest = filepath.Join(project, "blocklist.json")
+	candidate.Web.BlocklistSHA256 = strings.Repeat("b", 64)
+	candidate.Web.MaxConcurrent = webgateway.MaximumMaxConcurrent + 1
+	if err := candidate.Validate(); err == nil {
+		t.Fatal("oversized Web quota was accepted")
+	}
+}
+
 func TestLegacyV1MigratesAtomicallyToStrictV6(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)

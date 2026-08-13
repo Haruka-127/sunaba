@@ -19,6 +19,43 @@ import (
 	"time"
 )
 
+const (
+	DefaultMaxRequests            = 500
+	DefaultMaxConcurrent          = 4
+	DefaultMaxConnectTime         = 2 * time.Minute
+	DefaultMaxUploadBytes   int64 = 1 << 20
+	DefaultMaxDownloadBytes int64 = 64 << 20
+	DefaultMaxTotalBytes    int64 = 256 << 20
+	MaximumMaxRequests            = 100_000
+	MaximumMaxConcurrent          = 32
+	MaximumMaxConnectTime         = 10 * time.Minute
+	MaximumMaxUploadBytes   int64 = 64 << 20
+	MaximumMaxDownloadBytes int64 = 1 << 30
+	MaximumMaxTotalBytes    int64 = 4 << 30
+)
+
+type Limits struct {
+	MaxRequests      int
+	MaxConcurrent    int
+	MaxConnectTime   time.Duration
+	MaxUploadBytes   int64
+	MaxDownloadBytes int64
+	MaxTotalBytes    int64
+}
+
+func ValidateLimits(limits Limits) error {
+	if limits.MaxRequests <= 0 || limits.MaxRequests > MaximumMaxRequests ||
+		limits.MaxConcurrent <= 0 || limits.MaxConcurrent > MaximumMaxConcurrent ||
+		limits.MaxConnectTime <= 0 || limits.MaxConnectTime > MaximumMaxConnectTime ||
+		limits.MaxUploadBytes <= 0 || limits.MaxUploadBytes > MaximumMaxUploadBytes ||
+		limits.MaxDownloadBytes <= 0 || limits.MaxDownloadBytes > MaximumMaxDownloadBytes ||
+		limits.MaxTotalBytes <= 0 || limits.MaxTotalBytes > MaximumMaxTotalBytes ||
+		limits.MaxUploadBytes > limits.MaxTotalBytes || limits.MaxDownloadBytes > limits.MaxTotalBytes {
+		return fmt.Errorf("Web Gateway limits exceed the product resource boundary")
+	}
+	return nil
+}
+
 type OriginRule struct {
 	Host              string `json:"host"`
 	Port              uint16 `json:"port"`
@@ -110,8 +147,8 @@ func NewCapability(token, projectID, vmID, sessionID, policyDigest string, expir
 	}
 	return Capability{
 		ProjectID: projectID, VMID: vmID, SessionID: sessionID, PolicyDigest: policyDigest, ExpiresAt: expiresAt,
-		MaxRequests: 500, MaxConcurrent: 4, MaxConnectTime: 2 * time.Minute,
-		MaxUploadBytes: 1 << 20, MaxDownloadBytes: 64 << 20, MaxTotalBytes: 256 << 20,
+		MaxRequests: DefaultMaxRequests, MaxConcurrent: DefaultMaxConcurrent, MaxConnectTime: DefaultMaxConnectTime,
+		MaxUploadBytes: DefaultMaxUploadBytes, MaxDownloadBytes: DefaultMaxDownloadBytes, MaxTotalBytes: DefaultMaxTotalBytes,
 		tokenHash: sha256.Sum256([]byte(token)),
 	}, nil
 }
@@ -168,7 +205,10 @@ func New(config Config) (*Gateway, error) {
 		return nil, fmt.Errorf("Web Gateway capability policy digest does not match")
 	}
 	capability := config.Capability
-	if capability.MaxRequests <= 0 || capability.MaxConcurrent <= 0 || capability.MaxConnectTime <= 0 || capability.MaxUploadBytes <= 0 || capability.MaxDownloadBytes <= 0 || capability.MaxTotalBytes <= 0 || capability.ExpiresAt.IsZero() {
+	if err := ValidateLimits(Limits{
+		MaxRequests: capability.MaxRequests, MaxConcurrent: capability.MaxConcurrent, MaxConnectTime: capability.MaxConnectTime,
+		MaxUploadBytes: capability.MaxUploadBytes, MaxDownloadBytes: capability.MaxDownloadBytes, MaxTotalBytes: capability.MaxTotalBytes,
+	}); err != nil || capability.ExpiresAt.IsZero() {
 		return nil, fmt.Errorf("Web Gateway capability limits are invalid")
 	}
 	if config.Audit == nil {

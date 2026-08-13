@@ -181,8 +181,8 @@ func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentIm
 		Git: GitPolicy{PushApprovalRequired: true},
 		Web: WebPolicy{
 			Enabled: false, OriginPresets: originPresets, OriginPresetSHA256: originPresetDigest,
-			MaxRequests: 500, MaxConcurrent: 4, MaxConnectSeconds: 120, MaxUploadBytes: 1 << 20,
-			MaxDownloadBytes: 64 << 20, MaxTotalBytes: 256 << 20,
+			MaxRequests: webgateway.DefaultMaxRequests, MaxConcurrent: webgateway.DefaultMaxConcurrent, MaxConnectSeconds: int64(webgateway.DefaultMaxConnectTime / time.Second), MaxUploadBytes: webgateway.DefaultMaxUploadBytes,
+			MaxDownloadBytes: webgateway.DefaultMaxDownloadBytes, MaxTotalBytes: webgateway.DefaultMaxTotalBytes,
 		},
 		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30},
 		Audit:  AuditPolicy{RetentionDays: 30}, ProtectedPaths: []string{".git"}, CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
@@ -232,7 +232,11 @@ func (p ProjectPolicy) Validate() error {
 	}
 	if p.Web.Enabled {
 		web := webgateway.Policy{Rules: p.Web.Rules}
-		if _, err := web.Digest(); err != nil || p.Web.MaxRequests <= 0 || p.Web.MaxConcurrent <= 0 || p.Web.MaxConnectSeconds <= 0 || p.Web.MaxConnectSeconds > 600 || p.Web.MaxUploadBytes <= 0 || p.Web.MaxDownloadBytes <= 0 || p.Web.MaxTotalBytes <= 0 {
+		limitsErr := webgateway.ValidateLimits(webgateway.Limits{
+			MaxRequests: p.Web.MaxRequests, MaxConcurrent: p.Web.MaxConcurrent, MaxConnectTime: time.Duration(p.Web.MaxConnectSeconds) * time.Second,
+			MaxUploadBytes: p.Web.MaxUploadBytes, MaxDownloadBytes: p.Web.MaxDownloadBytes, MaxTotalBytes: p.Web.MaxTotalBytes,
+		})
+		if _, err := web.Digest(); err != nil || limitsErr != nil {
 			return fmt.Errorf("Project Web Gateway policy is invalid")
 		}
 		if p.Web.OriginPresetSHA256 == currentPresetDigest && !reflect.DeepEqual(p.Web.Rules, resolvedWebRules) {
