@@ -127,16 +127,15 @@ func applyLocked(cfg Config, hook func(string) error, rollbackOnError bool) (res
 	if err := os.Mkdir(backupRoot, 0700); err != nil {
 		return workspace.SnapshotManifest{}, err
 	}
+	affected := affectedRoots(cfg.ChangeSet)
 	stageRoot := filepath.Join(transactionRoot, "stage")
-	staged, err := workspace.CreateProjectSnapshot(cfg.MergedRoot, stageRoot, cfg.SnapshotPolicy)
-	if err != nil || staged.Digest != cfg.Merged.Digest {
+	if _, err := workspace.CreateApprovedSnapshotSubset(cfg.MergedRoot, stageRoot, cfg.Merged, affected, cfg.SnapshotPolicy); err != nil {
 		return workspace.SnapshotManifest{}, fmt.Errorf("stage approved Merged View: %w", err)
 	}
 	desired := make(map[string]struct{}, len(cfg.Merged.Entries))
 	for _, entry := range cfg.Merged.Entries {
 		desired[entry.Path] = struct{}{}
 	}
-	affected := affectedRoots(cfg.ChangeSet)
 	rootFD, err := openDirectory(cfg.ProjectRoot)
 	if err != nil {
 		return workspace.SnapshotManifest{}, err

@@ -976,8 +976,6 @@ func (s *Session) prepareGuestExport(ctx context.Context) error {
 		"! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts",
 		"if ! grep -Fqs ' /var/lib/sunaba/overlay ' /proc/mounts; then mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay; fi",
 		"rm -rf /var/lib/sunaba/upper /var/lib/sunaba/work",
-		"mkdir -p /var/lib/sunaba/upper /var/lib/sunaba/work",
-		"cp -a --preserve=all /var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/",
 		"sync",
 		"umount /var/lib/sunaba/overlay",
 		"rm -f /var/lib/sunaba/overlay.img",

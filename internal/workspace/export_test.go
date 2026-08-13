@@ -134,6 +134,39 @@ func TestParseFrozenRootFSRejectsAttacks(t *testing.T) {
 	}
 }
 
+func TestParseFrozenMergedRootRejectsAttacks(t *testing.T) {
+	baseline := fixtureBaseline(t)
+	tests := []struct {
+		name  string
+		entry tarFixtureEntry
+	}{
+		{name: "protected path", entry: tarFixtureEntry{header: tar.Header{Name: mergedPrefix + "/.git/config", Typeflag: tar.TypeReg}}},
+		{name: "hardlink", entry: tarFixtureEntry{header: tar.Header{Name: mergedPrefix + "/link", Typeflag: tar.TypeLink, Linkname: lowerPrefix + "/keep.txt"}}},
+		{name: "special file", entry: tarFixtureEntry{header: tar.Header{Name: mergedPrefix + "/fifo", Typeflag: tar.TypeFifo}}},
+		{name: "xattr", entry: tarFixtureEntry{header: tar.Header{Name: mergedPrefix + "/file", Typeflag: tar.TypeReg, PAXRecords: map[string]string{"SCHILY.xattr.user.evil": "x"}}}},
+		{name: "empty symlink", entry: tarFixtureEntry{header: tar.Header{Name: mergedPrefix + "/link", Typeflag: tar.TypeSymlink}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			archive, quarantine := writeRootFSFixture(t, append(baselineTarEntries(t),
+				tarFixtureEntry{header: tar.Header{Name: mergedPrefix, Typeflag: tar.TypeDir, Mode: 0700}}, tc.entry,
+			)...)
+			if _, err := ParseFrozenRootFS(archive, quarantine, baseline, DefaultExportPolicy()); err == nil {
+				t.Fatal("merged attack entry was accepted")
+			}
+			entries, err := os.ReadDir(quarantine)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "sunaba-export-") {
+					t.Fatalf("failed merged parse retained staging %q", entry.Name())
+				}
+			}
+		})
+	}
+}
+
 func TestFrozenExportCloseRejectsArbitraryDirectory(t *testing.T) {
 	directory := t.TempDir()
 	export := FrozenExport{StagingDir: directory}

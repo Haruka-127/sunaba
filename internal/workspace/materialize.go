@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,6 +19,78 @@ func CreateProjectSnapshot(root, destination string, policy SnapshotPolicy) (man
 	if err != nil {
 		return SnapshotManifest{}, err
 	}
+	verified, err := materializeSnapshot(manifest.Root, destination, manifest.Entries, policy)
+	if err != nil {
+		return SnapshotManifest{}, err
+	}
+	if verified.Digest != manifest.Digest {
+		return SnapshotManifest{}, fmt.Errorf("materialized snapshot digest %s does not match source %s", verified.Digest, manifest.Digest)
+	}
+	return manifest, nil
+}
+
+func CreateApprovedSnapshotSubset(root, destination string, approved SnapshotManifest, roots []string, policy SnapshotPolicy) (SnapshotManifest, error) {
+	if err := validateCanonicalManifest(approved, policy); err != nil {
+		return SnapshotManifest{}, fmt.Errorf("invalid approved manifest: %w", err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return SnapshotManifest{}, fmt.Errorf("resolve approved snapshot root: %w", err)
+	}
+	canonicalRoot, err = filepath.Abs(canonicalRoot)
+	if err != nil {
+		return SnapshotManifest{}, err
+	}
+	if canonicalRoot != approved.Root {
+		return SnapshotManifest{}, fmt.Errorf("approved manifest root does not match snapshot source")
+	}
+	entries, err := approvedSnapshotSubset(approved, roots, policy)
+	if err != nil {
+		return SnapshotManifest{}, err
+	}
+	return materializeSnapshot(canonicalRoot, destination, entries, policy)
+}
+
+func approvedSnapshotSubset(approved SnapshotManifest, roots []string, policy SnapshotPolicy) ([]SnapshotEntry, error) {
+	byPath := make(map[string]SnapshotEntry, len(approved.Entries))
+	for _, entry := range approved.Entries {
+		byPath[entry.Path] = entry
+	}
+	selected := make(map[string]struct{})
+	selectedRoots := make(map[string]struct{}, len(roots))
+	for _, root := range roots {
+		if err := validateWorkspacePath(root, policy); err != nil {
+			return nil, err
+		}
+		_, exists := byPath[root]
+		if !exists {
+			continue
+		}
+		selectedRoots[root] = struct{}{}
+		for parent := path.Dir(root); parent != "."; parent = path.Dir(parent) {
+			ancestor, exists := byPath[parent]
+			if !exists || ancestor.Type != TypeDirectory {
+				return nil, fmt.Errorf("approved snapshot is missing directory ancestor %q", parent)
+			}
+			selected[parent] = struct{}{}
+		}
+	}
+	entries := make([]SnapshotEntry, 0, len(selected))
+	for _, entry := range approved.Entries {
+		for candidate := entry.Path; candidate != "."; candidate = path.Dir(candidate) {
+			if _, exists := selectedRoots[candidate]; exists {
+				selected[entry.Path] = struct{}{}
+				break
+			}
+		}
+		if _, exists := selected[entry.Path]; exists {
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
+}
+
+func materializeSnapshot(sourceRoot, destination string, entries []SnapshotEntry, policy SnapshotPolicy) (verified SnapshotManifest, err error) {
 	destination, err = filepath.Abs(destination)
 	if err != nil {
 		return SnapshotManifest{}, err
@@ -30,7 +103,7 @@ func CreateProjectSnapshot(root, destination string, policy SnapshotPolicy) (man
 	if err := validateEntryName(filepath.Base(destination)); err != nil {
 		return SnapshotManifest{}, fmt.Errorf("invalid snapshot destination: %w", err)
 	}
-	if pathWithin(manifest.Root, destination) {
+	if pathWithin(sourceRoot, destination) {
 		return SnapshotManifest{}, fmt.Errorf("snapshot destination must not be inside Project root")
 	}
 	if err := os.Mkdir(destination, 0700); err != nil {
@@ -43,7 +116,7 @@ func CreateProjectSnapshot(root, destination string, policy SnapshotPolicy) (man
 		}
 	}()
 
-	sourceFD, err := unix.Open(manifest.Root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	sourceFD, err := unix.Open(sourceRoot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return SnapshotManifest{}, fmt.Errorf("open Project root for materialization: %w", err)
 	}
@@ -55,7 +128,7 @@ func CreateProjectSnapshot(root, destination string, policy SnapshotPolicy) (man
 	defer unix.Close(destinationFD)
 
 	directories := make([]SnapshotEntry, 0)
-	for _, entry := range manifest.Entries {
+	for _, entry := range entries {
 		switch entry.Type {
 		case TypeDirectory:
 			if err := createDirectoryAt(destinationFD, entry.Path); err != nil {
@@ -93,15 +166,25 @@ func CreateProjectSnapshot(root, destination string, policy SnapshotPolicy) (man
 	}
 	verifyPolicy := policy
 	verifyPolicy.ProtectedPaths = nil
-	verified, err := BuildSnapshotManifest(destination, verifyPolicy)
+	verified, err = BuildSnapshotManifest(destination, verifyPolicy)
 	if err != nil {
 		return SnapshotManifest{}, fmt.Errorf("verify materialized snapshot: %w", err)
 	}
-	if verified.Digest != manifest.Digest {
-		return SnapshotManifest{}, fmt.Errorf("materialized snapshot digest %s does not match source %s", verified.Digest, manifest.Digest)
+	var totalSize int64
+	for _, entry := range entries {
+		if entry.Type == TypeFile {
+			totalSize += entry.Size
+		}
+	}
+	expected, err := finalizeSnapshotManifest(destination, entries, totalSize)
+	if err != nil {
+		return SnapshotManifest{}, err
+	}
+	if verified.Digest != expected.Digest {
+		return SnapshotManifest{}, fmt.Errorf("materialized snapshot digest %s does not match approved subset %s", verified.Digest, expected.Digest)
 	}
 	created = false
-	return manifest, nil
+	return verified, nil
 }
 
 func createDirectoryAt(rootFD int, entryPath string) error {

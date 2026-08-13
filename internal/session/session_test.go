@@ -308,6 +308,9 @@ func TestPausedExportRemountsWorkspaceBeforeFreeze(t *testing.T) {
 	if !strings.Contains(commands[1], "/var/lib/sunaba/merged-export") {
 		t.Fatalf("workspace freeze did not follow remount: %q", commands)
 	}
+	if strings.Contains(commands[1], "/var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/") {
+		t.Fatalf("workspace freeze copied both merged and upper trees: %q", commands[1])
+	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
 	}

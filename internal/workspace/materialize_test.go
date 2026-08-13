@@ -68,3 +68,45 @@ func TestCreateProjectSnapshotRequiresUnusedDestination(t *testing.T) {
 		t.Fatal("existing snapshot destination was accepted")
 	}
 }
+
+func TestCreateApprovedSnapshotSubsetCopiesOnlyAffectedRoots(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "dir", "changed.txt"), "changed")
+	writeFile(t, filepath.Join(root, "dir", "unaffected.txt"), "unaffected")
+	writeFile(t, filepath.Join(root, "other", "unaffected.txt"), "unaffected")
+	approved, err := BuildSnapshotManifest(root, DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "subset")
+	staged, err := CreateApprovedSnapshotSubset(root, destination, approved, []string{"dir/changed.txt"}, DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staged.Entries) != 2 || staged.Entries[0].Path != "dir" || staged.Entries[1].Path != "dir/changed.txt" {
+		t.Fatalf("staged entries=%+v", staged.Entries)
+	}
+	for _, omitted := range []string{"dir/unaffected.txt", "other"} {
+		if _, err := os.Lstat(filepath.Join(destination, omitted)); !os.IsNotExist(err) {
+			t.Fatalf("unaffected path %q was staged: %v", omitted, err)
+		}
+	}
+}
+
+func TestCreateApprovedSnapshotSubsetRejectsChangedSource(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "changed.txt")
+	writeFile(t, path, "approved")
+	approved, err := BuildSnapshotManifest(root, DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, "tampered")
+	destination := filepath.Join(t.TempDir(), "subset")
+	if _, err := CreateApprovedSnapshotSubset(root, destination, approved, []string{"changed.txt"}, DefaultSnapshotPolicy()); err == nil {
+		t.Fatal("changed approved source was staged")
+	}
+	if _, err := os.Lstat(destination); !os.IsNotExist(err) {
+		t.Fatalf("failed subset retained destination: %v", err)
+	}
+}
