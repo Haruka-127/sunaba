@@ -85,7 +85,7 @@ func TestChannelChoosesHighestStableV1(t *testing.T) {
 
 func TestCheckDoesNotCreateCandidateForActiveVersion(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		body := `{"tag_name":"v1.18.16","draft":false,"prerelease":false}`
+		body := `{"tag_name":"v` + dependency.OpenCodeVersion + `","draft":false,"prerelease":false}`
 		return &http.Response{StatusCode: 200, Status: "200 OK", Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: request}, nil
 	})}
 	current := versionconfig.BootstrapLock()

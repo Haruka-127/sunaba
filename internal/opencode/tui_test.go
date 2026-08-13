@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"sunaba/internal/dependency"
 )
 
 func TestBuildHostTUICommandIsolatesHostEnvironment(t *testing.T) {
@@ -106,7 +108,7 @@ func hostTUIFixture(t *testing.T) HostTUIConfig {
 		t.Fatal(err)
 	}
 	binary := filepath.Join(tools, "opencode")
-	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.16; exit 0; fi\nexit 0\n"
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo " + dependency.OpenCodeVersion + "; exit 0; fi\nexit 0\n"
 	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -9,28 +9,28 @@
     "index_sha256": "60eac759739651111db372c07be67863818726f754804b8707c90979bda511df"
   },
   "agent_image": {
-    "tag": "sunaba-base:1.18.16-secure.1"
+    "tag": "sunaba-base:1.18.18-secure.1"
   },
   "go_modules": {
     "github.com/urfave/cli/v3": "v3.10.1",
     "golang.org/x/sys": "v0.30.0"
   },
   "opencode": {
-    "version": "1.18.16",
+    "version": "1.18.18",
     "host": {
       "os": "darwin",
       "arch": "arm64",
       "artifact": "opencode-darwin-arm64.zip",
-      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.16/opencode-darwin-arm64.zip",
-      "sha256": "1e670c94341a374824dc6700b6f38b2cb6634baf3ca20e645084c33ce6639320",
-      "executable_sha256": "a41776bf64c75786d6baf531b840ffb873c090d7c44793ae2dd4b1896de56a1f"
+      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.18/opencode-darwin-arm64.zip",
+      "sha256": "7d668bf26496fec8686d4e51ebb1ac2bd2e393f0c1620aa696c4c242a9e5806a",
+      "executable_sha256": "4f5979c2dadb06fbff1335335afaaea274e58f92e79aa43cf2ed98618d555422"
     },
     "guest": {
       "os": "linux",
       "arch": "arm64",
       "artifact": "opencode-linux-arm64.tar.gz",
-      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.16/opencode-linux-arm64.tar.gz",
-      "sha256": "4fdce5f9bc877d977304d71c0c90ad6e83efa381fe0edf0a61e6142a625e1c41"
+      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.18/opencode-linux-arm64.tar.gz",
+      "sha256": "dcb1b5ec5687b43f87749560021f9203f3809e0ce5ae44ff9be8ae17083fe4ba"
     }
   },
   "provenance": {
@@ -41,8 +41,8 @@
     },
     "opencode": {
       "repository": "https://github.com/anomalyco/opencode",
-      "tag": "v1.18.16",
-      "commit": "a3647eb025c7615159d417dcc49fc39fdaeba65b"
+      "tag": "v1.18.18",
+      "commit": "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
     },
     "base_image": {
       "registry": "docker.io",

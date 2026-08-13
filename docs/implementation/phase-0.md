@@ -2,6 +2,8 @@
 
 状態: **完了**。DG-01、DG-02、DG-03とProject lockのprobeを通過した。
 
+この文書は2026-08-11の初期bootstrap `v1.18.16`で得た実装証拠を保持する。現在のbootstrapと更新時の再検証結果は`internal/dependency/manifest.json`と[`phase-5.md`](./phase-5.md)を参照する。
+
 ## Dependency contract
 
 - Apple Container: exact `1.2.2`, commit `0190097d06df0b9065f4c2d2c7873c649d81d493`

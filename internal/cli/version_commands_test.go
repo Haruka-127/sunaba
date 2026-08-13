@@ -34,7 +34,7 @@ func TestSetupConfigOnlyCreatesHostDeclarationWithoutLock(t *testing.T) {
 	}
 	versions := &versionconfig.Store{Root: a.configs.Root}
 	config, err := versions.LoadConfig()
-	if err != nil || config.OpenCode.Strategy != "exact" || config.OpenCode.Value != "1.18.16" {
+	if err != nil || config.OpenCode.Strategy != "exact" || config.OpenCode.Value != dependency.OpenCodeVersion {
 		t.Fatalf("config=%+v error=%v", config, err)
 	}
 	paths, _ := versions.Paths()

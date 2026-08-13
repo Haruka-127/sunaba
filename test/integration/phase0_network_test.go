@@ -129,6 +129,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 	spec := sunabaruntime.ContainerSpec{
 		Name:   name,
 		Image:  manifest.AgentImage.Tag,
+		Init:   true,
 		CPUs:   1,
 		Memory: "2G",
 		Ulimits: map[string]sunabaruntime.RLimit{
@@ -319,7 +320,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatalf("managed Host TUI did not open an event stream: %q", tuiOutput.String())
 	}
-	attackCommand := "curl --fail --silent --user opencode:" + password + " --header 'Content-Type: application/json' --data '{\"command\":\"editor.open\"}' http://127.0.0.1:4096/tui/execute-command"
+	attackCommand := "curl --fail --silent --user opencode:" + password + " --header 'Content-Type: application/json' --data '{\"type\":\"tui.command.execute\",\"properties\":{\"command\":\"editor.open\"}}' 'http://127.0.0.1:4096/tui/publish?directory=%2Fworkspace%2Fsunaba-" + runID + "'"
 	if out, err := rt.ExecOutput(ctx, name, []string{"/bin/bash", "-lc", attackCommand}); err != nil {
 		t.Fatalf("emit malicious TUI event: %v: %s", err, out)
 	}

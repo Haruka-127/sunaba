@@ -19,7 +19,7 @@ OpenAIやGitの実credentialはホストに保持され、VMにはsession限定�
 - Apple silicon搭載Mac
 - macOS 26
 - Apple Container exact `1.2.2`
-- OpenCode host TUI: sunabaがlockしたv1系exact version（bootstrap値`1.18.16`）
+- OpenCode host TUI: sunabaがlockしたv1系exact version（bootstrap値`1.18.18`）
 - Go 1.22以降（ソースからビルドする場合）
 - OpenAI API key、またはCodexを利用できるChatGPT subscription
 
@@ -36,16 +36,16 @@ container system version
 
 ### OpenCodeをインストールする
 
-初回はmacOS側へ[OpenCode v1.18.16](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)のApple silicon版をインストールし、`opencode`コマンドを実行できる状態にします。特定のdirectoryへ手動配置する必要はありません。インストール後にversionを確認してください。
+初回はmacOS側へ[OpenCode v1.18.18](https://github.com/anomalyco/opencode/releases/tag/v1.18.18)のApple silicon版をインストールし、`opencode`コマンドを実行できる状態にします。特定のdirectoryへ手動配置する必要はありません。インストール後にversionを確認してください。
 
 ```sh
 opencode --version
 ```
 
-出力はexact `1.18.16`である必要があります。公式download archive `opencode-darwin-arm64.zip`のSHA-256は次の値です。
+出力はexact `1.18.18`である必要があります。公式download archive `opencode-darwin-arm64.zip`のSHA-256は次の値です。
 
 ```text
-1e670c94341a374824dc6700b6f38b2cb6634baf3ca20e645084c33ce6639320
+7d668bf26496fec8686d4e51ebb1ac2bd2e393f0c1620aa696c4c242a9e5806a
 ```
 
 sunabaは実行前に、macOSへインストールされたOpenCodeのversionと実行ファイルの固定digestを検証し、検証済みbinaryをsunabaの管理領域へcopyします。不一致の場合、別versionへ自動fallbackしません。初回のbootstrap固定値は[`internal/dependency/manifest.json`](../internal/dependency/manifest.json)で確認できます。
@@ -108,7 +108,7 @@ sunaba versions show
   "schema_version": 1,
   "opencode": {
     "strategy": "exact",
-    "value": "1.18.16"
+    "value": "1.18.18"
   }
 }
 ```

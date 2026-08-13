@@ -29,7 +29,7 @@
 - secureモードにおける任意の直接外向き通信の禁止
 - OpenCodeからModel Gatewayを透過的に利用する方式
 - Git Gateway経由ではpushだけをホスト承認対象にする方式
-- OpenCode v1系をserver/TUIで同一バージョンに固定する方式。初期固定バージョンは`v1.18.16`
+- OpenCode v1系をserver/TUIで同一バージョンに固定する方式。初期固定バージョンは`v1.18.18`
 
 Web GatewayはPhase 4の実通信計測に基づき、Project専用socketへ接続する明示的forward proxy方式を採用する。具体的な保証と非保証は14章を正とし、TLSを復号しないためHTTPS tunnel内部のmethodやuploadを識別できない点を情報流制御の限界として扱う。
 
@@ -225,7 +225,7 @@ flowchart LR
         Snapshot["Project Snapshot<br/>canonical manifest + digest"]
         Supervisor["Host Supervisor<br/>registry / lifecycle / policy / audit"]
         Runtime["Runtime Adapter<br/>Apple Container CLI / Swift API"]
-        TUI["OpenCode TUI v1.18.16<br/>isolated config / pure mode"]
+        TUI["OpenCode TUI v1.18.18<br/>isolated config / pure mode"]
         Relay["Local Attach Relay<br/>127.0.0.1:random"]
         ModelGW["Model Gateway<br/>upstream credential"]
         GitGW["Git Gateway<br/>host Git credential"]
@@ -238,7 +238,7 @@ flowchart LR
     subgraph GUEST["Agent VM: one per Project（entirely untrusted）"]
         direction TB
         GuestOS["Linux guest / root available"]
-        Server["OpenCode server v1.18.16"]
+        Server["OpenCode server v1.18.18"]
         Tools["shell / build / tests / Git / Web tools"]
         Workspace["OverlayFS merged workspace<br/>read-only lower + upper/work"]
         GuestOS --> Server
@@ -301,7 +301,7 @@ Host TUIは利便性のためホストで動かすため、固定・検証され
 2. secureモードでは任意の直接外向き通信が遮断されていることを検査する。
 3. セッションに必要なGateway capability、OpenCode server password、attach relay identityを発行する。
 4. Model Gatewayの接続先と短命tokenをVM内OpenCode serverのセッション環境へ注入する。
-5. VM内で固定バージョンの`opencode serve`を起動する。`--hostname`、`--port`、`--mdns=false`をSupervisorが明示し、guest loopbackまたはProject専用interfaceだけでlistenする。v1.18.16には`--no-mdns` flagが存在しないため使用しない。
+5. VM内で固定バージョンの`opencode serve`を起動する。`--hostname`、`--port`、`--mdns=false`をSupervisorが明示し、guest loopbackまたはProject専用interfaceだけでlistenする。v1.18.18には`--no-mdns` flagが存在しないため使用しない。
 6. Local Attach Relayをhost loopbackのrandom portで起動し、Project/VM専用transportでserverへ接続する。
 7. `/global/health`でserver versionがHost TUIと完全一致することを検証する。不一致なら終了する。
 8. host Project外のsunaba管理directoryをcwd/HOME/config rootにした、固定バージョンの`opencode attach`を`--pure`で起動する。
@@ -619,16 +619,16 @@ Gateway data planeはSupervisorの管理面から分離し、最小権限のproc
 
 ### 12.1 OpenCode v1の固定
 
-OpenCodeはv1系のexact releaseをhost-only version lockへ固定して使う。本文書更新時点（2026-08-11）のbootstrap固定値は`v1.18.16`である。bootstrap値は初回setupとlegacy migrationの出発点であり、利用者は明示的なversion設定と`update check` / `update apply`により別の検証済みv1 releaseへ更新できる。
+OpenCodeはv1系のexact releaseをhost-only version lockへ固定して使う。本文書更新時点（2026-08-13）のbootstrap固定値は`v1.18.18`である。bootstrap値は初回setupとlegacy migrationの出発点であり、利用者は明示的なversion設定と`update check` / `update apply`により別の検証済みv1 releaseへ更新できる。
 
 | 用途 | 公式artifact | SHA-256 |
 |---|---|---|
-| host / Apple silicon TUI | `opencode-darwin-arm64.zip` | `1e670c94341a374824dc6700b6f38b2cb6634baf3ca20e645084c33ce6639320` |
-| guest / Linux arm64 server | `opencode-linux-arm64.tar.gz` | `4fdce5f9bc877d977304d71c0c90ad6e83efa381fe0edf0a61e6142a625e1c41` |
+| host / Apple silicon TUI | `opencode-darwin-arm64.zip` | `7d668bf26496fec8686d4e51ebb1ac2bd2e393f0c1620aa696c4c242a9e5806a` |
+| guest / Linux arm64 server | `opencode-linux-arm64.tar.gz` | `dcb1b5ec5687b43f87749560021f9203f3809e0ce5ae44ff9be8ae17083fe4ba` |
 
 - release、artifact名、digestは公式GitHub Release APIから取得し、dependency manifestへ記録する
 - download後、展開前と実行前にdigestを検証する
-- 開発時のhost TUIはgitignore済みの`bin/tools/opencode/v1.18.16/`へ置き、global installを要求しない。製品配布方式は署名・更新設計と併せて決める
+- 開発時のhost TUIはgitignore済みの`bin/tools/opencode/v1.18.18/`へ置き、global installを要求しない。製品配布方式は署名・更新設計と併せて決める
 - guest serverは固定artifactをbase imageへ組み込み、image digestとOpenCode versionをpolicyへ記録する
 - Agent Session開始時に`latest`を解決せず、OpenCode自身の自動updateとv2系への自動移行を使わない
 - v1系の新releaseへ上げるときは、server/TUIの両artifactとdigestを同じ変更で更新し、provider config、attach API、terminal、integration testを通す
@@ -671,7 +671,7 @@ Agent VMでは`opencode serve`をVM内rootとしてmerged workspaceで動かす�
 
 VM内rootとOpenCodeの`permission: allow`はVM外の権限を広げない。host Projectはbind mountせず、secure networkは`none`、Model/Git/Web Gatewayのallowlist・quota・Host Trusted Approval、Local Attach Relay認証、VM resource limit、停止export後のsafe parserを引き続き境界として強制する。VM内processやProject設定はuntrustedであり、root取得済みとして検証する。
 
-Project設定はuntrustedであり、OpenCode v1では`server.hostname`、`server.port`、`server.mdns`、`server.cors`も設定できる。したがって、listen先とmDNSはSupervisorがCLI引数`--hostname`、`--port`、`--mdns=false`で上書きし、CORS設定の有無をnetwork boundaryや認証の根拠にしない。v1.18.16のboolean flagは`--mdns`であり`--no-mdns`は存在しない。Local Attach RelayはOpenCodeのCORS応答とは独立して、許可したTUI接続、HTTP method/path、basic auth、Project/VM channelだけを受け付ける。
+Project設定はuntrustedであり、OpenCode v1では`server.hostname`、`server.port`、`server.mdns`、`server.cors`も設定できる。したがって、listen先とmDNSはSupervisorがCLI引数`--hostname`、`--port`、`--mdns=false`で上書きし、CORS設定の有無をnetwork boundaryや認証の根拠にしない。v1.18.18のboolean flagは`--mdns`であり`--no-mdns`は存在しない。Local Attach RelayはOpenCodeのCORS応答とは独立して、許可したTUI接続、HTTP method/path、basic auth、Project/VM channelだけを受け付ける。
 
 serverは次を満たす。
 
@@ -686,7 +686,7 @@ Host TUIは固定した公式macOS artifactをSupervisorが起動し、`opencode
 
 - cwd、HOME、XDG data/config、`OPENCODE_CONFIG`、`OPENCODE_CONFIG_DIR`、`OPENCODE_TUI_CONFIG`をProject worktree外のsession専用sunaba管理領域へ分離する
 - `--pure`、`OPENCODE_DISABLE_PROJECT_CONFIG=1`、`OPENCODE_DISABLE_DEFAULT_PLUGINS=1`、`OPENCODE_DISABLE_AUTOUPDATE=1`、`OPENCODE_DISABLE_MODELS_FETCH=1`、`OPENCODE_DISABLE_LSP_DOWNLOAD=1`を使う
-- `attach --dir`は指定pathがホストにも存在するとhost側で`chdir`するv1.18.16の挙動であるため、guest workspaceにはhost上に存在しないsession固有pathを使い、TUI起動直前にもhost側で不存在を確認する。Project config無効化はこの確認とは独立して常に行う
+- `attach --dir`は指定pathがホストにも存在するとhost側で`chdir`するv1.18.18の挙動であるため、guest workspaceにはhost上に存在しないsession固有pathを使い、TUI起動直前にもhost側で不存在を確認する。Project config無効化はこの確認とは独立して常に行う
 - host Projectの`opencode.json`、`.opencode/`、`.env`、plugin、hook、provider credentialを読み込まない
 - Model Gateway tokenやupstream API keyをHost TUIへ渡さない
 - remote serverから受け取るmessage、diff、file名をuntrusted表示データとして扱う
@@ -800,7 +800,7 @@ MVPの追加scopeは次とする。
 
 ### 14.1 実測結果
 
-固定OpenCode `v1.18.16`とexact base imageをnetwork-noneの実Agent VMで計測した。
+以下の通信特性は固定OpenCode `v1.18.16`とexact base imageをnetwork-noneの実Agent VMで計測した。現在のbootstrap `v1.18.18`についても、Web Gatewayの更新判断時に同じ計測を再実行する。
 
 - curl `7.88.1`とwget `1.21.3`は明示HTTP proxyへabsolute-form GETを送り、redirect先でもproxyを再利用する
 - curlのHTTP uploadはPOSTとbodyとしてproxyから識別できる。HTTPSは`CONNECT host:443`となり、TLS内部のmethod、path、bodyはproxyから見えない
@@ -977,7 +977,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 
 1. 本文書からsecurity invariantsとacceptance testをテスト可能な形にする。
 2. Apple Containerの採用バージョンとdependencyを固定する。
-3. OpenCode `v1.18.16`のhost/guest artifact、digest、設定schemaをdependency manifestへ固定する。
+3. OpenCode `v1.18.18`のhost/guest artifact、digest、設定schemaをdependency manifestへ固定する。
 4. CLI/Swift APIでVM identity、lifecycle、snapshot/copy、resource limitをprobeする。
 5. secureなhost/guest専用transport、外向き遮断、Local Attach Relayをprobeする。
 6. guestの`opencode serve`へhostの`opencode attach`を接続し、version、basic auth、明示listen設定、Project config分離を確認する。
@@ -997,7 +997,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 2. host worktreeをmountせず、安全なSnapshot + OverlayFS workspaceを構成する。
 3. secureモードで一般インターネット、external DNS、host、LAN、他VMへの到達を遮断する。
 4. Project/VM専用経路からLocal Attach RelayとModel Gatewayだけへ接続できるようにする。
-5. VM内`opencode serve v1.18.16`へhostの`opencode attach v1.18.16`を接続する。
+5. VM内`opencode serve v1.18.18`へhostの`opencode attach v1.18.18`を接続する。
 6. OpenCode serverがCodex系モデルを使い、VM内workspaceを編集する。
 7. 実OpenAI API keyまたはOAuth token/account IDがVM、Host TUI、Project fileに存在しないことを確認する。
 8. VM内編集ではhost worktreeが変わらないことを確認する。
@@ -1061,7 +1061,7 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 
 ### 20.1 OpenCode server / Host TUI
 
-- host/guestともに固定した`v1.18.16` artifactを使い、download artifactのSHA-256がdependency manifestと一致する。
+- host/guestともに固定した`v1.18.18` artifactを使い、download artifactのSHA-256がdependency manifestと一致する。
 - VM内`opencode serve`とhostの`opencode attach`がLocal Attach Relay経由で接続できる。
 - `/global/health`のserver versionとHost TUI versionが完全一致し、不一致時はattachが拒否される。
 - serverはbasic auth必須かつmDNS無効で、Supervisorが指定したlisten先とProject/VM専用経路以外から接続できない。ProjectがCORS originを設定してもこの到達範囲と認証は変化しない。
@@ -1243,7 +1243,7 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 
 ### DG-03: OpenCodeと最小Model Gatewayの互換性
 
-- `v1.18.16`のhost TUI / guest server artifactとdigest
+- `v1.18.18`のhost TUI / guest server artifactとdigest
 - `serve` / `attach` / `/global/health`のclient-server contract
 - Host TUIの`OPENCODE_DISABLE_PROJECT_CONFIG=1`、isolated config、`--pure`によるProject config分離
 - terminal、diff、file名、external editor eventのhost安全性
@@ -1310,7 +1310,7 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 開始時点での明確な境界は次である。
 
 - 確定: 単一Agent VM、Project単位、OverlayFS、Change Set、secure/dev、Model Gatewayの最小構成
-- 固定dependency: OpenCode `v1.18.16`のhost TUI / guest server同一version
+- 固定dependency: OpenCode `v1.18.18`のhost TUI / guest server同一version
 - 完了段階: Phase 0〜5の実装、Decision Gate、mock/実VM contract gate
 - 最終統合: CLI/README/通常verifyを現行境界へ更新済み。dev pf実機gateと全resource cleanupを最終確認する
 - 明示的live gate: `SUNABA_LIVE_OPENAI=1`の場合だけlogin Keychainのcredentialで実Agent VMから従量課金Responses requestを送る。通常verifyは実行しない
@@ -1326,7 +1326,7 @@ Phase 0でsecure networkまたはOverlayFS/exportの中核不変条件を実現�
 - [Apple Container GitHub repository](https://github.com/apple/container)
 - [Containerization API documentation](https://apple.github.io/containerization/documentation/containerization/)
 - [OpenCode Providers](https://opencode.ai/docs/providers/)
-- [OpenCode v1.18.16 release](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)
+- [OpenCode v1.18.18 release](https://github.com/anomalyco/opencode/releases/tag/v1.18.18)
 - [OpenCode CLI (`serve` / `attach`)](https://opencode.ai/docs/cli/)
 - [OpenCode Server](https://opencode.ai/docs/server/)
 - [OpenCode Config](https://opencode.ai/docs/config/)

@@ -27,9 +27,30 @@ go test ./internal/webgateway -run '^$' -fuzz FuzzHostsBlocklistParser -fuzztime
 dependency manifest schema v2は次を固定する。
 
 - Apple Container `1.2.2`のrepository、tag、commit
-- OpenCode `v1.18.16`のrepository、tag、commit、host/guest artifact SHA-256
+- OpenCode bootstrap `v1.18.18`のrepository、tag、commit、host/guest artifact SHA-256
 - base OCI index digest
 - embedded `Containerfile` / `entrypoint.sh`のSHA-256
+
+2026-08-13に公式GitHub Release APIでstable v1の最新が`v1.18.18`であることを確認し、bootstrapを更新した。source tagはcommit `31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d`へ解決した。
+
+| 対象 | SHA-256 |
+|---|---|
+| `opencode-darwin-arm64.zip` | `7d668bf26496fec8686d4e51ebb1ac2bd2e393f0c1620aa696c4c242a9e5806a` |
+| 展開後host `opencode` executable | `4f5979c2dadb06fbff1335335afaaea274e58f92e79aa43cf2ed98618d555422` |
+| `opencode-linux-arm64.tar.gz` | `dcb1b5ec5687b43f87749560021f9203f3809e0ce5ae44ff9be8ae17083fe4ba` |
+
+downloadしたarchiveはRelease API掲載digestと一致し、host executableとAgent image内のguest executableはいずれも`1.18.18`を返した。`serve --mdns=false`、`attach --dir`、provider config、Model Gateway、Host TUI attach、terminal event遮断、`apply_patch`、pause/resume、Change Set、destroy/recreateを次の実機gateで確認した。
+
+```sh
+SUNABA_PHASE0_INTEGRATION=1 \
+go test -tags=integration ./test/integration -run '^TestPhase0SecureNetworkAndGatewayTransport$' -count=1 -v
+SUNABA_PHASE1_INTEGRATION=1 \
+go test -tags=integration ./test/integration -run '^TestPhase1' -count=1 -v
+```
+
+`v1.18.18`のworkspace routingに合わせ、external editor攻撃probeはTUIが接続したdirectoryを明示して`/tui/publish`へ送る。Local Attach Relayは同workspaceの`tui.command.execute`に含まれる`editor.open`を遮断する。
+
+Phase 1の初回再検証では2台目のApple Container runtimeがhealth timeout後に停止不能となった。許可文書の復旧順序どおり通常stop、KILL、force deleteを試した後、承認を得てApple Container systemを1回だけstop/startし、停止済みの当該test VMだけを削除して元からrunningだった`buildkit`を復元した。clean stateで再実行したPhase 1は通過し、終了後にtest VMが残っていないことを確認した。
 
 image buildはembedded bytesをmanifestへ再照合してから実行する。Apple Container、base image、build inputを変更する開発時のdependency candidateは、exact versionが変わり、artifact digest、runtime version、lifecycle、network isolation、copy/export、resource limitの全証拠が揃わなければ拒否する。利用者向けのOpenCode-only updateはこれらのplatform pinを完全一致で維持し、OpenCodeのofficial artifact、source tag/commit、host executable digest、guest image buildだけを差し替える。`latest`と部分的なplatform更新証拠はtestで拒否する。
 

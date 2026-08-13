@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"sunaba/internal/dependency"
 )
 
 func TestCompareVersion(t *testing.T) {
@@ -63,9 +65,9 @@ func TestValidateOpenCodeVersion(t *testing.T) {
 		version string
 		wantErr bool
 	}{
-		{version: "1.18.16"},
-		{version: "v1.18.16"},
-		{version: "1.18.15", wantErr: true},
+		{version: dependency.OpenCodeVersion},
+		{version: "v" + dependency.OpenCodeVersion},
+		{version: "1.18.16", wantErr: true},
 		{version: "2.0.0", wantErr: true},
 	} {
 		if err := validateOpenCodeVersion(tc.version); (err != nil) != tc.wantErr {

@@ -26,7 +26,7 @@ OpenCodeとその実行コマンドはVM内で自由に動かしながら、ホ�
 
 - Apple silicon Mac / macOS 26
 - Apple Container `1.2.2`
-- OpenCode host TUI / guest server: 同じv1系exact version（初期値`1.18.16`）
+- OpenCode host TUI / guest server: 同じv1系exact version（初期値`1.18.18`）
 - Go 1.22以降（ソースからビルドする場合）
 - OpenAI API key、またはCodexを利用できるChatGPT subscription
 

@@ -14,8 +14,8 @@ import (
 const (
 	AppleContainerVersion = "1.2.2"
 	AppleContainerCommit  = "0190097d06df0b9065f4c2d2c7873c649d81d493"
-	OpenCodeVersion       = "1.18.16"
-	OpenCodeCommit        = "a3647eb025c7615159d417dcc49fc39fdaeba65b"
+	OpenCodeVersion       = "1.18.18"
+	OpenCodeCommit        = "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
 	UrfaveCLIVersion      = "v3.10.1"
 )
 

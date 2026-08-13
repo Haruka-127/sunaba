@@ -1160,7 +1160,7 @@ func TestProjectInitCreatesPinnedPolicyAndSafeInitialSnapshot(t *testing.T) {
 	}
 	policyPath := filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json")
 	loaded, migrated, err := policy.LoadAndMigrate(policyPath, time.Now())
-	if err != nil || migrated || loaded.Mode != "dev" || loaded.Dependency.OpenCode != "1.18.16" {
+	if err != nil || migrated || loaded.Mode != "dev" || loaded.Dependency.OpenCode != dependency.OpenCodeVersion {
 		t.Fatalf("policy=%+v migrated=%v error=%v", loaded, migrated, err)
 	}
 	if _, err := os.Lstat(filepath.Join(store.Root, "projects", state.ProjectID(project), "initial-snapshot", "hello.txt")); err != nil {
