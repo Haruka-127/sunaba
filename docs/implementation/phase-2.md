@@ -12,6 +12,14 @@ Trusted Approval UIはmanagerの自由形式`Display`を描画せず、structure
 
 audited managerはrequest、confirmの成功・拒否、grant consumeをProject/VM/Sessionへ束縛してhost JSONLへ記録する。表示対象nonceと3 digest、summaryのSHA-256だけを記録し、guest由来summary本文は保存しない。requestのauditに失敗した場合はpending nonceを破棄し、confirmのauditに失敗した場合はgrantを発行せず、consumeのauditに失敗した場合はgrantを失効させてapplyを拒否する。
 
+## Change Set review
+
+pending Change Set schema v3は、検証済みbaseline SnapshotとMerged ViewをProjectのowner-only stateへ両方保存する。両方のmanifestと再構築したChange Set digestが一致した場合だけpendingを確定し、保存失敗時はVMを破棄しない。旧schema v2はhost worktreeがbaseline digestと一致する場合だけ内容reviewでき、一致しない場合も変更metadataとapply拒否理由を表示する。従来のapply互換性も保持する。
+
+公開`sunaba changes review`はadd/modify/delete/rename、type、mode、実行属性、symlink target、boundedなtext unified diffをhost worktreeへ書き込まず表示する。外部Git、diff、pager、editor、preview helperは起動しない。Snapshot全体と表示直前のfile identity、size、mode、SHA-256をfd-relative、`O_NOFOLLOW`で再検証し、binary、invalid UTF-8、巨大file、行・総量・表示件数上限はmetadataと未表示理由を明示する。path、target、diff本文はterminal sanitizerを通し、`--path`は表示だけを絞って部分applyにはしない。`changes apply`も同じrendererを再実行し、reviewしたChange Set digestへ従来のone-shot nonceを束縛する。
+
+unit/race testはtext diffの再構築、binary、実行属性、symlink、exact path filter、ANSI/OSC/BEL/bidi、baseline/Merged View改変、schema v2互換、bounded表示を検証する。公開CLI実機gateにもexport後の`changes review`を追加した。
+
 ## crash-safe apply
 
 applyはProject lockを取得し、残存transactionを回復してからhost baseline、Merged View実体、再計算したChange Setを照合する。全検証後にだけone-shot grantをconsumeする。
@@ -59,7 +67,7 @@ host safe parserはtrusted baselineとの差からadd/modify/deleteを再計算�
 再現コマンド:
 
 ```sh
-go test -race -v ./internal/approval ./internal/apply ./internal/lease ./internal/session
+go test -race -v ./internal/approval ./internal/apply ./internal/lease ./internal/session ./internal/workspace ./internal/trustedui ./internal/cli
 SUNABA_PHASE1_INTEGRATION=1 go test -tags=integration -run TestPhase1SecureSessionVerticalSlice -count=1 -v ./test/integration
 SUNABA_PHASE2_INTEGRATION=1 go test -tags=integration -run TestPhase2ActualOrphanCleanup -count=1 -v ./test/integration
 ```

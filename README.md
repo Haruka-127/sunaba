@@ -42,10 +42,11 @@ sunaba project init
 sunaba up
 sunaba agent
 sunaba changes export
+sunaba changes review
 sunaba changes apply
 ```
 
-`agent`を終了しても、secure modeのVM内にある編集状態は保持されます。`changes export`はVMを停止・検証してChange Setを作成し、`changes apply`はホスト側で内容を承認した場合だけ作業ツリーへ反映します。
+`agent`を終了しても、secure modeのVM内にある編集状態は保持されます。`changes export`はVMを停止・検証してChange Setを作成し、`changes review`は固定した変更前後の内容をhostへ書き込まずに表示します。`changes apply`は同じreviewを再表示し、ホスト側で承認した場合だけ作業ツリーへ反映します。
 
 ## セキュリティ上の注意
 

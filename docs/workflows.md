@@ -103,10 +103,11 @@ TUIを終了するとsession用Gatewayとrelayが失効し、VMは再びpauseし
 
 ```sh
 sunaba changes export --dir "$PROJECT"
+sunaba changes review --dir "$PROJECT"
 sunaba changes apply --dir "$PROJECT"
 ```
 
-export時に表示される変更pathとChange Set digestを確認します。apply時はTrusted Approval UIに表示されたnonceを手入力します。
+export後、reviewで変更内容、mode、symlinkと、binary・巨大file等の未表示警告を確認します。applyは同じChange Setを再表示し、Trusted Approval UIに表示されたnonceを手入力した場合だけhostへ反映します。
 
 適用後、ホスト側で通常のreviewとtestを行います。
 
@@ -143,6 +144,7 @@ sunaba shell --dir "$PROJECT"
 
 ```sh
 sunaba changes export --dir "$PROJECT"
+sunaba changes review --dir "$PROJECT"
 sunaba changes apply --dir "$PROJECT"
 ```
 
@@ -214,6 +216,7 @@ sunaba up --dir "$PROJECT"
 
 ```sh
 sunaba changes export --dir "$PROJECT"
+sunaba changes review --dir "$PROJECT"
 sunaba changes apply --dir "$PROJECT"
 ```
 
@@ -366,7 +369,7 @@ VMは最初からuntrustedとして扱われますが、悪意ある永続化や
 sunaba changes export --dir "$PROJECT"
 ```
 
-exportされたChange Setは安全なcodeとは限りません。pathとdigestだけでなく内容を慎重にreviewし、疑わしいscript、dependency、設定をhostで実行しないでください。適用する場合は通常どおり`changes apply`を使います。
+exportされたChange Setは安全なcodeとは限りません。`sunaba changes review --dir "$PROJECT"`で内容を慎重に確認し、疑わしいscript、dependency、設定をhostで実行しないでください。binaryや巨大file等の内容未表示警告がある場合はsize、digest、導入元を含めて判断します。適用する場合は通常どおり`changes apply`を使います。
 
 成果物を信用せず破棄する場合:
 
@@ -399,6 +402,7 @@ sunaba status --dir "$PROJECT"
 
 ```sh
 sunaba changes export --dir "$PROJECT"
+sunaba changes review --dir "$PROJECT"
 sunaba changes apply --dir "$PROJECT"
 ```
 

@@ -245,7 +245,7 @@ sunaba config diff --dir /path/to/project
 sunaba config apply --dir /path/to/project
 ```
 
-設定変更は、activeまたはpaused VMとpending Change Setがないときだけ適用できます。先に`changes export`、`changes apply`、`recreate --discard-pending`などで現在の状態を処理してください。未適用または不正な設定がある間、`up`、`agent`、`shell`はfail closedで拒否されます。
+設定変更は、activeまたはpaused VMとpending Change Setがないときだけ適用できます。先に`changes export`、`changes review`、`changes apply`、`recreate --discard-pending`などで現在の状態を処理してください。未適用または不正な設定がある間、`up`、`agent`、`shell`はfail closedで拒否されます。
 
 `project.json`には利用者が選ぶmode、resource、session、Model、Git、Web、export、auditの設定だけを記述します。dependency digest、credential、capability、push承認方針、Protected Pathなど、sunabaが強制する値は変更できません。内部の実効policyは手作業で編集しないでください。
 
@@ -320,13 +320,21 @@ sunaba changes export --dir /path/to/project
 
 exportはVMをfreeze・破棄し、追加、変更、削除、renameをホスト側で再構成します。unsafeなpath、symlink、hardlink、special file、`.git/`、sunaba管理領域、上限超過はホスト作業ツリーへ到達する前に拒否されます。
 
-表示されたpathとdigestを確認し、問題がなければ適用します。
+exportされたbaselineとMerged Viewはhost-only stateへ固定されます。次に、host worktreeへ書き込まずに内容差分を確認します。
+
+```sh
+sunaba changes review --dir /path/to/project
+```
+
+reviewは追加、変更、削除、rename、mode、実行属性、symlink targetとboundedなtext diffを表示します。binary、巨大file、invalid UTF-8等は実行・previewせず、size、SHA-256と未表示理由を表示します。特定pathだけを詳しく見る場合は`--path <exact-relative-path>`、metadataだけを見る場合は`--stat`を使えます。`--path`は表示だけを絞り、apply対象は常にChange Set全体です。
+
+内容とChange Set digestを確認し、問題がなければ適用します。
 
 ```sh
 sunaba changes apply --dir /path/to/project
 ```
 
-Trusted Approval UIに表示されたhost生成nonceを手入力した場合だけ適用されます。Snapshot作成後にホスト作業ツリーが変わっている場合は自動mergeせず拒否します。競合時はホスト側の変更を整理し、新しいSnapshotからやり直してください。
+`changes apply`は同じChange Setのreviewを再表示し、Trusted Approval UIに表示されたhost生成nonceを手入力した場合だけ適用します。Snapshot作成後にホスト作業ツリーが変わっている場合は自動mergeせず拒否します。競合時はホスト側の変更を整理し、新しいSnapshotからやり直してください。
 
 apply後はホスト上で通常どおりdiff、test、code reviewを行い、必要ならcommitします。VM内の`.git/`はホストへ反映されません。
 
@@ -417,6 +425,7 @@ Projectを対象にするcommandは、通常次のいずれかで対象を選び
 | `sunaba project list` | 登録済みProjectを一覧表示する |
 | `sunaba project list --active` | 到達可能なSupervisorまたはrunning VMがあるProjectだけを表示する |
 | `sunaba status` | mode、VM、session、quota、Gateway、pending Change Setを確認する |
+| `sunaba changes review` | pending Change Setの内容とriskをhostへ適用せず確認する |
 | `sunaba up` | secure VMを準備してpauseする。devではforeground session用artifactだけを準備する |
 | `sunaba agent` | OpenCode sessionを開始する |
 | `sunaba shell` | sanitized shellを開始する |

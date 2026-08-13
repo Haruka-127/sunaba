@@ -203,7 +203,7 @@ func pendingInventoryState(projectState, projectID string) string {
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(io.LimitReader(file, 16<<20))
-	if decoder.Decode(&identity) != nil || identity.Version != pendingChangeVersion || identity.ProjectID != projectID {
+	if decoder.Decode(&identity) != nil || (identity.Version != pendingChangeVersion && identity.Version != legacyPendingChangeVersion) || identity.ProjectID != projectID {
 		return "invalid"
 	}
 	return "yes"

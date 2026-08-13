@@ -42,7 +42,7 @@ HELP="$({
   ./bin/sunaba up --help
   ./bin/sunaba destroy --help
 })"
-for REQUIRED in 'setup' '--config-only' 'versions' 'track' 'v1-stable' 'update' 'check' 'credentials' 'openai' 'project' 'init' '[path]' '--model-auth' 'oauth' 'api-key' 'config' 'validate' 'apply' 'agent' 'remote' 'web' 'approvals' 'changes' 'export' 'destroy' '--project-id' '--mode' 'secure' 'dev' 'never bind-mounted'; do
+for REQUIRED in 'setup' '--config-only' 'versions' 'track' 'v1-stable' 'update' 'check' 'credentials' 'openai' 'project' 'init' '[path]' '--model-auth' 'oauth' 'api-key' 'config' 'validate' 'apply' 'agent' 'remote' 'web' 'approvals' 'changes' 'export' 'review' 'destroy' '--project-id' '--mode' 'secure' 'dev' 'never bind-mounted'; do
   grep -Fq -- "$REQUIRED" <<<"$HELP" || fail cli-help "missing $REQUIRED"
 done
 for OBSOLETE in '--no-firewall' 'env set' 'git set' 'reset --full' 'automatic approval'; do

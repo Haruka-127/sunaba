@@ -94,6 +94,10 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	if err != nil || !strings.Contains(exported, "persistent.txt") || !strings.Contains(exported, "Change Set:") {
 		t.Fatalf("CLI export error=%v output=%s", err, exported)
 	}
+	reviewed, err := runSunaba("", "changes", "review", "--project-id", projectID)
+	if err != nil || !strings.Contains(reviewed, "SUNABA HOST CHANGE SET REVIEW") || !strings.Contains(reviewed, "+persistent") {
+		t.Fatalf("CLI review error=%v output=%s", err, reviewed)
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Lstat(locator); errors.Is(err, os.ErrNotExist) {

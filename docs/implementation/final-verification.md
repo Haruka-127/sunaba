@@ -38,6 +38,8 @@ SUNABA_FUZZ=1 scripts/verify.sh
 
 2026-08-13の共通Project ID selector追加でも通常gateを再実行してPASSした。すべての公開Project操作で`--project-id`の完全一致、`--dir`との排他、重複指定を共通化し、通常操作ではread-only policy、Project ID、現存するcanonical Project rootを検証する。復旧操作の`down`と`destroy`では、unsafe/symlink stateとSupervisor ID不一致を拒否し、元Project directoryとpolicy・host設定がないsafeな`unknown` stateを扱う経路をunit/race/CLI/static gateで検証した。公開CLI integrationは`up`、`status`、`shell`、`changes export`をID指定で実行し、元Project directoryを除去してからID指定でdestroyする経路へ更新してintegration tagでcompileした。Apple Container実機integrationとfuzzはこの変更では再実行していない。
 
+2026-08-13のChange Set review追加でも通常gateと`internal/workspace`、`internal/trustedui`、`internal/cli`のrace testを再実行してPASSした。pending schema v3のbaseline/Merged View自己完結保存、旧schema v2互換、manifest/digestとfd-relative content再検証、bounded text diff、binary/巨大fileの未表示警告、実行属性・symlink risk、ANSI/OSC/BEL/bidi sanitize、exact path filter、apply前の同一digest再reviewをunit testへ固定した。公開CLI実機gateには`changes review`を追加したが、Apple Container実機integrationはこの変更では再実行していない。
+
 ## 最新の実機gate
 
 2026-08-11の最新HEADで次を直接実行した。

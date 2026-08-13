@@ -498,7 +498,7 @@ func (a *app) status(ctx context.Context, dir string) error {
 	return listErr
 }
 
-func (a *app) changes(ctx context.Context, action, dir string) error {
+func (a *app) changes(ctx context.Context, action, dir string, reviewOptions workspace.ReviewOptions) error {
 	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
@@ -536,18 +536,31 @@ func (a *app) changes(ctx context.Context, action, dir string) error {
 				return pendingErr
 			}
 		}
-		fmt.Fprintf(a.output, "Change Set: %s\nBaseline: %s\nMerged: %s\nCreated: %s\n", pending.ChangeSet.Digest, pending.Baseline.Digest, pending.Merged.Digest, pending.CreatedAt.Format(time.RFC3339))
-		for _, change := range pending.ChangeSet.Changes {
-			if change.Kind == workspace.ChangeRename {
-				fmt.Fprintf(a.output, "%s %s <- %s\n", change.Kind, approval.SanitizeText(change.Path), approval.SanitizeText(change.From))
-			} else {
-				fmt.Fprintf(a.output, "%s %s\n", change.Kind, approval.SanitizeText(change.Path))
-			}
+		review, err := buildPendingReview(pending, projectPolicy, workspace.ReviewOptions{Context: workspace.DefaultReviewContext, StatOnly: true}, true)
+		if err != nil {
+			return err
 		}
-		return nil
+		return trustedui.RenderChangeReview(a.output, pending.ProjectID, review)
+	case "review":
+		pending, err := loadPending(projectState, projectPolicy)
+		if err != nil {
+			return err
+		}
+		review, err := buildPendingReview(pending, projectPolicy, reviewOptions, true)
+		if err != nil {
+			return err
+		}
+		return trustedui.RenderChangeReview(a.output, pending.ProjectID, review)
 	case "apply":
 		pending, err := loadPending(projectState, projectPolicy)
 		if err != nil {
+			return err
+		}
+		review, err := buildPendingReview(pending, projectPolicy, workspace.ReviewOptions{Context: workspace.DefaultReviewContext}, false)
+		if err != nil {
+			return err
+		}
+		if err := trustedui.RenderChangeReview(a.output, pending.ProjectID, review); err != nil {
 			return err
 		}
 		recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
@@ -559,7 +572,7 @@ func (a *app) changes(ctx context.Context, action, dir string) error {
 			return err
 		}
 		binding := approval.Binding{ProjectID: pending.ProjectID, BaselineDigest: pending.Baseline.Digest, MergedDigest: pending.Merged.Digest, ChangeSetDigest: pending.ChangeSet.Digest}
-		request, err := approvals.NewRequest(binding, fmt.Sprintf("%d paths", len(pending.ChangeSet.Changes)), 5*time.Minute)
+		request, err := approvals.NewRequest(binding, fmt.Sprintf("%d paths; executable=%d symlink=%d opaque=%d omitted=%d", len(pending.ChangeSet.Changes), review.Executable, review.Symlink, review.Opaque, review.Omitted), 5*time.Minute)
 		if err != nil {
 			return err
 		}
@@ -589,6 +602,24 @@ func (a *app) changes(ctx context.Context, action, dir string) error {
 	default:
 		return fmt.Errorf("unknown changes action %q", action)
 	}
+}
+
+func buildPendingReview(pending pendingChange, projectPolicy policy.ProjectPolicy, options workspace.ReviewOptions, allowLegacyMetadata bool) (workspace.Review, error) {
+	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	if err != nil {
+		return workspace.Review{}, err
+	}
+	baselineRoot := pending.BaselineRoot
+	if pending.Version == legacyPendingChangeVersion {
+		baselineRoot = pending.ProjectRoot
+		if allowLegacyMetadata {
+			current, currentErr := workspace.BuildSnapshotManifest(baselineRoot, compiled.Snapshot)
+			if currentErr != nil || current.Digest != pending.Baseline.Digest {
+				return workspace.BuildMetadataOnlyReview(pending.Baseline, pending.Merged, pending.ChangeSet, compiled.Snapshot, options)
+			}
+		}
+	}
+	return workspace.BuildReview(baselineRoot, pending.MergedRoot, pending.Baseline, pending.Merged, pending.ChangeSet, compiled.Snapshot, options)
 }
 
 func (a *app) approvals(ctx context.Context, dir string) error {

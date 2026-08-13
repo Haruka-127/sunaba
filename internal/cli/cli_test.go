@@ -76,7 +76,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		}
 	}
 	text := output.String()
-	for _, expected := range []string{"setup", "--config-only", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "remote", "add", "web", "approvals", "changes", "export", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
+	for _, expected := range []string{"setup", "--config-only", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "remote", "add", "web", "approvals", "changes", "export", "review", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -243,7 +243,7 @@ func TestEveryPublicProjectCommandExposesProjectIDSelector(t *testing.T) {
 		{"model", "auth", "api-key"}, {"model", "auth", "oauth"}, {"model", "set"}, {"model", "list"},
 		{"up"}, {"agent"}, {"git", "remote", "add"}, {"git", "remote", "remove"}, {"git", "remote", "list"}, {"git", "disable"},
 		{"web", "enable"}, {"web", "refresh"}, {"web", "disable"}, {"shell"}, {"status"},
-		{"changes", "export"}, {"changes", "apply"}, {"approvals"}, {"recreate"}, {"down"}, {"destroy"},
+		{"changes", "export"}, {"changes", "review"}, {"changes", "apply"}, {"approvals"}, {"recreate"}, {"down"}, {"destroy"},
 	}
 	for _, command := range commands {
 		var output bytes.Buffer
@@ -1103,10 +1103,13 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotPolicy: compiled.Snapshot, ExportPolicyDigest: compiled.Digest}
+	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicyDigest: compiled.Digest}
 	persisted, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedSource, Merged: merged, ChangeSet: changes})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if persisted.Version != pendingChangeVersion || persisted.BaselineRoot != filepath.Join(projectState, "pending", "baseline") {
+		t.Fatalf("pending baseline identity=%+v", persisted)
 	}
 	canonicalMergedRoot, err := filepath.EvalSymlinks(persisted.MergedRoot)
 	if err != nil {
@@ -1134,6 +1137,15 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if _, err := loadPending(projectState, changedPolicy); err == nil || !strings.Contains(err.Error(), "export policy") {
 		t.Fatalf("changed export policy was accepted: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(loaded.BaselineRoot, "file.txt"), []byte("tampered baseline\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPending(projectState, testPolicy); err == nil || !strings.Contains(err.Error(), "baseline") {
+		t.Fatalf("tampered pending baseline was accepted: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(loaded.BaselineRoot, "file.txt"), []byte("before\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(loaded.MergedRoot, "file.txt"), []byte("tampered\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1142,6 +1154,79 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	}
 	if err := removePending(projectState); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLegacyPendingChangeRemainsReviewableWhenHostMatchesBaseline(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(root, "project")
+	mergedSource := filepath.Join(root, "merged-source")
+	projectState := filepath.Join(root, "state", "projects", "project")
+	for _, directory := range []string{project, mergedSource, projectState} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(project, "file.txt"), []byte("before\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mergedSource, "file.txt"), []byte("after\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	policyValue := policy.ProjectPolicy{ProjectID: "project", ProjectRoot: project, Export: policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30}, ProtectedPaths: []string{".git"}}
+	compiled, err := policy.CompileExportPolicy(policyValue.Export, policyValue.ProtectedPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := workspace.BuildSnapshotManifest(project, compiled.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := workspace.BuildSnapshotManifest(mergedSource, compiled.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := workspace.BuildChangeSet(baseline, merged, compiled.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicyDigest: compiled.Digest}
+	persisted, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedSource, Merged: merged, ChangeSet: changes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(persisted.BaselineRoot); err != nil {
+		t.Fatal(err)
+	}
+	persisted.Version = legacyPendingChangeVersion
+	persisted.BaselineRoot = ""
+	persisted.Baseline = baseline
+	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), persisted); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadPending(projectState, policyValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := buildPendingReview(loaded, policyValue, workspace.ReviewOptions{Context: 1}, true)
+	if err != nil || len(review.Items) != 1 || len(review.Items[0].Hunks) == 0 {
+		t.Fatalf("legacy review=%+v error=%v", review, err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "file.txt"), []byte("host changed\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := buildPendingReview(loaded, policyValue, workspace.ReviewOptions{Context: 1}, true)
+	if err != nil || !metadata.BaselineMissing || metadata.Opaque != 1 || metadata.Items[0].OpaqueReason == "" {
+		t.Fatalf("legacy metadata review=%+v error=%v", metadata, err)
+	}
+	if _, err := buildPendingReview(loaded, policyValue, workspace.ReviewOptions{Context: 1}, false); err == nil {
+		t.Fatal("legacy apply review accepted a changed host baseline")
+	}
+	if state := pendingInventoryState(projectState, "project"); state != "yes" {
+		t.Fatalf("legacy pending inventory=%q", state)
 	}
 }
 

@@ -463,6 +463,10 @@ canonical manifestは、正規化済み相対path、file type、mode、size、co
 7. 利用者または後続の検査処理へ、制御文字をescapeしたChange Setを提示する。
 8. 承認されたChange Setだけをホスト作業ツリーへ適用する。
 
+pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みbaseline Snapshot、検証済みMerged View、両manifest、Change Setを自己完結した組として保存する。保存した両SnapshotとChange Setのdigestを再検証できた場合だけpendingを確定し、容量不足や保存失敗ではAgent VMを破棄しない。これによりexport後にhost worktreeが変化しても変更前後の内容を再現可能にする。ただしhost baselineが変化したpendingのapplyは9.5のとおり拒否する。
+
+内容確認はhost側の`changes review`で行う。reviewはread-onlyであり、保存済みbaselineとMerged Viewをfd-relativeかつsymlink非追跡で再検証し、Change Set digestへ対応する追加、変更、削除、rename、type、mode、実行属性、symlink target、text差分を表示する。差分生成と表示ではProjectのGit設定、外部`diff`、pager、editor、syntax highlighter、MIME判定、preview helper、scriptを起動しない。text判定、1 file、総入力、行長、行数、diff出力へhost固定の上限を設け、binary、invalid UTF-8、巨大file等の内容を表示できない場合はsize、SHA-256、modeと未表示理由を明示する。path、symlink target、diff本文を含むすべてのuntrusted表示はterminal sanitizerを通す。
+
 ### 9.4 Change Setの検証と適用
 
 最低限、次を検査する。
@@ -476,6 +480,8 @@ canonical manifestは、正規化済み相対path、file type、mode、size、co
 - baseline digestと現在のホスト状態の一致
 - `.git/`、sunaba管理metadata等のProtected Pathが含まれていないこと
 - pathと表示文字列に含まれるANSI/OSC、改行、双方向文字等が承認UIで安全にescapeされること
+- 保存済みbaselineとMerged Viewの実体がmanifestおよびChange Set digestと一致し、review中のfile差し替えを検出すること
+- reviewで内容未表示となったbinary、巨大file、上限超過を黙って承認済みとして扱わず、対象metadataと未表示理由を明示すること
 
 guestが提出するパッチや変更一覧は表示用の参考にはできるが、権威ある入力にしてはならない。
 
@@ -1110,6 +1116,7 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 - applyはProject lock、fd-relative/no-follow、temp file + renameで行われ、途中失敗を成功扱いしない。
 - 同じcanonical Projectの重複登録と同時applyが拒否される。
 - 未承認Change Setを自動importせず、clean VMをbaselineから再生成できる。
+- export後のpendingだけから、host worktreeへ書き込まずに同じChange Setの内容reviewを再現できる。
 
 ### 20.6 リソースと監査
 
@@ -1123,6 +1130,7 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 - 承認はhostが生成したnonceとChange Set digestまたはGit object IDへ束縛される。
 - file名、diff、log、server message内のANSI/OSC、改行、双方向文字が承認UIと監査表示で安全にescapeされる。
 - clipboard、file transfer、外部editor等のhost作用を持つterminal sequenceが拒否される。
+- Change Set reviewは外部diff、pager、editor、preview helperを自動起動せず、boundedなhost実装だけで表示される。
 
 ---
 
@@ -1153,7 +1161,8 @@ sunaba agent                     server、relay、Host TUIを起動してAgent S
 sunaba shell                     bounded line commandをterminal sanitizer経由で実行
 sunaba status                    mode、VM、session、quota、未export変更を表示
 sunaba changes export            freeze/exportとChange Set作成
-sunaba changes apply             Trusted Approval UIでChange Set確認後にhost適用
+sunaba changes review            保存済みbaselineとMerged Viewから安全な内容差分を表示
+sunaba changes apply             同じChange Setを再reviewし、Trusted Approval UIで確認後にhost適用
 sunaba approvals                 pending push/apply requestをhost側で確認・処理
 sunaba recreate                  optional export後にclean VM再生成
 sunaba down                      VM停止（状態保持）
@@ -1184,7 +1193,7 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 - devへ切り替える場合は、情報流出防止を保証しない旨を明示する。
 - Git Gateway実装後も通常のGitコマンドを使う。push requestはhost側のpending approvalとなり、OpenCode TUIと分離したTrusted Approval UIで確認する。
 - Web Gatewayを有効にすると、新規Projectでは`common-development` presetを利用する。`origin_presets`を空にすればpresetを使わず、`web-origins.txt`だけ、またはpresetへのProject固有追加として構成できる。
-- hostへ反映するときだけ、Trusted Approval UIでChange Setのdigestと対象pathを確認する。
+- hostへ反映する前に`changes review`でChange Setの内容、mode、symlink、binary/巨大fileの未表示警告を確認する。`changes apply`も同じdigestのreviewを再表示してからTrusted Approval UIへ進む。
 
 ---
 

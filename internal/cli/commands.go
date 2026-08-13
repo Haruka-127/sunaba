@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	urfavecli "github.com/urfave/cli/v3"
+
+	"sunaba/internal/workspace"
 )
 
 func (a *app) run(ctx context.Context, args []string) error {
@@ -232,14 +234,22 @@ func (a *app) webCommand() *urfavecli.Command {
 }
 
 func (a *app) changesCommand() *urfavecli.Command {
-	commands := make([]*urfavecli.Command, 0, 2)
-	for _, action := range []string{"export", "apply"} {
+	commands := make([]*urfavecli.Command, 0, 3)
+	for _, action := range []string{"export", "review", "apply"} {
 		action := action
-		commands = append(commands, &urfavecli.Command{Name: action, Usage: map[string]string{"export": "Export VM changes as a trusted Change Set", "apply": "Apply an approved Change Set to the host Project"}[action], Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
-			return a.changes(ctx, action, dir)
+		flags := projectSelectorFlags()
+		if action == "review" {
+			flags = projectSelectorFlags(
+				&urfavecli.BoolFlag{Name: "stat", Usage: "Show metadata and risk summary without file content", OnlyOnce: true},
+				&urfavecli.StringFlag{Name: "path", Usage: "Review one exact Change Set path (apply still applies the entire set)", OnlyOnce: true},
+				&urfavecli.IntFlag{Name: "context", Value: workspace.DefaultReviewContext, Usage: "Unified diff context lines (0-20)", OnlyOnce: true},
+			)
+		}
+		commands = append(commands, &urfavecli.Command{Name: action, Usage: map[string]string{"export": "Export VM changes as a trusted Change Set", "review": "Safely review a pending Change Set before host apply", "apply": "Review and apply an approved Change Set to the host Project"}[action], Flags: flags, Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.changes(ctx, action, dir, workspace.ReviewOptions{Context: cmd.Int("context"), StatOnly: cmd.Bool("stat"), Path: cmd.String("path")})
 		}))})
 	}
-	return &urfavecli.Command{Name: "changes", Usage: "Export and apply Project changes", Commands: commands}
+	return &urfavecli.Command{Name: "changes", Usage: "Export, review, and apply Project changes", Commands: commands}
 }
 
 func (a *app) firewallCommand() *urfavecli.Command {
