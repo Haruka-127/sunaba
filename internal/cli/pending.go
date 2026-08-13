@@ -50,12 +50,25 @@ func persistPending(projectState string, active *session.Session, result session
 		}
 	}()
 	mergedRoot := filepath.Join(pendingRoot, "merged")
-	merged, err := workspace.CreateProjectSnapshot(result.MergedRoot, mergedRoot, active.SnapshotPolicy)
-	if err != nil || merged.Digest != result.Merged.Digest {
+	source, err := workspace.CreateProjectSnapshot(result.MergedRoot, mergedRoot, active.SnapshotPolicy)
+	if err != nil {
 		return pendingChange{}, fmt.Errorf("persist verified Merged View: %w", err)
 	}
+	if source.Digest != result.Merged.Digest {
+		return pendingChange{}, fmt.Errorf("persisted Merged View digest changed")
+	}
+	merged, err := workspace.BuildSnapshotManifest(mergedRoot, active.SnapshotPolicy)
+	if err != nil {
+		return pendingChange{}, fmt.Errorf("verify persisted Merged View: %w", err)
+	}
+	if merged.Digest != result.Merged.Digest {
+		return pendingChange{}, fmt.Errorf("persisted Merged View digest changed")
+	}
 	rebuilt, err := workspace.BuildChangeSet(active.Baseline, merged, active.SnapshotPolicy)
-	if err != nil || rebuilt.Digest != result.ChangeSet.Digest {
+	if err != nil {
+		return pendingChange{}, fmt.Errorf("rebuild persisted Change Set: %w", err)
+	}
+	if rebuilt.Digest != result.ChangeSet.Digest {
 		return pendingChange{}, fmt.Errorf("persisted Change Set digest changed")
 	}
 	pending := pendingChange{

@@ -1108,12 +1108,26 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	canonicalMergedRoot, err := filepath.EvalSymlinks(persisted.MergedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Merged.Root != canonicalMergedRoot {
+		t.Fatalf("persisted Merged View root=%q, want %q", persisted.Merged.Root, canonicalMergedRoot)
+	}
+	if persisted.Merged.Root == merged.Root {
+		t.Fatalf("persisted Merged View retained source root %q", merged.Root)
+	}
 	if state := pendingInventoryState(projectState, testPolicy.ProjectID); state != "yes" {
 		t.Fatalf("persisted pending inventory state=%q", state)
 	}
 	loaded, err := loadPending(projectState, testPolicy)
 	if err != nil || loaded.ChangeSet.Digest != persisted.ChangeSet.Digest {
 		t.Fatalf("loaded=%+v error=%v", loaded, err)
+	}
+	stageRoot := filepath.Join(root, "stage")
+	if _, err := workspace.CreateApprovedSnapshotSubset(loaded.MergedRoot, stageRoot, loaded.Merged, []string{"file.txt"}, compiled.Snapshot); err != nil {
+		t.Fatalf("stage persisted Merged View: %v", err)
 	}
 	changedPolicy := testPolicy
 	changedPolicy.Export.MaxFileBytes--
