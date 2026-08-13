@@ -9,8 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
+
+	"sunaba/internal/boundedexec"
 )
 
 type ProposedRefUpdate struct {
@@ -146,31 +149,37 @@ type repositoryGit struct {
 }
 
 func (g repositoryGit) run(ctx context.Context, args ...string) error {
-	_, err := g.command(ctx, args...).CombinedOutput()
+	operationContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	_, err := boundedexec.Capture(g.command(operationContext, args...), boundedexec.Limits{StdoutBytes: 64 << 10, StderrBytes: 64 << 10})
 	return err
 }
 
 func (g repositoryGit) output(ctx context.Context, args ...string) (string, error) {
-	output, err := g.command(ctx, args...).CombinedOutput()
+	operationContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	result, err := boundedexec.Capture(g.command(operationContext, args...), boundedexec.Limits{StdoutBytes: 4096, StderrBytes: 16 << 10})
 	if err != nil {
 		return "", fmt.Errorf("host Git operation failed")
 	}
-	if bytes.IndexByte(output, 0) >= 0 || len(output) > 4096 {
+	if bytes.IndexByte(result.Stdout, 0) >= 0 {
 		return "", fmt.Errorf("invalid host Git output")
 	}
-	return string(output), nil
+	return string(result.Stdout), nil
 }
 
 func (g repositoryGit) ref(ctx context.Context, ref string) (string, bool, error) {
-	output, err := g.command(ctx, "show-ref", "--verify", "--hash", ref).CombinedOutput()
+	operationContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	result, err := boundedexec.Capture(g.command(operationContext, "show-ref", "--verify", "--hash", ref), boundedexec.Limits{StdoutBytes: 4096, StderrBytes: 16 << 10})
 	if err != nil {
 		var exitError *exec.ExitError
-		if errors.As(err, &exitError) && exitError.ExitCode() == 1 && len(output) == 0 {
+		if errors.As(err, &exitError) && exitError.ExitCode() == 1 && len(result.Stdout) == 0 {
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("read host Git ref: operation failed")
 	}
-	value := strings.TrimSpace(string(output))
+	value := strings.TrimSpace(string(result.Stdout))
 	if !objectIDPattern.MatchString(value) {
 		return "", false, fmt.Errorf("invalid host Git ref object")
 	}

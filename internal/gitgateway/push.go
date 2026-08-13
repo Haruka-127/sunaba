@@ -8,10 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
 	"sunaba/internal/audit"
+	"sunaba/internal/boundedexec"
 )
 
 type PushExecutor struct {
@@ -123,7 +125,9 @@ func (e PushExecutor) runGit(ctx context.Context, operationArgs []string) error 
 		return fmt.Errorf("host Git path must be absolute")
 	}
 	args := append([]string{"--git-dir=" + e.Resolver.RepositoryPath}, operationArgs...)
-	command := exec.CommandContext(ctx, gitPath, args...)
+	operationContext, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(operationContext, gitPath, args...)
 	command.Dir = e.Resolver.RepositoryPath
 	configCount := "1"
 	if e.TLSCAInfoPath != "" {
@@ -152,7 +156,7 @@ func (e PushExecutor) runGit(ctx context.Context, operationArgs []string) error 
 		)
 	}
 	command.Stdin = nil
-	if _, err := command.CombinedOutput(); err != nil {
+	if _, err := boundedexec.Capture(command, boundedexec.Limits{StdoutBytes: 64 << 10, StderrBytes: 64 << 10}); err != nil {
 		return fmt.Errorf("host Git operation was rejected by fixed upstream")
 	}
 	return nil

@@ -119,6 +119,75 @@ func TestTCPToUnixRelay(t *testing.T) {
 	}
 }
 
+func TestRelayRejectsConnectionsAboveLimit(t *testing.T) {
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpListener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, acceptErr := tcpListener.Accept()
+		if acceptErr == nil {
+			accepted <- connection
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socket := filepath.Join(t.TempDir(), "bounded-relay.sock")
+	done := make(chan error, 1)
+	go func() {
+		done <- (Relay{
+			SocketPath: socket, Target: tcpListener.Addr().String(), MaxConnections: 1,
+			DialTimeout: time.Second, IdleTimeout: time.Second,
+		}).Serve(ctx)
+	}()
+	waitForSocketFile(t, socket)
+
+	first, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	var target net.Conn
+	select {
+	case target = <-accepted:
+		defer target.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay did not establish the first target connection")
+	}
+
+	second, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if err := second.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection above relay limit remained open")
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRelaySettingsRejectUnboundedValues(t *testing.T) {
+	if _, err := relaySettingsFor(maximumMaxConnections+1, time.Second, time.Second); err == nil {
+		t.Fatal("excessive connection limit was accepted")
+	}
+	if _, err := relaySettingsFor(1, maximumDialTimeout+time.Second, time.Second); err == nil {
+		t.Fatal("excessive dial timeout was accepted")
+	}
+	if _, err := relaySettingsFor(1, time.Second, maximumIdleTimeout+time.Second); err == nil {
+		t.Fatal("excessive idle timeout was accepted")
+	}
+}
+
 func waitForSocket(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -126,6 +195,18 @@ func waitForSocket(t *testing.T, path string) {
 		conn, err := net.DialTimeout("unix", path, 10*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("socket %s did not become ready", path)
+}
+
+func waitForSocketFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

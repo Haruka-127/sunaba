@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"sunaba/internal/audit"
+	"sunaba/internal/boundedexec"
 	"sunaba/internal/gitgateway"
 	"sunaba/internal/policy"
 	"sunaba/internal/session"
@@ -251,16 +252,16 @@ func hostGitAuthorization(ctx context.Context, remote string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("host Git is required to obtain the configured upstream credential")
 	}
-	command := exec.CommandContext(ctx, gitPath, "credential", "fill")
+	credentialContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(credentialContext, gitPath, "credential", "fill")
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	command.Stdin = strings.NewReader("protocol=https\nhost=" + parsed.Host + "\npath=" + strings.TrimPrefix(parsed.Path, "/") + "\n\n")
-	var output strings.Builder
-	command.Stdout = &boundedStringWriter{builder: &output, remaining: 64 << 10}
-	command.Stderr = nil
-	if err := command.Run(); err != nil {
+	result, err := boundedexec.Capture(command, boundedexec.Limits{StdoutBytes: 64 << 10, StderrBytes: 16 << 10})
+	if err != nil {
 		return "", fmt.Errorf("host Git credential lookup failed for the configured remote")
 	}
-	return parseGitCredential(output.String())
+	return parseGitCredential(string(result.Stdout))
 }
 
 func parseGitCredential(output string) (string, error) {
@@ -286,19 +287,6 @@ func parseGitCredential(output string) (string, error) {
 		return "", fmt.Errorf("host Git credential helper did not provide a supported HTTPS credential")
 	}
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(fields["username"]+":"+fields["password"])), nil
-}
-
-type boundedStringWriter struct {
-	builder   *strings.Builder
-	remaining int
-}
-
-func (w *boundedStringWriter) Write(data []byte) (int, error) {
-	if len(data) > w.remaining {
-		return 0, fmt.Errorf("bounded output exceeded")
-	}
-	w.remaining -= len(data)
-	return w.builder.Write(data)
 }
 
 func ensureGitQuarantine(ctx context.Context, gitPath, projectState, remoteName, remoteURL string) (string, error) {

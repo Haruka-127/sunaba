@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"sunaba/internal/boundedexec"
 )
 
 type AppleContainer struct {
@@ -307,17 +309,11 @@ func (r *AppleContainer) output(ctx context.Context, name string, args ...string
 		fmt.Fprintf(r.Stderr, "+ %s %s\n", name, strings.Join(args, " "))
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
-	var out, errb bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
-	err := cmd.Run()
+	result, err := boundedexec.Capture(cmd, boundedexec.Limits{StdoutBytes: 16 << 20, StderrBytes: 1 << 20})
 	if err != nil {
-		if errb.Len() > 0 {
-			return out.String(), fmt.Errorf("%s %s failed: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
-		}
-		return out.String(), fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err)
+		return string(result.Stdout), fmt.Errorf("%s operation failed: %w", name, err)
 	}
-	return out.String(), nil
+	return string(result.Stdout), nil
 }
 
 type appleContainerDocument struct {
