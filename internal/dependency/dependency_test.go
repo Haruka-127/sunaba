@@ -116,6 +116,16 @@ func TestManifestRejectsSourceCommitDrift(t *testing.T) {
 	}
 }
 
+func TestPinnedReturnsIndependentMaps(t *testing.T) {
+	first := MustPinned()
+	first.GoModules["golang.org/x/sys"] = "modified"
+	first.Provenance.BuildInputs["opencode_version"] = "modified"
+	second := MustPinned()
+	if second.GoModules["golang.org/x/sys"] == "modified" || second.Provenance.BuildInputs["opencode_version"] == "modified" {
+		t.Fatal("caller mutation changed the cached embedded manifest")
+	}
+}
+
 func TestManifestRejectsLatestURL(t *testing.T) {
 	m := MustPinned()
 	m.OpenCode.Host.URL = "https://example.invalid/releases/latest/download/" + m.OpenCode.Host.Artifact

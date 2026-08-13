@@ -24,6 +24,9 @@ const (
 	backupPath  = "/etc/pf.conf.sunaba.bak"
 )
 
+var interfaceNamePattern = regexp.MustCompile(`^[a-zA-Z0-9]+$`)
+var ifconfigInterfacePattern = regexp.MustCompile(`(?m)^([a-zA-Z0-9]+):`)
+
 type Network struct {
 	Interface  string `json:"interface,omitempty"`
 	Subnet     string `json:"subnet"`
@@ -75,7 +78,7 @@ func GenerateQuiescedRules(n Network) string {
 }
 
 func ValidateNetwork(n Network) error {
-	if n.Interface != "" && !regexp.MustCompile(`^[a-zA-Z0-9]+$`).MatchString(n.Interface) {
+	if n.Interface != "" && !interfaceNamePattern.MatchString(n.Interface) {
 		return fmt.Errorf("invalid network interface %q", n.Interface)
 	}
 	subnetIP, _, err := net.ParseCIDR(n.Subnet)
@@ -586,10 +589,9 @@ func interfaceForGateway(ctx context.Context, gw string) string {
 	if err != nil {
 		return ""
 	}
-	re := regexp.MustCompile(`(?m)^([a-zA-Z0-9]+):`)
 	var current string
 	for _, line := range strings.Split(string(out), "\n") {
-		if m := re.FindStringSubmatch(line); m != nil {
+		if m := ifconfigInterfacePattern.FindStringSubmatch(line); m != nil {
 			current = m[1]
 		}
 		if current != "" && strings.Contains(line, gw) {

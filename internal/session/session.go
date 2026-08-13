@@ -34,6 +34,7 @@ var sessionIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{5,63}$`)
 var secretPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{32,256}$`)
 var gitRemoteNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 var exportPolicyDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var memoryLimitPattern = regexp.MustCompile(`^([1-9][0-9]*)([KMGTP]?)$`)
 
 const guestResourceProbeBegin = "SUNABA_RESOURCE_PROBE_BEGIN"
 const guestResourceProbeEnd = "SUNABA_RESOURCE_PROBE_END"
@@ -810,7 +811,7 @@ func (s *Session) validateGuestResources(out string) error {
 }
 
 func parseMemoryBytes(value string) (int64, error) {
-	match := regexp.MustCompile(`^([1-9][0-9]*)([KMGTP]?)$`).FindStringSubmatch(strings.ToUpper(value))
+	match := memoryLimitPattern.FindStringSubmatch(strings.ToUpper(value))
 	if match == nil {
 		return 0, fmt.Errorf("invalid memory limit %q", value)
 	}

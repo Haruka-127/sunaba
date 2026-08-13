@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 const (
@@ -21,6 +22,14 @@ const (
 
 //go:embed manifest.json
 var manifestFS embed.FS
+
+var (
+	v1VersionPattern      = regexp.MustCompile(`^1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	exactVersionPattern   = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+	sha256Pattern         = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	commitPattern         = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	embeddedManifestValue = sync.OnceValues(loadEmbeddedManifest)
+)
 
 type Artifact struct {
 	OS               string `json:"os"`
@@ -82,18 +91,29 @@ type UpdateEvidence struct {
 }
 
 func Pinned() (Manifest, error) {
+	value, err := embeddedManifestValue()
+	return cloneManifest(value.manifest), err
+}
+
+type embeddedManifest struct {
+	manifest Manifest
+	digest   string
+}
+
+func loadEmbeddedManifest() (embeddedManifest, error) {
 	data, err := manifestFS.ReadFile("manifest.json")
 	if err != nil {
-		return Manifest{}, err
+		return embeddedManifest{}, err
 	}
 	var manifest Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, fmt.Errorf("decode dependency manifest: %w", err)
+		return embeddedManifest{}, fmt.Errorf("decode dependency manifest: %w", err)
 	}
 	if err := manifest.Validate(); err != nil {
-		return Manifest{}, err
+		return embeddedManifest{}, err
 	}
-	return manifest, nil
+	digest := sha256.Sum256(data)
+	return embeddedManifest{manifest: manifest, digest: hex.EncodeToString(digest[:])}, nil
 }
 
 func MustPinned() Manifest {
@@ -105,15 +125,25 @@ func MustPinned() Manifest {
 }
 
 func ManifestSHA256() (string, error) {
-	data, err := manifestFS.ReadFile("manifest.json")
-	if err != nil {
-		return "", err
+	value, err := embeddedManifestValue()
+	return value.digest, err
+}
+
+func cloneManifest(manifest Manifest) Manifest {
+	manifest.GoModules = cloneStringMap(manifest.GoModules)
+	manifest.Provenance.BuildInputs = cloneStringMap(manifest.Provenance.BuildInputs)
+	return manifest
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
 	}
-	if _, err := Pinned(); err != nil {
-		return "", err
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
 	}
-	digest := sha256.Sum256(data)
-	return hex.EncodeToString(digest[:]), nil
+	return result
 }
 
 func (m Manifest) Validate() error {
@@ -139,10 +169,10 @@ func ValidateRuntimeManifest(m Manifest) error {
 	if m.AppleContainer.Version != AppleContainerVersion {
 		return fmt.Errorf("apple/container version %q does not match compiled contract %q", m.AppleContainer.Version, AppleContainerVersion)
 	}
-	if !regexp.MustCompile(`^1\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`).MatchString(m.OpenCode.Version) {
+	if !v1VersionPattern.MatchString(m.OpenCode.Version) {
 		return fmt.Errorf("OpenCode version %q must be an exact v1 semantic version", m.OpenCode.Version)
 	}
-	if !strings.HasSuffix(m.BaseImage.Reference, "@sha256:"+m.BaseImage.IndexSHA256) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(m.BaseImage.IndexSHA256) {
+	if !strings.HasSuffix(m.BaseImage.Reference, "@sha256:"+m.BaseImage.IndexSHA256) || !sha256Pattern.MatchString(m.BaseImage.IndexSHA256) {
 		return fmt.Errorf("base image must be pinned by a valid index SHA-256")
 	}
 	if m.AgentImage.Tag != "sunaba-base:"+m.OpenCode.Version+"-secure.1" {
@@ -160,7 +190,7 @@ func ValidateRuntimeManifest(m Manifest) error {
 	if err := validateArtifact(m.OpenCode.Host, "darwin", "arm64", m.OpenCode.Version); err != nil {
 		return fmt.Errorf("host OpenCode artifact: %w", err)
 	}
-	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(m.OpenCode.Host.ExecutableSHA256) {
+	if !sha256Pattern.MatchString(m.OpenCode.Host.ExecutableSHA256) {
 		return fmt.Errorf("host OpenCode executable SHA-256 is required")
 	}
 	if err := validateArtifact(m.OpenCode.Guest, "linux", "arm64", m.OpenCode.Version); err != nil {
@@ -231,10 +261,10 @@ func ValidateOpenCodeUpdateCandidate(current, candidate Manifest) error {
 }
 
 func validateCandidateSyntax(m Manifest) error {
-	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(m.OpenCode.Version) || !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(m.AppleContainer.Version) {
+	if !exactVersionPattern.MatchString(m.OpenCode.Version) || !exactVersionPattern.MatchString(m.AppleContainer.Version) {
 		return fmt.Errorf("candidate versions must be exact semantic versions")
 	}
-	if !strings.HasSuffix(m.BaseImage.Reference, "@sha256:"+m.BaseImage.IndexSHA256) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(m.BaseImage.IndexSHA256) {
+	if !strings.HasSuffix(m.BaseImage.Reference, "@sha256:"+m.BaseImage.IndexSHA256) || !sha256Pattern.MatchString(m.BaseImage.IndexSHA256) {
 		return fmt.Errorf("candidate base image is not digest pinned")
 	}
 	if m.AgentImage.Tag != "sunaba-base:"+m.OpenCode.Version+"-secure.1" {
@@ -246,7 +276,7 @@ func validateCandidateSyntax(m Manifest) error {
 	if err := validateArtifact(m.OpenCode.Guest, "linux", "arm64", m.OpenCode.Version); err != nil {
 		return err
 	}
-	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(m.OpenCode.Host.ExecutableSHA256) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(m.AppleContainer.Commit) {
+	if !sha256Pattern.MatchString(m.OpenCode.Host.ExecutableSHA256) || !commitPattern.MatchString(m.AppleContainer.Commit) {
 		return fmt.Errorf("candidate executable or source commit is not pinned")
 	}
 	return validateProvenance(m)
@@ -263,7 +293,7 @@ func validateProvenance(m Manifest) error {
 		{m.Provenance.OpenCode, "https://github.com/anomalyco/opencode", "v" + m.OpenCode.Version, m.Provenance.OpenCode.Commit},
 	}
 	for _, source := range wantSources {
-		if source.pin.Repository != source.repository || source.pin.Tag != source.tag || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(source.pin.Commit) || source.pin.Commit != source.commit {
+		if source.pin.Repository != source.repository || source.pin.Tag != source.tag || !commitPattern.MatchString(source.pin.Commit) || source.pin.Commit != source.commit {
 			return fmt.Errorf("dependency source provenance is not repository/tag/commit bound")
 		}
 	}
@@ -271,7 +301,7 @@ func validateProvenance(m Manifest) error {
 		return fmt.Errorf("base image provenance does not match its OCI digest")
 	}
 	for _, input := range []string{"assets/Containerfile", "assets/entrypoint.sh"} {
-		if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(m.Provenance.BuildInputs[input]) {
+		if !sha256Pattern.MatchString(m.Provenance.BuildInputs[input]) {
 			return fmt.Errorf("build input %q is not digest pinned", input)
 		}
 	}
@@ -292,10 +322,10 @@ func validateArtifact(a Artifact, wantOS, wantArch, version string) error {
 	if a.URL != wantURL {
 		return fmt.Errorf("URL %q is not bound to v%s artifact %q", a.URL, version, a.Artifact)
 	}
-	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(a.SHA256) {
+	if !sha256Pattern.MatchString(a.SHA256) {
 		return fmt.Errorf("invalid SHA-256 %q", a.SHA256)
 	}
-	if a.ExecutableSHA256 != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(a.ExecutableSHA256) {
+	if a.ExecutableSHA256 != "" && !sha256Pattern.MatchString(a.ExecutableSHA256) {
 		return fmt.Errorf("invalid executable SHA-256 %q", a.ExecutableSHA256)
 	}
 	return nil

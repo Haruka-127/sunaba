@@ -476,12 +476,22 @@ func normalizeConfig(config Config) Config {
 }
 
 func normalizeRules(rules []webgateway.OriginRule) []webgateway.OriginRule {
-	result := append([]webgateway.OriginRule(nil), rules...)
-	sort.Slice(result, func(i, j int) bool {
-		left, _ := json.Marshal(result[i])
-		right, _ := json.Marshal(result[j])
-		return string(left) < string(right)
-	})
+	keyed := make([]struct {
+		rule webgateway.OriginRule
+		key  string
+	}, len(rules))
+	for index, rule := range rules {
+		encoded, _ := json.Marshal(rule)
+		keyed[index] = struct {
+			rule webgateway.OriginRule
+			key  string
+		}{rule: rule, key: string(encoded)}
+	}
+	sort.Slice(keyed, func(i, j int) bool { return keyed[i].key < keyed[j].key })
+	result := make([]webgateway.OriginRule, len(keyed))
+	for index := range keyed {
+		result[index] = keyed[index].rule
+	}
 	if len(result) == 0 {
 		return nil
 	}

@@ -115,11 +115,21 @@ func (p Policy) canonical() (Policy, error) {
 		}
 		result.BlockedDomains[index] = normalized
 	}
-	sort.Slice(result.Rules, func(i, j int) bool {
-		left, _ := json.Marshal(result.Rules[i])
-		right, _ := json.Marshal(result.Rules[j])
-		return string(left) < string(right)
-	})
+	keyedRules := make([]struct {
+		rule OriginRule
+		key  string
+	}, len(result.Rules))
+	for index, rule := range result.Rules {
+		encoded, _ := json.Marshal(rule)
+		keyedRules[index] = struct {
+			rule OriginRule
+			key  string
+		}{rule: rule, key: string(encoded)}
+	}
+	sort.Slice(keyedRules, func(i, j int) bool { return keyedRules[i].key < keyedRules[j].key })
+	for index := range keyedRules {
+		result.Rules[index] = keyedRules[index].rule
+	}
 	sort.Strings(result.BlockedDomains)
 	return result, nil
 }
