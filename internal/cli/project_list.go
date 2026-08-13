@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 	"sunaba/internal/policy"
 	"sunaba/internal/runtime"
+	"sunaba/internal/state"
 	"sunaba/internal/trustedui"
 )
 
@@ -44,76 +46,24 @@ func (a *app) projectList(ctx context.Context, activeOnly, jsonOutput bool) erro
 		fmt.Fprintf(a.errors, "WARNING: owned VM inventory is unavailable; VM state may be unknown: %s\n", trustedui.SanitizeTerminal(runtimeErr.Error()))
 	}
 	owned := ownedProjectVMs(containers)
-	records := make([]projectListRecord, 0, len(states))
-	for _, projectState := range states {
-		record := projectListRecord{
-			ProjectID: projectState.ProjectID, Mode: "unknown", Supervisor: "none",
-			VM: "none", Pending: "no", Project: "unknown",
-		}
-		if runtimeErr != nil {
-			record.VM = "unknown"
-		}
-		if projectState.Err != nil {
-			record.Supervisor = "invalid"
-			record.Pending = "invalid"
-			record.Detail = projectState.Err.Error()
-			records = append(records, record)
-			continue
-		}
-		loaded, _, loadErr := policy.LoadReadOnly(filepath.Join(projectState.Path, "policy.json"), time.Now())
-		if loadErr != nil || loaded.ProjectID != projectState.ProjectID {
-			record.Supervisor = "invalid"
-			record.Pending = "invalid"
-			record.Detail = "Project policy is invalid"
-			records = append(records, record)
-			continue
-		}
-		record.Mode = loaded.Mode
-		record.Project = loaded.ProjectRoot
-		record.Pending = pendingInventoryState(projectState.Path, loaded.ProjectID)
-		projectVMs := owned[loaded.ProjectID]
-		if runtimeErr == nil {
-			record.VM, record.Detail = summarizeOwnedVMs(projectVMs)
-		}
-		client, clientErr := openSupervisorClient(projectState.Path)
-		switch {
-		case clientErr == nil:
-			queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			info, infoErr := client.info(queryCtx)
-			cancel()
-			client.close()
-			if infoErr != nil {
-				record.Supervisor = "unavailable"
-				record.Detail = appendInventoryDetail(record.Detail, "Supervisor did not answer")
-			} else if info.ProjectID != loaded.ProjectID {
-				record.Supervisor = "invalid"
-				record.Detail = appendInventoryDetail(record.Detail, "Supervisor Project identity does not match")
-			} else {
-				record.Supervisor = "active"
-				switch info.State {
-				case "running", "paused", "failed", "exported", "destroyed":
-					record.VM = info.State
-				default:
-					record.VM = "unknown"
-					record.Detail = appendInventoryDetail(record.Detail, "Supervisor returned an unknown VM state")
-				}
-				record.active = true
+	records := make([]projectListRecord, len(states))
+	jobs := make(chan int)
+	workerCount := min(12, len(states))
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				records[index] = a.projectListRecord(ctx, states[index], owned, runtimeErr)
 			}
-		case errors.Is(clientErr, errNoSupervisor):
-			record.Supervisor = "none"
-		case errors.Is(clientErr, errStaleSupervisor):
-			record.Supervisor = "stale"
-		default:
-			record.Supervisor = "invalid"
-			record.Detail = appendInventoryDetail(record.Detail, "Supervisor locator is unsafe")
-		}
-		for _, item := range projectVMs {
-			if item.State == runtime.StateRunning {
-				record.active = true
-			}
-		}
-		records = append(records, record)
+		}()
 	}
+	for index := range states {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
 	if activeOnly {
 		filtered := records[:0]
 		for _, record := range records {
@@ -130,6 +80,74 @@ func (a *app) projectList(ctx context.Context, activeOnly, jsonOutput bool) erro
 		return records[i].Project < records[j].Project
 	})
 	return writeProjectList(a.output, records, jsonOutput)
+}
+
+func (a *app) projectListRecord(ctx context.Context, projectState state.ProjectState, owned map[string][]runtime.Info, runtimeErr error) projectListRecord {
+	record := projectListRecord{
+		ProjectID: projectState.ProjectID, Mode: "unknown", Supervisor: "none",
+		VM: "none", Pending: "no", Project: "unknown",
+	}
+	if runtimeErr != nil {
+		record.VM = "unknown"
+	}
+	if projectState.Err != nil {
+		record.Supervisor = "invalid"
+		record.Pending = "invalid"
+		record.Detail = projectState.Err.Error()
+		return record
+	}
+	loaded, _, loadErr := policy.LoadReadOnly(filepath.Join(projectState.Path, "policy.json"), time.Now())
+	if loadErr != nil || loaded.ProjectID != projectState.ProjectID {
+		record.Supervisor = "invalid"
+		record.Pending = "invalid"
+		record.Detail = "Project policy is invalid"
+		return record
+	}
+	record.Mode = loaded.Mode
+	record.Project = loaded.ProjectRoot
+	record.Pending = pendingInventoryState(projectState.Path, loaded.ProjectID)
+	projectVMs := owned[loaded.ProjectID]
+	if runtimeErr == nil {
+		record.VM, record.Detail = summarizeOwnedVMs(projectVMs)
+	}
+	client, clientErr := openSupervisorClient(projectState.Path)
+	switch {
+	case clientErr == nil:
+		queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		info, infoErr := client.info(queryCtx)
+		cancel()
+		client.close()
+		if infoErr != nil {
+			record.Supervisor = "unavailable"
+			record.Detail = appendInventoryDetail(record.Detail, "Supervisor did not answer")
+		} else if info.ProjectID != loaded.ProjectID {
+			record.Supervisor = "invalid"
+			record.Detail = appendInventoryDetail(record.Detail, "Supervisor Project identity does not match")
+		} else {
+			record.Supervisor = "active"
+			switch info.State {
+			case "running", "paused", "failed", "exported", "destroyed":
+				record.VM = info.State
+			default:
+				record.VM = "unknown"
+				record.Detail = appendInventoryDetail(record.Detail, "Supervisor returned an unknown VM state")
+			}
+			record.active = true
+		}
+	case errors.Is(clientErr, errNoSupervisor):
+		record.Supervisor = "none"
+	case errors.Is(clientErr, errStaleSupervisor):
+		record.Supervisor = "stale"
+	default:
+		record.Supervisor = "invalid"
+		record.Detail = appendInventoryDetail(record.Detail, "Supervisor locator is unsafe")
+	}
+	for _, item := range projectVMs {
+		if item.State == runtime.StateRunning {
+			record.active = true
+		}
+	}
+	return record
 }
 
 func ownedProjectVMs(containers []runtime.Info) map[string][]runtime.Info {
