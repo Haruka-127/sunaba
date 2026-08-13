@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"sunaba/internal/testutil"
 )
 
 func TestRelay(t *testing.T) {
@@ -57,11 +59,7 @@ func TestRelay(t *testing.T) {
 }
 
 func TestTCPToUnixRelay(t *testing.T) {
-	root, err := os.MkdirTemp("/private/tmp", "sunaba-guest-relay-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(root)
+	root := testutil.PrivateTempDir(t, "sunaba-guest-relay-")
 	unixListener, err := net.Listen("unix", filepath.Join(root, "gateway.sock"))
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +133,7 @@ func TestRelayRejectsConnectionsAboveLimit(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	socket := filepath.Join(t.TempDir(), "bounded-relay.sock")
+	socket := filepath.Join(testutil.PrivateTempDir(t, "sunaba-bounded-relay-"), "bounded-relay.sock")
 	done := make(chan error, 1)
 	go func() {
 		done <- (Relay{

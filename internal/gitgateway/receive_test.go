@@ -14,6 +14,7 @@ import (
 
 	"sunaba/internal/audit"
 	corecapability "sunaba/internal/capability"
+	"sunaba/internal/testutil"
 )
 
 func TestMain(m *testing.M) {
@@ -62,11 +63,7 @@ func TestStandardGitPushRequiresPendingApprovalAndExactRetry(t *testing.T) {
 		TLSCAInfoPath: caPath, Audit: recorder, VMID: "vm", SessionID: "session",
 	}
 	hookToken := "host-hook-channel-token-0123456789abcdef"
-	hookRoot, err := os.MkdirTemp("/private/tmp", "sunaba-git-hook-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(hookRoot) })
+	hookRoot := testutil.PrivateTempDir(t, "sunaba-git-hook-")
 	hookSocket := filepath.Join(hookRoot, "hook.sock")
 	brokerContext, cancelBroker := context.WithCancel(context.Background())
 	defer cancelBroker()

@@ -21,6 +21,7 @@ import (
 	"sunaba/internal/opencode"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
+	"sunaba/internal/testutil"
 	"sunaba/internal/workspace"
 )
 
@@ -540,14 +541,7 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-runtime-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(runtimeBase, 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+	runtimeBase := testutil.PrivateTempDir(t, "sunaba-runtime-test-")
 	return Config{
 		Store: &state.Store{Root: filepath.Join(root, "state")}, Runtime: fake,
 		ProjectRoot: project, RuntimeBase: runtimeBase, SessionID: "phase1test", Image: dependency.MustPinned().AgentImage.Tag,

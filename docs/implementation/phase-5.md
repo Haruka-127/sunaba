@@ -131,10 +131,11 @@ scripts/verify.sh
 
 - gofmt / `git diff --check`
 - `go test ./...`
-- `go test -race ./...`
 - `go vet ./...`
 - `sunaba`、Linux/AArch64 guest relay、Git hook helperのbuildとguest relay ELF形式検証
 - CLI helpと旧unsafe entrypointのstatic boundary
+
+通常verifyはproject-local cacheを再利用する。raceだけを確認する場合は`scripts/verify-race.sh`、空のGo cacheを使うclean-room gateとraceを連続実行する場合は`scripts/verify-clean.sh`を使う。
 
 static boundaryは旧`_audit` daemon、永続`server-password`/Project env API、`OPENAI_API_KEY`環境変数、Project bind mount、default network、firewall bypass、guest側automatic approvalがproduction codeへ戻ることも拒否する。旧prototypeのstate/audit API自体を削除し、global active dependencyとhost-only version設定はowner-only mode `0600` regular fileとしてno-followで読み、同一private directory内のfsync済みtempから原子的に置換する。
 

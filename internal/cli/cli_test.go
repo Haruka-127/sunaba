@@ -23,6 +23,7 @@ import (
 	"sunaba/internal/runtime"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
+	"sunaba/internal/testutil"
 	"sunaba/internal/versionconfig"
 	"sunaba/internal/webgateway"
 	"sunaba/internal/workspace"
@@ -407,14 +408,7 @@ func TestRecoveryByProjectIDRejectsMismatchedSupervisorIdentity(t *testing.T) {
 	if err := os.Mkdir(projectState, 0700); err != nil {
 		t.Fatal(err)
 	}
-	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-destroy-identity-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(runtimeBase)
-	if err := os.Chmod(runtimeBase, 0700); err != nil {
-		t.Fatal(err)
-	}
+	runtimeBase := testutil.PrivateTempDir(t, "sunaba-destroy-identity-")
 	controlled := &controlledSession{
 		active: &fakeSessionControlTarget{}, projectID: "different-project", sessionID: "session",
 		container: "sunaba-different-project-session", runtimeRoot: filepath.Join(runtimeBase, "sunaba-session-session"),
@@ -474,14 +468,7 @@ func TestProjectListFindsPausedSupervisorAndOwnedForegroundVM(t *testing.T) {
 	secureID := state.ProjectID(secureProject)
 	devID := state.ProjectID(devProject)
 	sessionID := "s" + strings.Repeat("1", 24)
-	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-project-list-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(runtimeBase)
-	if err := os.Chmod(runtimeBase, 0700); err != nil {
-		t.Fatal(err)
-	}
+	runtimeBase := testutil.PrivateTempDir(t, "sunaba-project-list-")
 	controlled := &controlledSession{
 		active: &fakeSessionControlTarget{}, projectID: secureID, sessionID: sessionID,
 		container:   "sunaba-" + secureID + "-" + sessionID,
@@ -529,14 +516,7 @@ func TestProjectListReportsStaleWithoutMutatingLocatorAndEmitsJSON(t *testing.T)
 	}
 	projectID := state.ProjectID(project)
 	projectState := filepath.Join(store.Root, "projects", projectID)
-	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-project-list-stale-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(runtimeBase)
-	if err := os.Chmod(runtimeBase, 0700); err != nil {
-		t.Fatal(err)
-	}
+	runtimeBase := testutil.PrivateTempDir(t, "sunaba-project-list-stale-")
 	locator := filepath.Join(projectState, approvalControlLocator)
 	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
 		t.Fatal(err)
@@ -948,13 +928,7 @@ func TestStaleSupervisorRecoveryRemovesOnlyBoundPrivateRuntime(t *testing.T) {
 	if err := os.Chmod(projectState, 0700); err != nil {
 		t.Fatal(err)
 	}
-	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-runtime-stale-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(runtimeBase, 0700); err != nil {
-		t.Fatal(err)
-	}
+	runtimeBase := testutil.PrivateTempDir(t, "sunaba-runtime-stale-")
 	locator := filepath.Join(projectState, approvalControlLocator)
 	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
 		t.Fatal(err)
@@ -1010,14 +984,7 @@ func TestApprovalsUseSeparatePrivateHostControlChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	broker := &fakePushBroker{pending: []gitgateway.PushRequest{request}}
-	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-control-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(runtimeBase)
-	if err := os.Chmod(runtimeBase, 0700); err != nil {
-		t.Fatal(err)
-	}
+	runtimeBase := testutil.PrivateTempDir(t, "sunaba-control-test-")
 	control, err := startApprovalControl(root, runtimeBase, broker, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1042,14 +1009,7 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 	if err := os.Chmod(projectState, 0700); err != nil {
 		t.Fatal(err)
 	}
-	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-supervisor-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(runtimeBase)
-	if err := os.Chmod(runtimeBase, 0700); err != nil {
-		t.Fatal(err)
-	}
+	runtimeBase := testutil.PrivateTempDir(t, "sunaba-supervisor-test-")
 	target := &fakeSessionControlTarget{output: "safe\n\x1b]52;c;evil\a\u202Ename\n"}
 	controlled := &controlledSession{
 		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",

@@ -9,23 +9,20 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"sunaba/internal/testutil"
 )
 
 const relayTestPassword = "relay-password-0123456789abcdef0123456789"
 
 func TestRelayAuthenticatesFiltersAndSanitizes(t *testing.T) {
-	root, err := os.MkdirTemp("/private/tmp", "sunaba-attach-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(root)
+	root := testutil.PrivateTempDir(t, "sunaba-attach-test-")
 	unixListener, err := net.Listen("unix", filepath.Join(root, "attach.sock"))
 	if err != nil {
 		t.Fatal(err)

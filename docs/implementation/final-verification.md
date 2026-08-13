@@ -23,10 +23,12 @@
 
 ```sh
 scripts/verify.sh
+scripts/verify-race.sh
+scripts/verify-clean.sh
 SUNABA_FUZZ=1 scripts/verify.sh
 ```
 
-通常gateはformat、全unit、全race、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを通過した。bounded fuzzはModel Responses envelope、Git push binding、Web hostname、blocklist parserの4 targetを各10秒実行して通過した。実OpenAI credentialを使うbillable live requestは自動実行せず、mock upstream contractを正とする。
+通常gateはformat、全unit、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを検証し、raceとclean-room gateは独立したscriptで実行する。bounded fuzzはModel Responses envelope、Git push binding、Web hostname、blocklist parserの4 targetを各10秒実行して通過した。実OpenAI credentialを使うbillable live requestは自動実行せず、mock upstream contractを正とする。
 
 2026-08-12のModel Gateway認証拡張では、同じ通常gateを再実行してPASSした。追加したmock contractはAPI key/OAuth別model catalog、custom `sunaba` provider設定、schema v4からv5へのmigration、OAuth device flow/PKCE、期限前refreshとtoken rotation、固定Keychain identity、Codex endpoint/header/request差分を含む。実ChatGPT accountへのdevice loginとsubscription requestは外部認証を伴うため自動実行していない。
 

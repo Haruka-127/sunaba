@@ -337,5 +337,5 @@ func migrateV1(legacy legacyPolicyV1, now time.Time) (ProjectPolicy, error) {
 }
 
 func ensurePrivatePolicyDirectory(path string) error {
-	return securefs.EnsureOwnedDir(path)
+	return securefs.EnsureCanonicalOwnedDir(path)
 }

@@ -24,6 +24,13 @@ func EnsureOwnedDir(path string) error {
 	return CheckOwnedDir(path)
 }
 
+func EnsureCanonicalOwnedDir(path string) error {
+	if err := EnsureOwnedDir(path); err != nil {
+		return err
+	}
+	return CheckCanonicalOwnedDir(path)
+}
+
 func CheckOwnedDir(path string) error {
 	if !isCleanAbsolute(path) {
 		return fmt.Errorf("private directory path must be absolute and clean")
@@ -31,9 +38,19 @@ func CheckOwnedDir(path string) error {
 	info, err := os.Lstat(path)
 	var stat unix.Stat_t
 	statErr := unix.Lstat(path, &stat)
-	canonical, canonicalErr := filepath.EvalSymlinks(path)
-	if err != nil || statErr != nil || canonicalErr != nil || canonical != path || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("private directory must be mode 0700, current-user owned, and free of symlinks")
+	if err != nil || statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 || stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("private directory must be mode 0700, current-user owned, and not be a symlink")
+	}
+	return nil
+}
+
+func CheckCanonicalOwnedDir(path string) error {
+	if err := CheckOwnedDir(path); err != nil {
+		return err
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil || canonical != path {
+		return fmt.Errorf("private directory path must not contain symlinks")
 	}
 	return nil
 }

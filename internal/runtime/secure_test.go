@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"sunaba/internal/testutil"
 )
 
 func TestValidateSecureSessionSpec(t *testing.T) {
@@ -131,11 +133,7 @@ func TestValidateSecureSessionSpecBindsOptionalWebGateway(t *testing.T) {
 
 func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 	t.Helper()
-	parent, err := os.MkdirTemp("/private/tmp", "sunaba-secure-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	parent := testutil.PrivateTempDir(t, "sunaba-secure-test-")
 	sessionRoot := filepath.Join(parent, "sunaba-session-test")
 	if err := os.Mkdir(sessionRoot, 0700); err != nil {
 		t.Fatal(err)

@@ -2,16 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERIFY_TMP="$(mktemp -d /tmp/sunaba-verify.XXXXXX)"
-export GOPATH="$VERIFY_TMP/gopath"
-export GOMODCACHE="$VERIFY_TMP/gomodcache"
-export GOCACHE="$VERIFY_TMP/gocache"
-
-cleanup() {
-	chmod -R u+w "$VERIFY_TMP" 2>/dev/null || true
-	rm -rf "$VERIFY_TMP"
-}
-trap cleanup EXIT
+CACHE_KEY="$(go env GOVERSION)-$(git -C "$ROOT" hash-object go.sum)"
+CACHE_ROOT="${SUNABA_VERIFY_CACHE_ROOT:-$ROOT/.cache/verify/$CACHE_KEY}"
+export GOPATH="$CACHE_ROOT/gopath"
+export GOMODCACHE="$CACHE_ROOT/gomodcache"
+export GOCACHE="$CACHE_ROOT/gocache"
 
 pass() { printf 'PASS %s\n' "$1"; }
 skip() { printf 'SKIP %s - %s\n' "$1" "$2"; }
@@ -23,7 +18,6 @@ UNFORMATTED="$(gofmt -l -- $(rg --files -g '*.go' -g '!bin/**'))"
 [[ -z "$UNFORMATTED" ]] || fail format "$UNFORMATTED"
 git diff --check
 go test ./...
-go test -race ./...
 go vet ./...
 mkdir -p bin
 go build -trimpath -o bin/sunaba ./cmd/sunaba
@@ -32,7 +26,7 @@ go build -trimpath -o bin/sunaba-git-hook ./cmd/sunaba-git-hook
 GUEST_RELAY_FILE="$(file bin/sunaba-guest-relay)"
 grep -Fq 'ELF 64-bit' <<<"$GUEST_RELAY_FILE" || fail guest-relay 'not a Linux ELF binary'
 grep -Eq 'ARM aarch64|ARM64' <<<"$GUEST_RELAY_FILE" || fail guest-relay 'not an AArch64 binary'
-pass "unit/race/vet/build"
+pass "unit/vet/build"
 
 HELP="$({
   ./bin/sunaba help

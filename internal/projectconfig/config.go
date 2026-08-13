@@ -511,7 +511,7 @@ func ensurePrivateDirectory(path string) error {
 		return fmt.Errorf("Project configuration directory must be absolute and clean")
 	}
 	if _, err := os.Lstat(path); err == nil {
-		return securefs.CheckOwnedDir(path)
+		return securefs.CheckCanonicalOwnedDir(path)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -526,11 +526,11 @@ func ensurePrivateDirectory(path string) error {
 	if err := os.Mkdir(path, 0700); err != nil {
 		return err
 	}
-	return securefs.CheckOwnedDir(path)
+	return securefs.CheckCanonicalOwnedDir(path)
 }
 
 func checkPrivateDirectory(path string) error {
-	return securefs.CheckOwnedDir(path)
+	return securefs.CheckCanonicalOwnedDir(path)
 }
 
 func readPrivateFile(path string, maximum int64) ([]byte, error) {
