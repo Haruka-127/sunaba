@@ -238,21 +238,18 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		reject(http.StatusRequestEntityTooLarge, "request_too_large")
 		return
 	}
-	var envelope struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream"`
-	}
-	if !json.Valid(body) || json.Unmarshal(body, &envelope) != nil {
+	envelope, model, stream, err := parseRequestEnvelope(body)
+	if err != nil {
 		reject(http.StatusBadRequest, "invalid_request")
 		return
 	}
-	event.Model = envelope.Model
-	if _, allowed := g.models[envelope.Model]; !allowed {
+	event.Model = model
+	if _, allowed := g.models[model]; !allowed {
 		reject(http.StatusForbidden, "model_not_allowed")
 		return
 	}
 	if g.authMode == modelcatalog.AuthOAuth {
-		body, err = normalizeOAuthRequest(body)
+		body, err = normalizeOAuthRequest(envelope)
 		if err != nil {
 			reject(http.StatusBadRequest, "invalid_oauth_request")
 			return
@@ -264,22 +261,7 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		upstreamPath = "/responses"
 	}
 	upstreamURL.Path = strings.TrimRight(g.upstream.Path, "/") + upstreamPath
-	upstreamContext, cancelUpstream := context.WithCancel(request.Context())
-	defer cancelUpstream()
-	upstreamDone := make(chan struct{})
-	if closeNotifier, ok := response.(http.CloseNotifier); ok {
-		disconnected := closeNotifier.CloseNotify()
-		go func() {
-			select {
-			case <-disconnected:
-				cancelUpstream()
-			case <-request.Context().Done():
-				cancelUpstream()
-			case <-upstreamDone:
-			}
-		}()
-	}
-	defer close(upstreamDone)
+	upstreamContext := request.Context()
 	upstreamRequest, err := http.NewRequestWithContext(upstreamContext, http.MethodPost, upstreamURL.String(), bytes.NewReader(body))
 	if err != nil {
 		reject(http.StatusBadGateway, "upstream_request_failed")
@@ -317,7 +299,7 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 	response.Header().Set("X-Content-Type-Options", "nosniff")
 	response.WriteHeader(upstreamResponse.StatusCode)
 	event.Status = upstreamResponse.StatusCode
-	written, copyErr := copyLimitedResponse(response, upstreamResponse.Body, g.capability.MaxResponseBytes, envelope.Stream)
+	written, copyErr := copyLimitedResponse(response, upstreamResponse.Body, g.capability.MaxResponseBytes, stream)
 	event.ResponseBytes = written
 	if copyErr != nil {
 		if errors.Is(copyErr, errResponseLimit) {
@@ -342,11 +324,23 @@ func safeHeaderValue(value string, minimum, maximum int) bool {
 	return true
 }
 
-func normalizeOAuthRequest(body []byte) ([]byte, error) {
+func parseRequestEnvelope(body []byte) (map[string]json.RawMessage, string, bool, error) {
 	var request map[string]json.RawMessage
-	if err := json.Unmarshal(body, &request); err != nil {
-		return nil, err
+	if err := json.Unmarshal(body, &request); err != nil || request == nil {
+		return nil, "", false, fmt.Errorf("request must be a JSON object")
 	}
+	var model string
+	if encoded, exists := request["model"]; !exists || json.Unmarshal(encoded, &model) != nil {
+		return nil, "", false, fmt.Errorf("request model is invalid")
+	}
+	stream := false
+	if encoded, exists := request["stream"]; exists && json.Unmarshal(encoded, &stream) != nil {
+		return nil, "", false, fmt.Errorf("request stream flag is invalid")
+	}
+	return request, model, stream, nil
+}
+
+func normalizeOAuthRequest(request map[string]json.RawMessage) ([]byte, error) {
 	for _, field := range []string{
 		"previous_response_id",
 		"generate",
