@@ -34,9 +34,18 @@ grep -Fq 'ELF 64-bit' <<<"$GUEST_RELAY_FILE" || fail guest-relay 'not a Linux EL
 grep -Eq 'ARM aarch64|ARM64' <<<"$GUEST_RELAY_FILE" || fail guest-relay 'not an AArch64 binary'
 pass "unit/race/vet/build"
 
-HELP="$(./bin/sunaba help)"
-for REQUIRED in 'credentials openai' 'project init' 'config path|edit|validate|diff|apply|show' 'agent' 'git remote add' 'changes export' 'changes apply' 'secure|dev' 'never bind-mounted'; do
-  grep -Fq "$REQUIRED" <<<"$HELP" || fail cli-help "missing $REQUIRED"
+HELP="$({
+  ./bin/sunaba help
+  ./bin/sunaba project --help
+  ./bin/sunaba project init --help
+  ./bin/sunaba credentials openai --help
+  ./bin/sunaba config --help
+  ./bin/sunaba git remote --help
+  ./bin/sunaba changes --help
+  ./bin/sunaba up --help
+})"
+for REQUIRED in 'credentials' 'openai' 'project' 'init' '[path]' '--model-auth' 'oauth' 'api-key' 'config' 'validate' 'apply' 'agent' 'remote' 'web' 'approvals' 'changes' 'export' '--mode' 'secure' 'dev' 'never bind-mounted'; do
+  grep -Fq -- "$REQUIRED" <<<"$HELP" || fail cli-help "missing $REQUIRED"
 done
 for OBSOLETE in '--no-firewall' 'env set' 'git set' 'reset --full' 'automatic approval'; do
   if grep -Fq -- "$OBSOLETE" <<<"$HELP"; then

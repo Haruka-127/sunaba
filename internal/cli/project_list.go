@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -32,23 +31,13 @@ type projectListRecord struct {
 	active     bool
 }
 
-func (a *app) projectList(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("project list", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	activeOnly := fs.Bool("active", false, "show Projects with a reachable Supervisor or running owned VM")
-	jsonOutput := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: sunaba project list [--active] [--json]")
-	}
+func (a *app) projectList(ctx context.Context, activeOnly, jsonOutput bool) error {
 	states, err := a.store.ListProjectStates()
 	if err != nil {
 		return err
 	}
 	if len(states) == 0 {
-		return writeProjectList(a.output, nil, *jsonOutput)
+		return writeProjectList(a.output, nil, jsonOutput)
 	}
 	containers, runtimeErr := a.runtime.List(ctx)
 	if runtimeErr != nil {
@@ -125,7 +114,7 @@ func (a *app) projectList(ctx context.Context, args []string) error {
 		}
 		records = append(records, record)
 	}
-	if *activeOnly {
+	if activeOnly {
 		filtered := records[:0]
 		for _, record := range records {
 			if record.active {
@@ -140,7 +129,7 @@ func (a *app) projectList(ctx context.Context, args []string) error {
 		}
 		return records[i].Project < records[j].Project
 	})
-	return writeProjectList(a.output, records, *jsonOutput)
+	return writeProjectList(a.output, records, jsonOutput)
 }
 
 func ownedProjectVMs(containers []runtime.Info) map[string][]runtime.Info {

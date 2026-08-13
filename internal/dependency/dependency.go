@@ -15,6 +15,7 @@ const (
 	AppleContainerCommit  = "0190097d06df0b9065f4c2d2c7873c649d81d493"
 	OpenCodeVersion       = "1.18.16"
 	OpenCodeCommit        = "a3647eb025c7615159d417dcc49fc39fdaeba65b"
+	UrfaveCLIVersion      = "v3.10.1"
 )
 
 //go:embed manifest.json
@@ -132,6 +133,9 @@ func (m Manifest) Validate() error {
 	}
 	if m.GoModules["golang.org/x/sys"] != "v0.30.0" {
 		return fmt.Errorf("golang.org/x/sys must be pinned to v0.30.0")
+	}
+	if m.GoModules["github.com/urfave/cli/v3"] != UrfaveCLIVersion {
+		return fmt.Errorf("github.com/urfave/cli/v3 must be pinned to %s", UrfaveCLIVersion)
 	}
 	if strings.Contains(strings.ToLower(m.OpenCode.Host.URL), "latest") || strings.Contains(strings.ToLower(m.OpenCode.Guest.URL), "latest") {
 		return fmt.Errorf("dependency URLs must not use latest")

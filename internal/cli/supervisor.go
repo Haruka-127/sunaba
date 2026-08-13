@@ -4,7 +4,6 @@ import (
 	"context"
 	"debug/elf"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -194,14 +193,8 @@ func validateGuestRelay(path string) error {
 	return nil
 }
 
-func (a *app) supervisor(ctx context.Context, args []string) (returnErr error) {
-	fs := flag.NewFlagSet("_supervisor", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
+	projectPolicy, _, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}

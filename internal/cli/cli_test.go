@@ -29,9 +29,22 @@ import (
 func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 	var output bytes.Buffer
 	a := &app{output: &output}
-	usage(a.output)
+	for _, args := range [][]string{
+		{"help"},
+		{"project", "help"},
+		{"project", "init", "--help"},
+		{"credentials", "openai", "--help"},
+		{"config", "--help"},
+		{"git", "remote", "--help"},
+		{"changes", "--help"},
+		{"up", "--help"},
+	} {
+		if err := a.run(context.Background(), args); err != nil {
+			t.Fatal(err)
+		}
+	}
 	text := output.String()
-	for _, expected := range []string{"credentials openai", "project init [path]", "--model-auth oauth|api-key", "project list", "config path|edit|validate|diff|apply|show", "agent", "git remote add", "git remote list", "web enable", "approvals", "changes export", "changes apply", "--mode secure|dev", "never bind-mounted"} {
+	for _, expected := range []string{"credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "remote", "add", "web", "approvals", "changes", "export", "--mode", "secure", "dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -40,6 +53,49 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		if strings.Contains(text, obsolete) {
 			t.Fatalf("help retained obsolete prototype behavior %q", obsolete)
 		}
+	}
+}
+
+func TestCommandTreeRejectsPrefixesAliasesAndMisplacedOptions(t *testing.T) {
+	a := &app{output: io.Discard, errors: io.Discard}
+	for _, args := range [][]string{
+		{"proj", "list"},
+		{"git", "remote", "rm"},
+		{"git", "set", "--remote", "https://git.example/project.git"},
+		{"config", "apply", "--effective"},
+		{"web", "refresh", "--origin", "https://example.com"},
+		{"destroy", "--yes", "unexpected"},
+		{"project", "init", "one", "two"},
+	} {
+		if err := a.run(context.Background(), args); err == nil {
+			t.Errorf("command unexpectedly accepted: %v", args)
+		}
+	}
+}
+
+func TestVerboseIsPersistentButDoesNotComeFromEnvironment(t *testing.T) {
+	store := &state.Store{Root: filepath.Join(t.TempDir(), "state")}
+	seenVerbose := false
+	a := &app{
+		store: store, output: io.Discard, errors: io.Discard,
+		runtimeFactory: func(verbose bool) runtime.Runtime {
+			seenVerbose = verbose
+			return &projectListRuntime{}
+		},
+	}
+	t.Setenv("SUNABA_VERBOSE", "true")
+	if err := a.run(context.Background(), []string{"project", "list", "--verbose"}); err != nil {
+		t.Fatal(err)
+	}
+	if !seenVerbose {
+		t.Fatal("persistent --verbose was not applied after the subcommand")
+	}
+	seenVerbose = true
+	if err := a.run(context.Background(), []string{"project", "list"}); err != nil {
+		t.Fatal(err)
+	}
+	if seenVerbose {
+		t.Fatal("verbose was inherited from process state or environment")
 	}
 }
 
@@ -69,7 +125,7 @@ func TestProjectInitDefaultsToCurrentDirectoryAndOAuth(t *testing.T) {
 	})
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	a := &app{store: store, output: io.Discard, errors: io.Discard}
-	if err := a.project(context.Background(), []string{"init", "--mode", "secure"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", "--mode", "secure"}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
@@ -77,7 +133,7 @@ func TestProjectInitDefaultsToCurrentDirectoryAndOAuth(t *testing.T) {
 	if err != nil || defaultsErr != nil || loaded.ProjectRoot != project || loaded.Model.AuthMode != modelcatalog.AuthOAuth || strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expectedOAuth, ",") {
 		t.Fatalf("default Project policy=%+v error=%v defaults_error=%v", loaded, err, defaultsErr)
 	}
-	if err := a.project(context.Background(), []string{"init", apiProject, "--model-auth", "api-key"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", apiProject, "--model-auth", "api-key"}); err != nil {
 		t.Fatal(err)
 	}
 	apiPolicy, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(apiProject), "policy.json"), time.Now())
@@ -109,10 +165,10 @@ func TestProjectListFindsPausedSupervisorAndOwnedForegroundVM(t *testing.T) {
 	}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output, runtime: &projectListRuntime{}}
-	if err := a.project(context.Background(), []string{"init", secureProject}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", secureProject}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.project(context.Background(), []string{"init", devProject, "--mode", "dev"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", devProject, "--mode", "dev"}); err != nil {
 		t.Fatal(err)
 	}
 	secureID := state.ProjectID(secureProject)
@@ -146,7 +202,7 @@ func TestProjectListFindsPausedSupervisorAndOwnedForegroundVM(t *testing.T) {
 		Labels: map[string]string{"dev.sunaba.owner": "someone-else", "dev.sunaba.project": devID, "dev.sunaba.session": "s1"},
 	}}}
 	output.Reset()
-	if err := a.project(context.Background(), []string{"list", "--active"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "list", "--active"}); err != nil {
 		t.Fatal(err)
 	}
 	text := output.String()
@@ -167,7 +223,7 @@ func TestProjectListReportsStaleWithoutMutatingLocatorAndEmitsJSON(t *testing.T)
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output, runtime: &projectListRuntime{}}
-	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
 	projectID := state.ProjectID(project)
@@ -185,7 +241,7 @@ func TestProjectListReportsStaleWithoutMutatingLocatorAndEmitsJSON(t *testing.T)
 		t.Fatal(err)
 	}
 	output.Reset()
-	if err := a.project(context.Background(), []string{"list", "--json"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "list", "--json"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), `"supervisor":"stale"`) || !strings.Contains(output.String(), `"project_id":"`+projectID+`"`) {
@@ -275,16 +331,16 @@ func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *te
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output}
-	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.gitPolicy(context.Background(), []string{"set", "--remote", "https://git.example/legacy.git", "--dir", project}); err == nil {
+	if err := a.run(context.Background(), []string{"git", "set", "--remote", "https://git.example/legacy.git", "--dir", project}); err == nil {
 		t.Fatal("legacy single-remote command remained accepted")
 	}
-	if err := a.gitPolicy(context.Background(), []string{"remote", "add", "--dir", project, "--name", "origin", "--url", "https://git.example/team/repository.git"}); err != nil {
+	if err := a.run(context.Background(), []string{"git", "remote", "add", "--dir", project, "--name", "origin", "--url", "https://git.example/team/repository.git"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.gitPolicy(context.Background(), []string{"remote", "add", "--dir", project, "--name", "upstream", "--url", "https://git.example/team/upstream.git"}); err != nil {
+	if err := a.run(context.Background(), []string{"git", "remote", "add", "--dir", project, "--name", "upstream", "--url", "https://git.example/team/upstream.git"}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
@@ -300,14 +356,14 @@ func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *te
 		t.Fatalf("Git CLI did not synchronize host configuration: config=%+v error=%v", config.Git, err)
 	}
 	output.Reset()
-	if err := a.gitPolicy(context.Background(), []string{"remote", "list", "--dir", project}); err != nil || !strings.Contains(output.String(), "origin\thttps://git.example/team/repository.git") || !strings.Contains(output.String(), "upstream\thttps://git.example/team/upstream.git") {
+	if err := a.run(context.Background(), []string{"git", "remote", "list", "--dir", project}); err != nil || !strings.Contains(output.String(), "origin\thttps://git.example/team/repository.git") || !strings.Contains(output.String(), "upstream\thttps://git.example/team/upstream.git") {
 		t.Fatalf("list output=%q error=%v", output.String(), err)
 	}
 	locator := filepath.Join(store.Root, "projects", state.ProjectID(project), approvalControlLocator)
 	if err := os.WriteFile(locator, []byte(`{"version":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.gitPolicy(context.Background(), []string{"disable", "--dir", project}); err == nil || !strings.Contains(err.Error(), "cannot change") {
+	if err := a.run(context.Background(), []string{"git", "disable", "--dir", project}); err == nil || !strings.Contains(err.Error(), "cannot change") {
 		t.Fatalf("active policy mutation error=%v", err)
 	}
 	if err := os.Remove(locator); err != nil {
@@ -320,7 +376,7 @@ func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *te
 		"https://git.example/repository",
 		"https://git.example:8443/repository.git",
 	} {
-		if err := a.gitPolicy(context.Background(), []string{"remote", "add", "--dir", project, "--name", "unsafe", "--url", unsafe}); err == nil {
+		if err := a.run(context.Background(), []string{"git", "remote", "add", "--dir", project, "--name", "unsafe", "--url", unsafe}); err == nil {
 			t.Fatalf("unsafe Git remote accepted: %s", unsafe)
 		}
 	}
@@ -335,10 +391,10 @@ func TestModelAuthenticationPolicySwitchesToOAuthCatalogDefault(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output}
-	if err := a.project(context.Background(), []string{"init", project, "--model-auth", "api-key"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project, "--model-auth", "api-key"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.modelPolicy(context.Background(), []string{"auth", "oauth", "--dir", project}); err != nil {
+	if err := a.run(context.Background(), []string{"model", "auth", "oauth", "--dir", project}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
@@ -346,11 +402,11 @@ func TestModelAuthenticationPolicySwitchesToOAuthCatalogDefault(t *testing.T) {
 	if err != nil || defaultsErr != nil || loaded.Model.AuthMode != modelcatalog.AuthOAuth || strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expectedDefaults, ",") {
 		t.Fatalf("model policy=%+v error=%v", loaded.Model, err)
 	}
-	if err := a.modelPolicy(context.Background(), []string{"set", "--dir", project, "--model", "gpt-5.5", "--model", "gpt-5.6-sol"}); err != nil {
+	if err := a.run(context.Background(), []string{"model", "set", "--dir", project, "--model", "gpt-5.5", "--model", "gpt-5.6-sol"}); err != nil {
 		t.Fatal(err)
 	}
 	output.Reset()
-	if err := a.modelPolicy(context.Background(), []string{"list", "--dir", project}); err != nil || !strings.Contains(output.String(), "gpt-5.6-sol\tallowed=true\tcontext=500000\tinput=372000") {
+	if err := a.run(context.Background(), []string{"model", "list", "--dir", project}); err != nil || !strings.Contains(output.String(), "gpt-5.6-sol\tallowed=true\tcontext=500000\tinput=372000") {
 		t.Fatalf("model list=%q error=%v", output.String(), err)
 	}
 }
@@ -363,7 +419,7 @@ func TestProjectInitWithOAuthAllowsEntireCatalogByDefault(t *testing.T) {
 	}
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	a := &app{store: store, output: io.Discard, errors: io.Discard}
-	if err := a.project(context.Background(), []string{"init", project, "--model-auth", "oauth"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project, "--model-auth", "oauth"}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
@@ -814,7 +870,7 @@ func TestProjectInitCreatesPinnedPolicyAndSafeInitialSnapshot(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(data, "sunaba")}
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output}
-	if err := a.project(context.Background(), []string{"init", project, "--mode", "dev"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project, "--mode", "dev"}); err != nil {
 		t.Fatal(err)
 	}
 	policyPath := filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json")
@@ -846,7 +902,7 @@ func TestHostProjectConfigurationMustBeAppliedBeforeUse(t *testing.T) {
 	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
 	var output bytes.Buffer
 	a := &app{store: store, configs: configs, output: &output, errors: &output}
-	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
 	projectID := state.ProjectID(project)
@@ -870,15 +926,15 @@ func TestHostProjectConfigurationMustBeAppliedBeforeUse(t *testing.T) {
 		t.Fatalf("unapplied configuration was usable: %v", err)
 	}
 	output.Reset()
-	if err := a.config(context.Background(), []string{"validate", "--dir", project}); err != nil || !strings.Contains(output.String(), "Valid host Project configuration") {
+	if err := a.run(context.Background(), []string{"config", "validate", "--dir", project}); err != nil || !strings.Contains(output.String(), "Valid host Project configuration") {
 		t.Fatalf("validate output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
-	if err := a.config(context.Background(), []string{"diff", "--dir", project}); err != nil || !strings.Contains(output.String(), "unapplied changes") {
+	if err := a.run(context.Background(), []string{"config", "diff", "--dir", project}); err != nil || !strings.Contains(output.String(), "unapplied changes") {
 		t.Fatalf("diff output=%q error=%v", output.String(), err)
 	}
 	output.Reset()
-	if err := a.config(context.Background(), []string{"apply", "--dir", project}); err != nil {
+	if err := a.run(context.Background(), []string{"config", "apply", "--dir", project}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, _, err := a.loadPolicy(project)
@@ -886,7 +942,7 @@ func TestHostProjectConfigurationMustBeAppliedBeforeUse(t *testing.T) {
 		t.Fatalf("effective=%+v error=%v", loaded, err)
 	}
 	output.Reset()
-	if err := a.config(context.Background(), []string{"path", "--dir", project}); err != nil || !strings.Contains(output.String(), paths.WebOrigins) {
+	if err := a.run(context.Background(), []string{"config", "path", "--dir", project}); err != nil || !strings.Contains(output.String(), paths.WebOrigins) {
 		t.Fatalf("path output=%q error=%v", output.String(), err)
 	}
 }
@@ -918,7 +974,7 @@ func TestInteractiveProjectConfigurationCancelsWithoutWritesThenAppliesGitGatewa
 	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
 	var output bytes.Buffer
 	a := &app{store: store, configs: configs, output: &output, errors: &output}
-	if err := a.project(context.Background(), []string{"init", project}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
 	projectID := state.ProjectID(project)
@@ -937,7 +993,7 @@ func TestInteractiveProjectConfigurationCancelsWithoutWritesThenAppliesGitGatewa
 	}
 	a.input = strings.NewReader("\n\n\n\n\nn\n")
 	output.Reset()
-	if err := a.config(context.Background(), []string{"edit", "--dir", project}); err != nil {
+	if err := a.run(context.Background(), []string{"config", "edit", "--dir", project}); err != nil {
 		t.Fatal(err)
 	}
 	configAfterCancel, _ := os.ReadFile(paths.Project)
@@ -948,7 +1004,7 @@ func TestInteractiveProjectConfigurationCancelsWithoutWritesThenAppliesGitGatewa
 
 	a.input = strings.NewReader("\n\ny\n\norigin\nhttps://git.example/team/project.git\n\n\n\ny\n")
 	output.Reset()
-	if err := a.config(context.Background(), []string{"edit", "--dir", project}); err != nil {
+	if err := a.run(context.Background(), []string{"config", "edit", "--dir", project}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, _, err := a.loadPolicy(project)

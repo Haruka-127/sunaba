@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,13 +35,14 @@ import (
 )
 
 type app struct {
-	verbose bool
-	store   *state.Store
-	configs *projectconfig.Store
-	runtime runtime.Runtime
-	input   io.Reader
-	output  io.Writer
-	errors  io.Writer
+	verbose        bool
+	store          *state.Store
+	configs        *projectconfig.Store
+	runtime        runtime.Runtime
+	runtimeFactory func(bool) runtime.Runtime
+	input          io.Reader
+	output         io.Writer
+	errors         io.Writer
 }
 
 type managedOpenCodeResult struct {
@@ -53,19 +53,6 @@ type managedOpenCodeResult struct {
 }
 
 func Run(ctx context.Context, args []string) error {
-	verbose := false
-	filtered := make([]string, 0, len(args))
-	for _, arg := range args {
-		if arg == "--verbose" {
-			verbose = true
-			continue
-		}
-		filtered = append(filtered, arg)
-	}
-	if len(filtered) == 0 {
-		usage(os.Stdout)
-		return nil
-	}
 	store, err := state.NewStore()
 	if err != nil {
 		return err
@@ -74,110 +61,19 @@ func Run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	a := &app{verbose: verbose, store: store, configs: configs, runtime: runtime.NewAppleContainer(verbose), input: os.Stdin, output: os.Stdout, errors: os.Stderr}
-	switch filtered[0] {
-	case "project":
-		return a.project(ctx, filtered[1:])
-	case "config":
-		return a.config(ctx, filtered[1:])
-	case "credentials":
-		return a.credentials(ctx, filtered[1:])
-	case "model":
-		return a.modelPolicy(ctx, filtered[1:])
-	case "up":
-		return a.up(ctx, filtered[1:])
-	case "agent":
-		return a.agent(ctx, filtered[1:])
-	case "_supervisor":
-		return a.supervisor(ctx, filtered[1:])
-	case "git":
-		return a.gitPolicy(ctx, filtered[1:])
-	case "web":
-		return a.webPolicy(ctx, filtered[1:])
-	case "shell":
-		return a.shell(ctx, filtered[1:])
-	case "status":
-		return a.status(ctx, filtered[1:])
-	case "changes":
-		return a.changes(ctx, filtered[1:])
-	case "approvals":
-		return a.approvals(ctx, filtered[1:])
-	case "recreate":
-		return a.recreate(ctx, filtered[1:])
-	case "down":
-		return a.down(ctx, filtered[1:])
-	case "destroy":
-		return a.destroy(ctx, filtered[1:])
-	case "firewall":
-		return a.firewall(ctx, filtered[1:])
-	case "help", "-h", "--help":
-		usage(a.output)
-		return nil
-	default:
-		return fmt.Errorf("unknown command %q; run 'sunaba help'", filtered[0])
+	a := &app{
+		store: store, configs: configs, input: os.Stdin, output: os.Stdout, errors: os.Stderr,
+		runtimeFactory: func(verbose bool) runtime.Runtime { return runtime.NewAppleContainer(verbose) },
 	}
+	return a.run(ctx, args)
 }
 
-func usage(output io.Writer) {
-	fmt.Fprint(output, `sunaba securely runs OpenCode v1.18.16 in a Project Agent VM.
-
-Usage:
-  sunaba credentials openai api-key set|status|delete
-  sunaba credentials openai oauth login|status|delete
-  sunaba model auth api-key|oauth [--dir <path>]
-  sunaba model set --model <id>... [--dir <path>]
-  sunaba model list [--dir <path>]
-  sunaba project init [path] [--mode secure|dev] [--model-auth oauth|api-key]
-  sunaba project list [--active] [--json]
-  sunaba config path|edit|validate|diff|apply|show [--effective] [--dir <path>]
-  sunaba up [--dir <path>] [--mode secure|dev]
-  sunaba agent [--dir <path>]
-  sunaba shell [--dir <path>]
-  sunaba git remote add --name <name> --url <https-url> [--dir <path>]
-  sunaba git remote remove --name <name> [--dir <path>]
-  sunaba git remote list [--dir <path>]
-  sunaba git disable [--dir <path>]
-  sunaba web enable [--default-origins=false] [--origin <http(s)://host>...] [--dir <path>]
-  sunaba web refresh|disable [--dir <path>]
-  sunaba status [--dir <path>]
-  sunaba changes export [--dir <path>]
-  sunaba changes apply [--dir <path>]
-  sunaba approvals [--dir <path>]
-  sunaba recreate [--dir <path>] [--discard-pending]
-  sunaba down [--dir <path>]
-  sunaba destroy [--dir <path>] --yes [--discard-pending]
-
-Modes:
-  secure  No direct VM network. Model/Git/Web access is possible only through scoped Gateways.
-  dev     Direct Internet egress exists only during the Agent Session. Exfiltration prevention is NOT provided;
-          host, LAN, inbound, credential, and worktree boundaries remain enforced.
-
-The Host TUI uses an isolated configuration and a loopback Local Attach Relay. Host Project files are never bind-mounted.
-`)
-}
-
-func (a *app) project(ctx context.Context, args []string) error {
-	if len(args) > 0 && args[0] == "list" {
-		return a.projectList(ctx, args[1:])
+func (a *app) projectInit(ctx context.Context, projectArgument, mode, modelAuth string) error {
+	if mode != "secure" && mode != "dev" {
+		return fmt.Errorf("mode must be secure or dev")
 	}
-	if len(args) == 0 || args[0] != "init" {
-		return fmt.Errorf("usage: sunaba project init [path] [--mode secure|dev] [--model-auth oauth|api-key] | sunaba project list [--active] [--json]")
-	}
-	projectArgument := "."
-	optionArguments := args[1:]
-	if len(optionArguments) > 0 && !strings.HasPrefix(optionArguments[0], "-") {
-		projectArgument = optionArguments[0]
-		optionArguments = optionArguments[1:]
-	}
-	fs := flag.NewFlagSet("project init", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	mode := fs.String("mode", "secure", "secure or dev")
-	modelAuth := fs.String("model-auth", "oauth", "oauth or api-key")
-	if err := fs.Parse(optionArguments); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 || (*mode != "secure" && *mode != "dev") || (*modelAuth != "api-key" && *modelAuth != "oauth") {
-		return fmt.Errorf("usage: sunaba project init [path] [--mode secure|dev] [--model-auth oauth|api-key]")
+	if modelAuth != "api-key" && modelAuth != "oauth" {
+		return fmt.Errorf("model-auth must be oauth or api-key")
 	}
 	root, err := state.ResolveProjectPath(projectArgument)
 	if err != nil {
@@ -206,12 +102,12 @@ func (a *app) project(ctx context.Context, args []string) error {
 		return err
 	}
 	pinned := dependency.MustPinned()
-	projectPolicy, err := policy.New(root, manifestDigest, dependency.OpenCodeVersion, dependency.AppleContainerVersion, pinned.AgentImage.Tag, *mode, time.Now())
+	projectPolicy, err := policy.New(root, manifestDigest, dependency.OpenCodeVersion, dependency.AppleContainerVersion, pinned.AgentImage.Tag, mode, time.Now())
 	if err != nil {
 		return err
 	}
 	authMode := modelcatalog.AuthOAuth
-	if *modelAuth == "api-key" {
+	if modelAuth == "api-key" {
 		authMode = modelcatalog.AuthAPIKey
 	}
 	defaultModels, err := modelcatalog.DefaultModels(authMode)
@@ -262,23 +158,16 @@ func (a *app) project(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *app) up(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("up", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	mode := fs.String("mode", "", "secure or dev")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
+func (a *app) up(ctx context.Context, dir, mode string) error {
+	projectPolicy, path, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
-	if *mode != "" {
-		if *mode != "secure" && *mode != "dev" {
+	if mode != "" {
+		if mode != "secure" && mode != "dev" {
 			return fmt.Errorf("mode must be secure or dev")
 		}
-		if projectPolicy.Mode != *mode {
+		if projectPolicy.Mode != mode {
 			if err := refuseActivePolicyChange(projectState); err != nil {
 				return err
 			}
@@ -291,7 +180,7 @@ func (a *app) up(ctx context.Context, args []string) error {
 					return fmt.Errorf("mode change requires export/recreate of existing Project VM %s", item.Name)
 				}
 			}
-			projectPolicy.Mode = *mode
+			projectPolicy.Mode = mode
 			projectPolicy.UpdatedAt = time.Now().UTC()
 			if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
 				return err
@@ -336,14 +225,8 @@ func (a *app) up(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *app) agent(ctx context.Context, args []string) (returnErr error) {
-	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+func (a *app) agent(ctx context.Context, dir string) (returnErr error) {
+	projectPolicy, _, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
@@ -460,14 +343,8 @@ func runHostTUIWithHeartbeat(ctx context.Context, tui *exec.Cmd, idleTimeout tim
 	}
 }
 
-func (a *app) shell(ctx context.Context, args []string) (returnErr error) {
-	fs := flag.NewFlagSet("shell", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	projectPolicy, _, projectState, err := a.loadPolicy(*dir)
+func (a *app) shell(ctx context.Context, dir string) (returnErr error) {
+	projectPolicy, _, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
@@ -515,14 +392,8 @@ func (a *app) runSanitizedShell(ctx context.Context, execute func(context.Contex
 	return scanner.Err()
 }
 
-func (a *app) status(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
+func (a *app) status(ctx context.Context, dir string) error {
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
@@ -603,21 +474,12 @@ func (a *app) status(ctx context.Context, args []string) error {
 	return listErr
 }
 
-func (a *app) changes(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: sunaba changes export|apply [--dir <path>]")
-	}
-	fs := flag.NewFlagSet("changes "+args[0], flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
+func (a *app) changes(ctx context.Context, action, dir string) error {
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
-	switch args[0] {
+	switch action {
 	case "export":
 		pending, pendingErr := loadPending(projectState, projectPolicy.ProjectRoot, projectPolicy.ProjectID)
 		if pendingErr != nil {
@@ -697,18 +559,12 @@ func (a *app) changes(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.output, "Applied Change Set %s.\n", pending.ChangeSet.Digest)
 		return nil
 	default:
-		return fmt.Errorf("unknown changes action %q", args[0])
+		return fmt.Errorf("unknown changes action %q", action)
 	}
 }
 
-func (a *app) approvals(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("approvals", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
+func (a *app) approvals(ctx context.Context, dir string) error {
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
@@ -730,29 +586,22 @@ func (a *app) approvals(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *app) recreate(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("recreate", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	discard := fs.Bool("discard-pending", false, "discard the pending Change Set")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
+func (a *app) recreate(ctx context.Context, dir string, discard bool) error {
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil && !*discard {
+	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil && !discard {
 		return fmt.Errorf("pending Change Set exists; export/apply it or pass --discard-pending explicitly")
 	}
-	if *discard {
+	if discard {
 		if err := removePending(projectState); err != nil {
 			return err
 		}
 	}
 	if client, err := openSupervisorClient(projectState); err == nil {
 		operation := "export"
-		if *discard {
+		if discard {
 			operation = "destroy"
 		}
 		operationContext, cancel := context.WithTimeout(ctx, 12*time.Minute)
@@ -781,14 +630,8 @@ func (a *app) recreate(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *app) down(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("down", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	_, _, projectState, err := a.loadEffectivePolicy(*dir)
+func (a *app) down(ctx context.Context, dir string) error {
+	_, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
@@ -815,27 +658,19 @@ func (a *app) down(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *app) destroy(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("destroy", flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	yes := fs.Bool("yes", false, "confirm destruction")
-	discard := fs.Bool("discard-pending", false, "discard the pending Change Set")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if !*yes {
+func (a *app) destroy(ctx context.Context, dir string, yes, discard bool) error {
+	if !yes {
 		return fmt.Errorf("destroy requires --yes")
 	}
-	projectPolicy, _, projectState, err := a.loadEffectivePolicy(*dir)
+	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil && !*discard {
+	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil && !discard {
 		return fmt.Errorf("pending Change Set exists; pass --discard-pending explicitly to destroy it")
 	}
 	if client, err := openSupervisorClient(projectState); err == nil {
-		if !*discard {
+		if !discard {
 			client.close()
 			return fmt.Errorf("a persistent Agent VM may contain unexported changes; run 'sunaba changes export' or pass --discard-pending")
 		}
@@ -871,7 +706,7 @@ func (a *app) destroy(ctx context.Context, args []string) error {
 			return fmt.Errorf("refusing to delete Project state while owned VM %s still exists", item.Name)
 		}
 	}
-	if *discard {
+	if discard {
 		if err := removePending(projectState); err != nil {
 			return err
 		}
@@ -894,45 +729,26 @@ func (a *app) destroy(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *app) firewall(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: sunaba firewall enable|quiesce|disable|status")
-	}
-	switch args[0] {
+func (a *app) firewall(ctx context.Context, action, subnet, gateway, ipv6 string) error {
+	switch action {
 	case "disable":
 		return firewall.Disable(ctx)
 	case "enable":
-		fs := flag.NewFlagSet("firewall enable", flag.ContinueOnError)
-		fs.SetOutput(a.errors)
-		subnet := fs.String("subnet", "", "owned dev IPv4 subnet")
-		gateway := fs.String("gateway", "", "owned dev IPv4 gateway")
-		ipv6 := fs.String("ipv6-subnet", "", "owned dev IPv6 subnet")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if *subnet == "" || *gateway == "" || *ipv6 == "" {
+		if subnet == "" || gateway == "" || ipv6 == "" {
 			return fmt.Errorf("firewall enable requires --subnet, --gateway, and --ipv6-subnet")
 		}
-		return firewall.Enable(ctx, firewall.Network{Subnet: *subnet, Gateway: *gateway, IPv6Subnet: *ipv6})
+		return firewall.Enable(ctx, firewall.Network{Subnet: subnet, Gateway: gateway, IPv6Subnet: ipv6})
 	case "quiesce":
-		fs := flag.NewFlagSet("firewall quiesce", flag.ContinueOnError)
-		fs.SetOutput(a.errors)
-		subnet := fs.String("subnet", "", "owned dev IPv4 subnet")
-		gateway := fs.String("gateway", "", "owned dev IPv4 gateway")
-		ipv6 := fs.String("ipv6-subnet", "", "owned dev IPv6 subnet")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if *subnet == "" || *gateway == "" || *ipv6 == "" {
+		if subnet == "" || gateway == "" || ipv6 == "" {
 			return fmt.Errorf("firewall quiesce requires --subnet, --gateway, and --ipv6-subnet")
 		}
-		return firewall.Quiesce(ctx, firewall.Network{Subnet: *subnet, Gateway: *gateway, IPv6Subnet: *ipv6})
+		return firewall.Quiesce(ctx, firewall.Network{Subnet: subnet, Gateway: gateway, IPv6Subnet: ipv6})
 	case "status":
 		status, err := firewall.Status(ctx)
 		fmt.Fprintln(a.output, status)
 		return err
 	default:
-		return fmt.Errorf("unknown firewall action %q", args[0])
+		return fmt.Errorf("unknown firewall action %q", action)
 	}
 }
 

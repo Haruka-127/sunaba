@@ -25,6 +25,9 @@ func TestPinnedManifest(t *testing.T) {
 	if m.BaseImage.Reference == "" || m.AgentImage.Tag == "" {
 		t.Fatal("image contract is incomplete")
 	}
+	if m.GoModules["github.com/urfave/cli/v3"] != UrfaveCLIVersion {
+		t.Fatalf("urfave/cli=%q", m.GoModules["github.com/urfave/cli/v3"])
+	}
 }
 
 func TestManifestPinsSourceAndBuildProvenance(t *testing.T) {
@@ -86,5 +89,10 @@ func TestManifestRejectsVersionDrift(t *testing.T) {
 	m.OpenCode.Version = "2.0.0"
 	if err := m.Validate(); err == nil {
 		t.Fatal("version drift was accepted")
+	}
+	m = MustPinned()
+	m.GoModules["github.com/urfave/cli/v3"] = "v3.10.0"
+	if err := m.Validate(); err == nil {
+		t.Fatal("urfave/cli version drift was accepted")
 	}
 }

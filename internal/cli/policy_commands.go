@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,42 +16,12 @@ import (
 	"sunaba/internal/webgateway"
 )
 
-type stringFlags []string
-
-func (a *app) modelPolicy(_ context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("%s", modelPolicyUsage())
-	}
-	action := args[0]
-	if action != "auth" && action != "set" && action != "list" {
-		return fmt.Errorf("%s", modelPolicyUsage())
-	}
-	if action == "auth" && (len(args) < 2 || (args[1] != "api-key" && args[1] != "oauth")) {
-		return fmt.Errorf("%s", modelPolicyUsage())
-	}
-	flagArguments := args[1:]
-	if action == "auth" {
-		flagArguments = args[2:]
-	}
-	fs := flag.NewFlagSet("model "+action, flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	var models stringFlags
-	fs.Var(&models, "model", "allowed model ID; repeat for multiple models")
-	if err := fs.Parse(flagArguments); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("%s", modelPolicyUsage())
-	}
-	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
+func (a *app) modelPolicy(_ context.Context, action, auth, dir string, models []string) error {
+	projectPolicy, path, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
 	if action == "list" {
-		if len(models) != 0 {
-			return fmt.Errorf("model list does not accept --model")
-		}
 		available, err := modelcatalog.Available(projectPolicy.Model.AuthMode)
 		if err != nil {
 			return err
@@ -72,11 +41,8 @@ func (a *app) modelPolicy(_ context.Context, args []string) error {
 	}
 	switch action {
 	case "auth":
-		if len(models) != 0 {
-			return fmt.Errorf("model auth does not accept --model")
-		}
 		mode := modelcatalog.AuthAPIKey
-		if args[1] == "oauth" {
+		if auth == "oauth" {
 			mode = modelcatalog.AuthOAuth
 		}
 		defaultModels, err := modelcatalog.DefaultModels(mode)
@@ -96,7 +62,7 @@ func (a *app) modelPolicy(_ context.Context, args []string) error {
 		}
 		projectPolicy.Model.AllowedModels = append([]string(nil), models...)
 	default:
-		return fmt.Errorf("%s", modelPolicyUsage())
+		return fmt.Errorf("unknown model policy action %q", action)
 	}
 	projectPolicy.UpdatedAt = time.Now().UTC()
 	if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
@@ -106,49 +72,12 @@ func (a *app) modelPolicy(_ context.Context, args []string) error {
 	return nil
 }
 
-func modelPolicyUsage() string {
-	return "usage: sunaba model auth api-key|oauth [--dir <path>] | model set --model <id>... [--dir <path>] | model list [--dir <path>]"
-}
-
-func (f *stringFlags) String() string { return strings.Join(*f, ",") }
-
-func (f *stringFlags) Set(value string) error {
-	*f = append(*f, value)
-	return nil
-}
-
-func (a *app) gitPolicy(_ context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("%s", gitPolicyUsage())
-	}
-	action := args[0]
-	flagArguments := args[1:]
-	if action == "remote" {
-		if len(args) < 2 {
-			return fmt.Errorf("%s", gitPolicyUsage())
-		}
-		action = "remote-" + args[1]
-		flagArguments = args[2:]
-	}
-	fs := flag.NewFlagSet("git "+action, flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	name := fs.String("name", "", "fixed remote name")
-	remoteURL := fs.String("url", "", "credential-free fixed HTTPS .git URL")
-	if err := fs.Parse(flagArguments); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected Git policy arguments")
-	}
-	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
+func (a *app) gitPolicy(_ context.Context, action, dir, name, remoteURL string) error {
+	projectPolicy, path, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
 	if action == "remote-list" {
-		if *name != "" || *remoteURL != "" {
-			return fmt.Errorf("git remote list does not accept remote changes")
-		}
 		if len(projectPolicy.Git.Remotes) == 0 {
 			fmt.Fprintln(a.output, "No Git Gateway remotes are configured.")
 			return nil
@@ -163,7 +92,7 @@ func (a *app) gitPolicy(_ context.Context, args []string) error {
 	}
 	switch action {
 	case "remote-add":
-		configured := policy.GitRemotePolicy{Name: *name, URL: *remoteURL}
+		configured := policy.GitRemotePolicy{Name: name, URL: remoteURL}
 		if err := policy.ValidateGitRemote(configured); err != nil {
 			return err
 		}
@@ -177,29 +106,26 @@ func (a *app) gitPolicy(_ context.Context, args []string) error {
 		}
 		projectPolicy.Git.Remotes = append(projectPolicy.Git.Remotes, configured)
 	case "remote-remove":
-		if *name == "" || *remoteURL != "" {
+		if name == "" || remoteURL != "" {
 			return fmt.Errorf("git remote remove requires only --name")
 		}
 		removed := false
 		kept := make([]policy.GitRemotePolicy, 0, len(projectPolicy.Git.Remotes))
 		for _, configured := range projectPolicy.Git.Remotes {
-			if configured.Name == *name {
+			if configured.Name == name {
 				removed = true
 				continue
 			}
 			kept = append(kept, configured)
 		}
 		if !removed {
-			return fmt.Errorf("Git remote %q is not configured", *name)
+			return fmt.Errorf("Git remote %q is not configured", name)
 		}
 		projectPolicy.Git.Remotes = kept
 	case "disable":
-		if *name != "" || *remoteURL != "" {
-			return fmt.Errorf("git disable does not accept remote options")
-		}
 		projectPolicy.Git.Remotes = nil
 	default:
-		return fmt.Errorf("%s", gitPolicyUsage())
+		return fmt.Errorf("unknown Git policy action %q", action)
 	}
 	projectPolicy.Git.Remotes = sortedGitRemotes(projectPolicy.Git.Remotes)
 	projectPolicy.UpdatedAt = time.Now().UTC()
@@ -214,58 +140,32 @@ func (a *app) gitPolicy(_ context.Context, args []string) error {
 	return nil
 }
 
-func gitPolicyUsage() string {
-	return "usage: sunaba git remote add --name <name> --url <https-url> [--dir <path>] | remote remove --name <name> | remote list | disable"
-}
-
 func sortedGitRemotes(remotes []policy.GitRemotePolicy) []policy.GitRemotePolicy {
 	sorted := append([]policy.GitRemotePolicy(nil), remotes...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	return sorted
 }
 
-func (a *app) webPolicy(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("%s", webPolicyUsage())
-	}
-	fs := flag.NewFlagSet("web "+args[0], flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	includeSubdomains := fs.Bool("include-subdomains", false, "apply every supplied origin rule to subdomains")
-	defaultOrigins := fs.Bool("default-origins", true, "include the built-in common-development origin preset")
-	var origins stringFlags
-	fs.Var(&origins, "origin", "allowed origin; repeat for multiple origins")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected Web policy arguments")
-	}
-	defaultOriginsSet := false
-	fs.Visit(func(current *flag.Flag) {
-		if current.Name == "default-origins" {
-			defaultOriginsSet = true
-		}
-	})
-	projectPolicy, path, projectState, err := a.loadPolicy(*dir)
+func (a *app) webPolicy(ctx context.Context, action, dir string, includeSubdomains, defaultOrigins bool, origins []string) error {
+	projectPolicy, path, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
 	if err := refuseActivePolicyChange(projectState); err != nil {
 		return err
 	}
-	switch args[0] {
+	switch action {
 	case "enable":
 		rules := make([]webgateway.OriginRule, 0, len(origins))
 		for _, origin := range origins {
-			rule, err := originRule(origin, *includeSubdomains)
+			rule, err := originRule(origin, includeSubdomains)
 			if err != nil {
 				return err
 			}
 			rules = append(rules, rule)
 		}
 		projectPolicy.Web.OriginPresets = nil
-		if *defaultOrigins {
+		if defaultOrigins {
 			projectPolicy.Web.OriginPresets = []string{webgateway.CommonDevelopmentOriginPreset}
 		}
 		projectPolicy.Web.CustomRules = rules
@@ -274,17 +174,11 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 		}
 		return a.refreshWebPolicy(ctx, projectPolicy, path, projectState)
 	case "refresh":
-		if len(origins) != 0 || *includeSubdomains || defaultOriginsSet {
-			return fmt.Errorf("web refresh does not accept origin changes")
-		}
 		if !projectPolicy.Web.Enabled {
 			return fmt.Errorf("Web Gateway is disabled; use web enable with explicit origins")
 		}
 		return a.refreshWebPolicy(ctx, projectPolicy, path, projectState)
 	case "disable":
-		if len(origins) != 0 || *includeSubdomains || defaultOriginsSet {
-			return fmt.Errorf("web disable does not accept origin options")
-		}
 		projectPolicy.Web.Enabled = false
 		projectPolicy.Web.Rules = nil
 		projectPolicy.Web.BlocklistManifest = ""
@@ -296,12 +190,8 @@ func (a *app) webPolicy(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.output, "Disabled the Project Web Gateway. The pinned blocklist snapshot was retained and is inactive.")
 		return nil
 	default:
-		return fmt.Errorf("unknown web action %q", args[0])
+		return fmt.Errorf("unknown web action %q", action)
 	}
-}
-
-func webPolicyUsage() string {
-	return "usage: sunaba web enable [--default-origins=false] [--origin <http(s)://host>...] [--dir <path>] | refresh|disable [--dir <path>]"
 }
 
 func originRule(raw string, includeSubdomains bool) (webgateway.OriginRule, error) {

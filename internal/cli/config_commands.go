@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,25 +20,8 @@ import (
 	"sunaba/internal/webgateway"
 )
 
-func (a *app) config(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("%s", configUsage())
-	}
-	action := args[0]
-	if action != "path" && action != "edit" && action != "validate" && action != "diff" && action != "apply" && action != "show" {
-		return fmt.Errorf("%s", configUsage())
-	}
-	fs := flag.NewFlagSet("config "+action, flag.ContinueOnError)
-	fs.SetOutput(a.errors)
-	dir := fs.String("dir", ".", "Project directory")
-	effectiveOutput := fs.Bool("effective", false, "show the compiled effective policy")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 || (action != "show" && *effectiveOutput) {
-		return fmt.Errorf("%s", configUsage())
-	}
-	effective, policyPath, projectState, err := a.loadEffectivePolicy(*dir)
+func (a *app) config(ctx context.Context, action, dir string, effectiveOutput bool) error {
+	effective, policyPath, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
@@ -88,7 +70,7 @@ func (a *app) config(ctx context.Context, args []string) error {
 			return err
 		}
 		defer lock.Close()
-		latestEffective, latestPolicyPath, latestProjectState, err := a.loadEffectivePolicy(*dir)
+		latestEffective, latestPolicyPath, latestProjectState, err := a.loadEffectivePolicy(dir)
 		if err != nil {
 			return err
 		}
@@ -140,7 +122,7 @@ func (a *app) config(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.output, "Host Project configuration has unapplied changes.\n\n--- applied project.json\n+++ desired project.json\n%s\n--- applied custom web origins\n+++ desired custom web origins\n%s\n--- applied effective web origins\n+++ desired effective web origins\n%s\n- applied origin preset digest: %s\n+ desired origin preset digest: %s\n", renderConfigComparison(appliedJSON, desiredJSON), renderConfigComparison(projectconfig.RenderOrigins(appliedRules), projectconfig.RenderOrigins(rules)), renderConfigComparison(projectconfig.RenderOrigins(effective.Web.Rules), projectconfig.RenderOrigins(desiredEffectiveRules)), effective.Web.OriginPresetSHA256, desiredPresetDigest)
 		return nil
 	case "show":
-		if *effectiveOutput {
+		if effectiveOutput {
 			encoded, err := policyJSON(effective)
 			if err != nil {
 				return err
@@ -178,12 +160,8 @@ func (a *app) config(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.output, "Applied host Project configuration for %s. Effective policy digest is now bound to the next Agent Session.\n", compiled.ProjectID)
 		return nil
 	default:
-		return fmt.Errorf("%s", configUsage())
+		return fmt.Errorf("unknown config action %q", action)
 	}
-}
-
-func configUsage() string {
-	return "usage: sunaba config path|edit|validate|diff|apply|show [--effective] [--dir <path>]"
 }
 
 type boundedCommandOutput struct {
