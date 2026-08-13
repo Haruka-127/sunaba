@@ -267,22 +267,30 @@ func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
 }
 
 func Save(path string, policy ProjectPolicy) error {
-	if err := policy.Validate(); err != nil {
-		return err
-	}
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return fmt.Errorf("policy path must be absolute and clean")
-	}
-	parent := filepath.Dir(path)
-	if err := ensurePrivatePolicyDirectory(parent); err != nil {
-		return err
-	}
-	encoded, err := json.MarshalIndent(policy, "", "  ")
+	replacement, err := PrepareReplacement(path, policy)
 	if err != nil {
 		return err
 	}
+	return securefs.AtomicWriteOwned(replacement.Path, replacement.Data)
+}
+
+func PrepareReplacement(path string, policy ProjectPolicy) (securefs.Replacement, error) {
+	if err := policy.Validate(); err != nil {
+		return securefs.Replacement{}, err
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return securefs.Replacement{}, fmt.Errorf("policy path must be absolute and clean")
+	}
+	parent := filepath.Dir(path)
+	if err := ensurePrivatePolicyDirectory(parent); err != nil {
+		return securefs.Replacement{}, err
+	}
+	encoded, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		return securefs.Replacement{}, err
+	}
 	encoded = append(encoded, '\n')
-	return securefs.AtomicWriteOwned(path, encoded)
+	return securefs.Replacement{Path: path, Data: encoded, MaximumBytes: maxPolicyBytes}, nil
 }
 
 func readPolicyFile(path string) ([]byte, error) {

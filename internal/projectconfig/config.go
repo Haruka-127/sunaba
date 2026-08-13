@@ -35,7 +35,8 @@ const (
 var projectIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 type Store struct {
-	Root string
+	Root               string
+	transactionOptions securefs.TransactionOptions
 }
 
 type Config struct {
@@ -135,30 +136,38 @@ func ensureOwnedBaseDirectory(path string) error {
 }
 
 func (s *Store) Save(projectID string, config Config, rules []webgateway.OriginRule) error {
-	if err := s.Init(); err != nil {
+	paths, replacements, err := s.PrepareReplacements(projectID, config, rules)
+	if err != nil {
 		return err
+	}
+	return securefs.WriteTransaction(configTransactionJournal(paths), replacements, s.transactionOptions)
+}
+
+func (s *Store) PrepareReplacements(projectID string, config Config, rules []webgateway.OriginRule) (Paths, []securefs.Replacement, error) {
+	if err := s.Init(); err != nil {
+		return Paths{}, nil, err
 	}
 	paths, err := s.ProjectPaths(projectID)
 	if err != nil {
-		return err
+		return Paths{}, nil, err
 	}
 	if state.ProjectID(config.ProjectRoot) != projectID {
-		return fmt.Errorf("Project configuration identity does not match its directory")
+		return Paths{}, nil, fmt.Errorf("Project configuration identity does not match its directory")
 	}
 	if err := Validate(config, rules); err != nil {
-		return err
+		return Paths{}, nil, err
 	}
 	if err := ensurePrivateDirectory(paths.Directory); err != nil {
-		return err
+		return Paths{}, nil, err
 	}
 	encoded, err := Marshal(config)
 	if err != nil {
-		return err
+		return Paths{}, nil, err
 	}
-	if err := writePrivateFile(paths.WebOrigins, RenderOrigins(rules)); err != nil {
-		return err
-	}
-	return writePrivateFile(paths.Project, encoded)
+	return paths, []securefs.Replacement{
+		{Path: paths.WebOrigins, Data: RenderOrigins(rules), MaximumBytes: maxOriginsBytes},
+		{Path: paths.Project, Data: encoded, MaximumBytes: maxConfigBytes},
+	}, nil
 }
 
 func (s *Store) Load(projectID string) (Config, []webgateway.OriginRule, error) {
@@ -173,6 +182,9 @@ func (s *Store) Load(projectID string) (Config, []webgateway.OriginRule, error) 
 		return Config{}, nil, err
 	}
 	if err := checkPrivateDirectory(paths.Directory); err != nil {
+		return Config{}, nil, err
+	}
+	if err := securefs.RecoverTransaction(configTransactionJournal(paths)); err != nil {
 		return Config{}, nil, err
 	}
 	data, err := readPrivateFile(paths.Project, maxConfigBytes)
@@ -202,6 +214,10 @@ func (s *Store) Load(projectID string) (Config, []webgateway.OriginRule, error) 
 		return Config{}, nil, err
 	}
 	return config, rules, nil
+}
+
+func configTransactionJournal(paths Paths) string {
+	return filepath.Join(paths.Directory, ".config-transaction.json")
 }
 
 func (s *Store) Remove(projectID string) error {
@@ -535,15 +551,4 @@ func checkPrivateDirectory(path string) error {
 
 func readPrivateFile(path string, maximum int64) ([]byte, error) {
 	return securefs.ReadOwnedRegular(path, maximum)
-}
-
-func writePrivateFile(path string, data []byte) error {
-	if len(data) == 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return fmt.Errorf("Project configuration path or content is invalid")
-	}
-	parent := filepath.Dir(path)
-	if err := ensurePrivateDirectory(parent); err != nil {
-		return err
-	}
-	return securefs.AtomicWriteOwned(path, data)
 }

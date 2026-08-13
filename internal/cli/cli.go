@@ -145,13 +145,10 @@ func (a *app) projectInit(ctx context.Context, projectArgument, mode, modelAuth 
 		}
 	}()
 	createdConfig = true
-	if err := configStore.Save(projectPolicy.ProjectID, projectConfig, originRules); err != nil {
-		return err
-	}
-	if err := policy.Save(policyPath, projectPolicy); err != nil {
-		return err
-	}
 	createdState = stateWasAbsent
+	if err := persistConfigAndPolicy(configStore, projectState, policyPath, projectConfig, originRules, projectPolicy); err != nil {
+		return err
+	}
 	initialRoot := filepath.Join(projectState, "initial-snapshot")
 	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
 	if err != nil {
@@ -831,6 +828,9 @@ func (a *app) loadEffectivePolicy(directory string) (policy.ProjectPolicy, strin
 	}
 	projectState := a.projectState(root)
 	path := filepath.Join(projectState, "policy.json")
+	if err := recoverConfigPolicyTransaction(projectState); err != nil {
+		return policy.ProjectPolicy{}, "", "", fmt.Errorf("recover Project configuration transaction: %w", err)
+	}
 	loaded, migrated, err := policy.LoadAndMigrate(path, time.Now())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "mode 0600") {
@@ -874,10 +874,7 @@ func (a *app) savePolicyAndConfig(policyPath string, effective policy.ProjectPol
 		return err
 	}
 	config, rules := projectconfig.FromPolicy(effective)
-	if err := configStore.Save(effective.ProjectID, config, rules); err != nil {
-		return err
-	}
-	return policy.Save(policyPath, effective)
+	return persistConfigAndPolicy(configStore, filepath.Dir(policyPath), policyPath, config, rules, effective)
 }
 
 func (a *app) projectState(root string) string {

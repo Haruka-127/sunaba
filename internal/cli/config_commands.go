@@ -334,11 +334,10 @@ func (a *app) applyProjectConfig(ctx context.Context, config projectconfig.Confi
 		if err != nil {
 			return policy.ProjectPolicy{}, err
 		}
-		if err := configStore.Save(effective.ProjectID, config, rules); err != nil {
+		if err := persistConfigAndPolicy(configStore, projectState, policyPath, config, rules, compiled); err != nil {
 			return policy.ProjectPolicy{}, err
 		}
-	}
-	if err := policy.Save(policyPath, compiled); err != nil {
+	} else if err := policy.Save(policyPath, compiled); err != nil {
 		return policy.ProjectPolicy{}, err
 	}
 	return compiled, nil

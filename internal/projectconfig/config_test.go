@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"sunaba/internal/policy"
+	"sunaba/internal/securefs"
 	"sunaba/internal/state"
 	"sunaba/internal/webgateway"
 )
@@ -60,6 +61,40 @@ func TestStoreKeepsEditableConfigurationOutsideProject(t *testing.T) {
 	}
 	if _, err := os.Lstat(store.Root); err != nil {
 		t.Fatalf("configuration root was removed with one Project: %v", err)
+	}
+}
+
+func TestStoreSaveRollsBackBothConfigurationFiles(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	effective := testPolicy(t, project)
+	config, rules := FromPolicy(effective)
+	store := &Store{Root: filepath.Join(base, "host-config", "sunaba")}
+	if err := store.Save(effective.ProjectID, config, rules); err != nil {
+		t.Fatal(err)
+	}
+	config.Session.TTLSeconds++
+	for failAt := 0; failAt < 2; failAt++ {
+		store.transactionOptions = securefs.TransactionOptions{BeforeReplace: func(index int, _ string) error {
+			if index == failAt {
+				return errors.New("injected replace failure")
+			}
+			return nil
+		}}
+		if err := store.Save(effective.ProjectID, config, rules); err == nil {
+			t.Fatalf("replacement %d failure was ignored", failAt)
+		}
+		store.transactionOptions = securefs.TransactionOptions{}
+		loaded, loadedRules, err := store.Load(effective.ProjectID)
+		if err != nil || !Matches(loaded, loadedRules, effective) {
+			t.Fatalf("replacement %d left mixed configuration: config=%+v rules=%+v error=%v", failAt, loaded, loadedRules, err)
+		}
 	}
 }
 
