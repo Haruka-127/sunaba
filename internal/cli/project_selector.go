@@ -31,6 +31,30 @@ func projectSelectorFlags(additional ...urfavecli.Flag) []urfavecli.Flag {
 	return append(flags, additional...)
 }
 
+func addProjectSelectorConstraints(root *urfavecli.Command) {
+	var visit func(*urfavecli.Command)
+	visit = func(command *urfavecli.Command) {
+		var directory, projectID urfavecli.Flag
+		for _, flag := range command.Flags {
+			for _, name := range flag.Names() {
+				switch name {
+				case "dir":
+					directory = flag
+				case "project-id":
+					projectID = flag
+				}
+			}
+		}
+		if directory != nil && projectID != nil {
+			command.MutuallyExclusiveFlags = append(command.MutuallyExclusiveFlags, urfavecli.MutuallyExclusiveFlags{Flags: [][]urfavecli.Flag{{directory}, {projectID}}})
+		}
+		for _, child := range command.Commands {
+			visit(child)
+		}
+	}
+	visit(root)
+}
+
 func projectSelectorFromCommand(cmd *urfavecli.Command) projectSelector {
 	return projectSelector{
 		Directory: cmd.String("dir"), DirectorySet: cmd.IsSet("dir"),

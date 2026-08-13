@@ -28,7 +28,7 @@ func (a *app) command() *urfavecli.Command {
 		ErrWriter:                 a.errors,
 		ExitErrHandler:            func(context.Context, *urfavecli.Command, error) {},
 		Flags: []urfavecli.Flag{
-			&urfavecli.BoolFlag{Name: "verbose", Usage: "Show detailed execution logs"},
+			&urfavecli.BoolFlag{Name: "verbose", Usage: "Show detailed execution logs", OnlyOnce: true},
 		},
 		Before: func(ctx context.Context, cmd *urfavecli.Command) (context.Context, error) {
 			a.verbose = cmd.Bool("verbose")
@@ -41,7 +41,7 @@ func (a *app) command() *urfavecli.Command {
 	command.Commands = []*urfavecli.Command{
 		a.setupCommand(), a.versionsCommand(), a.updateCommand(),
 		a.projectCommand(), a.configCommand(), a.credentialsCommand(), a.modelCommand(),
-		a.simpleProjectCommand("up", "Prepare the Project VM", projectSelectorFlags(&urfavecli.StringFlag{Name: "mode", Usage: "Execution mode (secure or dev)"}), a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+		a.simpleProjectCommand("up", "Prepare the Project VM", projectSelectorFlags(&urfavecli.StringFlag{Name: "mode", Usage: "Execution mode (secure or dev)", OnlyOnce: true, Validator: optionalEnum("mode", "secure", "dev")}), a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.up(ctx, dir, cmd.String("mode"))
 		})),
 		a.simpleProjectCommand("agent", "Start the Project Agent", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.agent(ctx, dir) })),
@@ -58,6 +58,7 @@ func (a *app) command() *urfavecli.Command {
 		a.firewallCommand(),
 		{Name: "_supervisor", Hidden: true, Flags: []urfavecli.Flag{dirFlag()}, Action: func(ctx context.Context, cmd *urfavecli.Command) error { return a.supervisor(ctx, cmd.String("dir")) }},
 	}
+	addProjectSelectorConstraints(command)
 	return command
 }
 
@@ -98,14 +99,14 @@ func rejectArguments(action urfavecli.ActionFunc) urfavecli.ActionFunc {
 }
 
 func dirFlag() urfavecli.Flag {
-	return &urfavecli.StringFlag{Name: "dir", Value: ".", Usage: "Project directory"}
+	return &urfavecli.StringFlag{Name: "dir", Value: ".", Usage: "Project directory", Required: true, OnlyOnce: true}
 }
 
 func (a *app) projectCommand() *urfavecli.Command {
 	return &urfavecli.Command{Name: "project", Usage: "Register and list Projects", Commands: []*urfavecli.Command{
 		{Name: "init", Usage: "Register a Project", ArgsUsage: "[path]", Flags: []urfavecli.Flag{
-			&urfavecli.StringFlag{Name: "mode", Value: "secure", Usage: "Execution mode (secure or dev)"},
-			&urfavecli.StringFlag{Name: "model-auth", Value: "oauth", Usage: "Model authentication (oauth or api-key)"},
+			&urfavecli.StringFlag{Name: "mode", Value: "secure", Usage: "Execution mode (secure or dev)", OnlyOnce: true, Validator: enum("mode", "secure", "dev"), ValidateDefaults: true},
+			&urfavecli.StringFlag{Name: "model-auth", Value: "oauth", Usage: "Model authentication (oauth or api-key)", OnlyOnce: true, Validator: enum("model-auth", "oauth", "api-key"), ValidateDefaults: true},
 		}, Action: func(ctx context.Context, cmd *urfavecli.Command) error {
 			if cmd.NArg() > 1 {
 				return fmt.Errorf("project init accepts at most one path")
@@ -117,8 +118,8 @@ func (a *app) projectCommand() *urfavecli.Command {
 			return a.projectInit(ctx, path, cmd.String("mode"), cmd.String("model-auth"))
 		}},
 		{Name: "list", Usage: "List registered Projects", Flags: []urfavecli.Flag{
-			&urfavecli.BoolFlag{Name: "active", Usage: "Show only Projects with a reachable Supervisor or running VM"},
-			&urfavecli.BoolFlag{Name: "json", Usage: "Output as JSON"},
+			&urfavecli.BoolFlag{Name: "active", Usage: "Show only Projects with a reachable Supervisor or running VM", OnlyOnce: true},
+			&urfavecli.BoolFlag{Name: "json", Usage: "Output as JSON", OnlyOnce: true},
 		}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
 			return a.projectList(ctx, cmd.Bool("active"), cmd.Bool("json"))
 		})},
@@ -131,7 +132,7 @@ func (a *app) configCommand() *urfavecli.Command {
 		action := action
 		flags := projectSelectorFlags()
 		if action == "show" {
-			flags = append(flags, &urfavecli.BoolFlag{Name: "effective", Usage: "Show the compiled effective policy"})
+			flags = append(flags, &urfavecli.BoolFlag{Name: "effective", Usage: "Show the compiled effective policy", OnlyOnce: true})
 		}
 		commands = append(commands, &urfavecli.Command{Name: action, Usage: configActionUsage(action), Flags: flags, Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.config(ctx, action, dir, cmd.Bool("effective"))
@@ -194,10 +195,10 @@ func (a *app) modelCommand() *urfavecli.Command {
 
 func (a *app) gitCommand() *urfavecli.Command {
 	remote := &urfavecli.Command{Name: "remote", Usage: "Manage pinned Git Gateway remotes", Commands: []*urfavecli.Command{
-		{Name: "add", Usage: "Add a pinned HTTPS remote", Flags: projectSelectorFlags(&urfavecli.StringFlag{Name: "name", Usage: "Remote name"}, &urfavecli.StringFlag{Name: "url", Usage: "Pinned HTTPS .git URL without credentials"}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+		{Name: "add", Usage: "Add a pinned HTTPS remote", Flags: projectSelectorFlags(&urfavecli.StringFlag{Name: "name", Usage: "Remote name", Required: true, OnlyOnce: true}, &urfavecli.StringFlag{Name: "url", Usage: "Pinned HTTPS .git URL without credentials", Required: true, OnlyOnce: true}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.gitPolicy(ctx, "remote-add", dir, cmd.String("name"), cmd.String("url"))
 		}))},
-		{Name: "remove", Usage: "Remove a pinned remote", Flags: projectSelectorFlags(&urfavecli.StringFlag{Name: "name", Usage: "Remote name"}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+		{Name: "remove", Usage: "Remove a pinned remote", Flags: projectSelectorFlags(&urfavecli.StringFlag{Name: "name", Usage: "Remote name", Required: true, OnlyOnce: true}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.gitPolicy(ctx, "remote-remove", dir, cmd.String("name"), "")
 		}))},
 		{Name: "list", Usage: "List pinned remotes", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
@@ -215,8 +216,8 @@ func (a *app) gitCommand() *urfavecli.Command {
 func (a *app) webCommand() *urfavecli.Command {
 	return &urfavecli.Command{Name: "web", Usage: "Manage the Project Web Gateway", Commands: []*urfavecli.Command{
 		{Name: "enable", Usage: "Enable the Web Gateway with pinned allowed origins", Flags: projectSelectorFlags(
-			&urfavecli.BoolFlag{Name: "include-subdomains", Usage: "Also allow subdomains of each specified origin"},
-			&urfavecli.BoolFlag{Name: "default-origins", Value: true, Usage: "Include the built-in common development origin preset"},
+			&urfavecli.BoolFlag{Name: "include-subdomains", Usage: "Also allow subdomains of each specified origin", OnlyOnce: true},
+			&urfavecli.BoolFlag{Name: "default-origins", Value: true, Usage: "Include the built-in common development origin preset", OnlyOnce: true},
 			&urfavecli.StringSliceFlag{Name: "origin", Usage: "Allowed origin (may be specified multiple times)"},
 		), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.webPolicy(ctx, "enable", dir, cmd.Bool("include-subdomains"), cmd.Bool("default-origins"), cmd.StringSlice("origin"))
@@ -244,9 +245,9 @@ func (a *app) changesCommand() *urfavecli.Command {
 func (a *app) firewallCommand() *urfavecli.Command {
 	networkFlags := func() []urfavecli.Flag {
 		return []urfavecli.Flag{
-			&urfavecli.StringFlag{Name: "subnet", Usage: "Owned dev IPv4 subnet"},
-			&urfavecli.StringFlag{Name: "gateway", Usage: "Owned dev IPv4 gateway"},
-			&urfavecli.StringFlag{Name: "ipv6-subnet", Usage: "Owned dev IPv6 subnet"},
+			&urfavecli.StringFlag{Name: "subnet", Usage: "Owned dev IPv4 subnet", Required: true, OnlyOnce: true},
+			&urfavecli.StringFlag{Name: "gateway", Usage: "Owned dev IPv4 gateway", Required: true, OnlyOnce: true},
+			&urfavecli.StringFlag{Name: "ipv6-subnet", Usage: "Owned dev IPv6 subnet", Required: true, OnlyOnce: true},
 		}
 	}
 	commands := make([]*urfavecli.Command, 0, 4)
@@ -261,4 +262,25 @@ func (a *app) firewallCommand() *urfavecli.Command {
 		&urfavecli.Command{Name: "status", Usage: "Show firewall status", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error { return a.firewall(ctx, "status", "", "", "") })},
 	)
 	return &urfavecli.Command{Name: "firewall", Usage: "Manage sunaba's host firewall", Commands: commands}
+}
+
+func enum(name string, allowed ...string) func(string) error {
+	return func(value string) error {
+		for _, candidate := range allowed {
+			if value == candidate {
+				return nil
+			}
+		}
+		return fmt.Errorf("%s must be one of %v", name, allowed)
+	}
+}
+
+func optionalEnum(name string, allowed ...string) func(string) error {
+	validate := enum(name, allowed...)
+	return func(value string) error {
+		if value == "" {
+			return nil
+		}
+		return validate(value)
+	}
 }

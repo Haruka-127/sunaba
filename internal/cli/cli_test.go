@@ -97,6 +97,11 @@ func TestCommandTreeRejectsPrefixesAliasesAndMisplacedOptions(t *testing.T) {
 		{"web", "refresh", "--origin", "https://example.com"},
 		{"destroy", "--yes", "unexpected"},
 		{"project", "init", "one", "two"},
+		{"up", "--dir", ".", "--project-id", "0123456789ab"},
+		{"project", "init", "--mode", "unsafe"},
+		{"git", "remote", "add", "--name", "origin"},
+		{"firewall", "enable", "--subnet", "192.0.2.0/24"},
+		{"project", "list", "--json", "--json"},
 	} {
 		if err := a.run(context.Background(), args); err == nil {
 			t.Errorf("command unexpectedly accepted: %v", args)
