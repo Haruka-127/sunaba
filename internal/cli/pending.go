@@ -14,6 +14,8 @@ import (
 	"sunaba/internal/workspace"
 )
 
+const pendingChangeVersion = 2
+
 type pendingChange struct {
 	Version            int                        `json:"version"`
 	ProjectID          string                     `json:"project_id"`
@@ -57,7 +59,7 @@ func persistPending(projectState string, active *session.Session, result session
 		return pendingChange{}, fmt.Errorf("persisted Change Set digest changed")
 	}
 	pending := pendingChange{
-		Version: 2, ProjectID: active.ProjectID, ProjectRoot: active.ProjectRoot, VMID: active.Container,
+		Version: pendingChangeVersion, ProjectID: active.ProjectID, ProjectRoot: active.ProjectRoot, VMID: active.Container,
 		SessionID: active.SessionID, MergedRoot: mergedRoot, Baseline: active.Baseline, Merged: merged,
 		ChangeSet: rebuilt, ExportPolicyDigest: active.ExportPolicyDigest, CreatedAt: time.Now().UTC(),
 	}
@@ -82,7 +84,7 @@ func loadPending(projectState string, projectPolicy policy.ProjectPolicy) (pendi
 		return pendingChange{}, fmt.Errorf("pending Change Set metadata is unsafe")
 	}
 	var pending pendingChange
-	if err := securefs.DecodeStrictJSON(data, &pending); err != nil || pending.Version != 2 || pending.ProjectRoot != projectPolicy.ProjectRoot || pending.ProjectID != projectPolicy.ProjectID || pending.MergedRoot != filepath.Join(projectState, "pending", "merged") {
+	if err := securefs.DecodeStrictJSON(data, &pending); err != nil || pending.Version != pendingChangeVersion || pending.ProjectRoot != projectPolicy.ProjectRoot || pending.ProjectID != projectPolicy.ProjectID || pending.MergedRoot != filepath.Join(projectState, "pending", "merged") {
 		return pendingChange{}, fmt.Errorf("pending Change Set identity or schema does not match Project")
 	}
 	if pending.ExportPolicyDigest != compiled.Digest {

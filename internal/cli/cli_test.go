@@ -1108,6 +1108,9 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	if state := pendingInventoryState(projectState, testPolicy.ProjectID); state != "yes" {
+		t.Fatalf("persisted pending inventory state=%q", state)
+	}
 	loaded, err := loadPending(projectState, testPolicy)
 	if err != nil || loaded.ChangeSet.Digest != persisted.ChangeSet.Digest {
 		t.Fatalf("loaded=%+v error=%v", loaded, err)
