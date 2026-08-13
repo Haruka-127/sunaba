@@ -89,18 +89,20 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	auditErrors := make(chan error, 16)
-	gitAudit := func(event gitgateway.ReadAuditEvent) {
+	gitAudit := func(event gitgateway.ReadAuditEvent) error {
 		outcome := "allowed"
 		if event.Status < 200 || event.Status >= 300 {
 			outcome = "rejected"
 		}
-		if err := auditRecorder.Append(audit.BoundaryEvent{
+		err := auditRecorder.Append(audit.BoundaryEvent{
 			At: event.At, Category: "git", Action: "git." + event.Operation, Outcome: outcome,
 			ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID,
 			Details: map[string]string{"status": strconv.Itoa(event.Status), "request_bytes": strconv.FormatInt(event.RequestBytes, 10), "response_bytes": strconv.FormatInt(event.ResponseBytes, 10), "reason": event.Reason},
-		}); err != nil {
+		})
+		if err != nil {
 			auditErrors <- err
 		}
+		return err
 	}
 	approvals, err := gitgateway.NewPushApprovalManager(nil, auditRecorder, vmID, sessionID)
 	if err != nil {
@@ -189,7 +191,7 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	modelHandler, err := modelgateway.New(modelgateway.Config{
-		UpstreamBaseURL: "https://example.invalid", UpstreamAPIKey: "unused-host-key", Capability: modelCapability,
+		UpstreamBaseURL: "https://example.invalid", UpstreamAPIKey: "unused-host-key", Capability: modelCapability, Audit: func(modelgateway.AuditEvent) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)

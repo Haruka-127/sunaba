@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sunaba/internal/modelcatalog"
@@ -101,7 +102,7 @@ type Config struct {
 	OAuthTokens     OAuthTokenSource
 	Capability      Capability
 	HTTPClient      *http.Client
-	Audit           func(AuditEvent)
+	Audit           func(AuditEvent) error
 	Now             func() time.Time
 }
 
@@ -121,12 +122,13 @@ type Gateway struct {
 	oauth      OAuthTokenSource
 	capability Capability
 	client     *http.Client
-	audit      func(AuditEvent)
+	audit      func(AuditEvent) error
 	now        func() time.Time
 	semaphore  chan struct{}
 	models     map[string]struct{}
 	mu         sync.Mutex
 	requests   int
+	revoked    atomic.Bool
 }
 
 func New(config Config) (*Gateway, error) {
@@ -145,6 +147,9 @@ func New(config Config) (*Gateway, error) {
 	}
 	if config.AuthMode == modelcatalog.AuthOAuth && config.OAuthTokens == nil {
 		return nil, fmt.Errorf("Model Gateway OAuth token source is required")
+	}
+	if config.Audit == nil {
+		return nil, fmt.Errorf("Model Gateway requires a host audit sink")
 	}
 	capability := config.Capability
 	models, err := validateAllowedModels(capability.AllowedModels)
@@ -181,13 +186,17 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		SessionID: g.capability.SessionID, At: g.now().UTC(),
 	}
 	defer func() {
-		if g.audit != nil {
-			g.audit(event)
+		if err := g.audit(event); err != nil {
+			g.revoked.Store(true)
 		}
 	}()
 	reject := func(status int, reason string) {
 		event.Status, event.Reason = status, reason
 		http.Error(response, http.StatusText(status), status)
+	}
+	if g.revoked.Load() {
+		reject(http.StatusServiceUnavailable, "audit_unavailable")
+		return
 	}
 	if request.Method != http.MethodPost || request.URL.Path != "/v1/responses" || request.URL.RawQuery != "" {
 		reject(http.StatusNotFound, "route_not_allowed")

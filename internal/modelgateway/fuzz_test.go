@@ -30,7 +30,7 @@ func FuzzResponsesEnvelope(f *testing.F) {
 		f.Fatal(err)
 	}
 	capability.MaxRequests = MaximumMaxRequests
-	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: "host-only", Capability: capability})
+	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: "host-only", Capability: capability, Audit: func(AuditEvent) error { return nil }})
 	if err != nil {
 		f.Fatal(err)
 	}

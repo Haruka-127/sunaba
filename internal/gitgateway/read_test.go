@@ -2,6 +2,7 @@ package gitgateway
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,7 +35,7 @@ func TestReadGatewaySupportsStandardCloneFetchPullWithoutCredentialLeak(t *testi
 	gateway, err := NewReadGateway(ReadConfig{
 		UpstreamURL: upstreamServer.URL + "/remote.git", GuestRepositoryPath: "/repository.git",
 		AuthorizationHeader: authorization, Capability: capability, HTTPClient: upstreamServer.Client(),
-		Audit: func(event ReadAuditEvent) { mu.Lock(); events = append(events, event); mu.Unlock() },
+		Audit: func(event ReadAuditEvent) error { mu.Lock(); events = append(events, event); mu.Unlock(); return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +75,7 @@ func TestReadGatewaySupportsStandardCloneFetchPullWithoutCredentialLeak(t *testi
 
 func TestReadGatewayRejectsPushExpiredCapabilityAndUnknownRoutes(t *testing.T) {
 	capability, _ := NewReadCapability("guest-capability-token-0123456789abcdef", "project", "vm", "session", time.Now().Add(-time.Second))
-	gateway, err := NewReadGateway(ReadConfig{UpstreamURL: "https://example.invalid/repository.git", GuestRepositoryPath: "/repository.git", AuthorizationHeader: "Bearer host-secret", Capability: capability, Audit: func(ReadAuditEvent) {}})
+	gateway, err := NewReadGateway(ReadConfig{UpstreamURL: "https://example.invalid/repository.git", GuestRepositoryPath: "/repository.git", AuthorizationHeader: "Bearer host-secret", Capability: capability, Audit: func(ReadAuditEvent) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,5 +91,27 @@ func TestReadGatewayRejectsPushExpiredCapabilityAndUnknownRoutes(t *testing.T) {
 		} else if response.Code != http.StatusNotFound {
 			t.Fatalf("unsafe route %s status=%d", path, response.Code)
 		}
+	}
+}
+
+func TestAuditFailureRevokesSharedGitCapability(t *testing.T) {
+	capability, err := NewReadCapability(strings.Repeat("g", 32), "project", "vm", "session", time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := NewReadGateway(ReadConfig{
+		UpstreamURL: "https://example.invalid/repository.git", GuestRepositoryPath: "/repository.git",
+		AuthorizationHeader: "Bearer host-secret", Capability: capability,
+		Audit: func(ReadAuditEvent) error { return errors.New("injected audit failure") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := httptest.NewRecorder()
+	gateway.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/invalid", nil))
+	second := httptest.NewRecorder()
+	gateway.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/repository.git/info/refs?service=git-upload-pack", nil))
+	if first.Code != http.StatusNotFound || second.Code != http.StatusServiceUnavailable || !capability.auditFailed.Load() {
+		t.Fatalf("statuses=%d,%d failed=%t", first.Code, second.Code, capability.auditFailed.Load())
 	}
 }

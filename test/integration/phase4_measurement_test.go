@@ -114,7 +114,7 @@ func TestPhase4MeasureWebClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelHandler, err := modelgateway.New(modelgateway.Config{UpstreamBaseURL: modelUpstream.URL, UpstreamAPIKey: "measurement-key", Capability: modelCapability})
+	modelHandler, err := modelgateway.New(modelgateway.Config{UpstreamBaseURL: modelUpstream.URL, UpstreamAPIKey: "measurement-key", Capability: modelCapability, Audit: func(modelgateway.AuditEvent) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

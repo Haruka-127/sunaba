@@ -13,6 +13,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,7 @@ type ReadCapability struct {
 	MaxRequestBytes  int64
 	MaxResponseBytes int64
 	tokenHash        [sha256.Size]byte
+	auditFailed      *atomic.Bool
 }
 
 func NewReadCapability(token, projectID, vmID, sessionID string, expiresAt time.Time) (ReadCapability, error) {
@@ -35,7 +37,7 @@ func NewReadCapability(token, projectID, vmID, sessionID string, expiresAt time.
 	return ReadCapability{
 		ProjectID: projectID, VMID: vmID, SessionID: sessionID, ExpiresAt: expiresAt,
 		MaxRequests: 200, MaxConcurrent: 2, MaxRequestBytes: 4 << 20, MaxResponseBytes: 128 << 20,
-		tokenHash: sha256.Sum256([]byte(token)),
+		tokenHash: sha256.Sum256([]byte(token)), auditFailed: &atomic.Bool{},
 	}, nil
 }
 
@@ -57,7 +59,7 @@ type ReadConfig struct {
 	AuthorizationHeader string
 	Capability          ReadCapability
 	HTTPClient          *http.Client
-	Audit               func(ReadAuditEvent)
+	Audit               func(ReadAuditEvent) error
 	Now                 func() time.Time
 }
 
@@ -67,7 +69,7 @@ type ReadGateway struct {
 	authorization string
 	capability    ReadCapability
 	client        *http.Client
-	audit         func(ReadAuditEvent)
+	audit         func(ReadAuditEvent) error
 	now           func() time.Time
 	semaphore     chan struct{}
 	mu            sync.Mutex
@@ -89,7 +91,7 @@ func NewReadGateway(config ReadConfig) (*ReadGateway, error) {
 		return nil, fmt.Errorf("Git Gateway requires a host audit sink")
 	}
 	capability := config.Capability
-	if capability.MaxRequests <= 0 || capability.MaxConcurrent <= 0 || capability.MaxRequestBytes <= 0 || capability.MaxResponseBytes <= 0 || capability.ExpiresAt.IsZero() || !gitIdentityPattern.MatchString(capability.ProjectID) || !gitIdentityPattern.MatchString(capability.VMID) || !gitIdentityPattern.MatchString(capability.SessionID) {
+	if capability.MaxRequests <= 0 || capability.MaxConcurrent <= 0 || capability.MaxRequestBytes <= 0 || capability.MaxResponseBytes <= 0 || capability.ExpiresAt.IsZero() || capability.auditFailed == nil || !gitIdentityPattern.MatchString(capability.ProjectID) || !gitIdentityPattern.MatchString(capability.VMID) || !gitIdentityPattern.MatchString(capability.SessionID) {
 		return nil, fmt.Errorf("Git Gateway read capability limits are invalid")
 	}
 	client := config.HTTPClient
@@ -114,13 +116,17 @@ func NewReadGateway(config ReadConfig) (*ReadGateway, error) {
 func (g *ReadGateway) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	event := ReadAuditEvent{ProjectID: g.capability.ProjectID, VMID: g.capability.VMID, SessionID: g.capability.SessionID, At: g.now().UTC()}
 	defer func() {
-		if g.audit != nil {
-			g.audit(event)
+		if err := g.audit(event); err != nil {
+			g.capability.auditFailed.Store(true)
 		}
 	}()
 	reject := func(status int, reason string) {
 		event.Status, event.Reason = status, reason
 		http.Error(response, http.StatusText(status), status)
+	}
+	if g.capability.auditFailed.Load() {
+		reject(http.StatusServiceUnavailable, "audit_unavailable")
+		return
 	}
 	operation, suffix, ok := g.route(request)
 	event.Operation = operation

@@ -84,7 +84,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	modelGateway, err := modelgateway.New(modelgateway.Config{
-		UpstreamBaseURL: upstream.URL, UpstreamAPIKey: upstreamKey, Capability: capability,
+		UpstreamBaseURL: upstream.URL, UpstreamAPIKey: upstreamKey, Capability: capability, Audit: func(modelgateway.AuditEvent) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)

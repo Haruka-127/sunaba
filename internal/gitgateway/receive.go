@@ -29,7 +29,7 @@ type ReceiveConfig struct {
 	MaxRequestBytes     int64
 	MaxResponseBytes    int64
 	MaxConcurrent       int
-	Audit               func(ReadAuditEvent)
+	Audit               func(ReadAuditEvent) error
 	Now                 func() time.Time
 	BeforeAdvertise     func(context.Context) error
 }
@@ -41,7 +41,7 @@ type ReceiveGateway struct {
 	maxRequestBytes  int64
 	maxResponseBytes int64
 	semaphore        chan struct{}
-	audit            func(ReadAuditEvent)
+	audit            func(ReadAuditEvent) error
 	now              func() time.Time
 	beforeAdvertise  func(context.Context) error
 	mu               sync.Mutex
@@ -60,7 +60,7 @@ func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
 		return nil, fmt.Errorf("Git receive gateway limits and hook channel are invalid")
 	}
 	capability := config.Capability
-	if capability.MaxRequests <= 0 || capability.ExpiresAt.IsZero() || !gitIdentityPattern.MatchString(capability.ProjectID) || !gitIdentityPattern.MatchString(capability.VMID) || !gitIdentityPattern.MatchString(capability.SessionID) {
+	if capability.MaxRequests <= 0 || capability.ExpiresAt.IsZero() || capability.auditFailed == nil || !gitIdentityPattern.MatchString(capability.ProjectID) || !gitIdentityPattern.MatchString(capability.VMID) || !gitIdentityPattern.MatchString(capability.SessionID) {
 		return nil, fmt.Errorf("Git receive gateway capability is invalid")
 	}
 	gitPath := config.GitPath
@@ -99,13 +99,17 @@ func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
 func (g *ReceiveGateway) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	event := ReadAuditEvent{ProjectID: g.capability.ProjectID, VMID: g.capability.VMID, SessionID: g.capability.SessionID, Operation: "push", At: g.now().UTC()}
 	defer func() {
-		if g.audit != nil {
-			g.audit(event)
+		if err := g.audit(event); err != nil {
+			g.capability.auditFailed.Store(true)
 		}
 	}()
 	reject := func(status int, reason string) {
 		event.Status, event.Reason = status, reason
 		http.Error(response, http.StatusText(status), status)
+	}
+	if g.capability.auditFailed.Load() {
+		reject(http.StatusServiceUnavailable, "audit_unavailable")
+		return
 	}
 	if !g.route(request) {
 		reject(http.StatusNotFound, "route_not_allowed")

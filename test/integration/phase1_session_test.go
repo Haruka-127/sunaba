@@ -122,18 +122,20 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		}
 		gateway, err := modelgateway.New(modelgateway.Config{
 			UpstreamBaseURL: upstream.URL, UpstreamAPIKey: upstreamKey, Capability: capability,
-			Audit: func(event modelgateway.AuditEvent) {
+			Audit: func(event modelgateway.AuditEvent) error {
 				outcome := "allowed"
 				if event.Status < 200 || event.Status >= 300 {
 					outcome = "rejected"
 				}
-				if err := auditRecorder.Append(audit.BoundaryEvent{
+				err := auditRecorder.Append(audit.BoundaryEvent{
 					At: event.At, Category: "gateway", Action: "model.request", Outcome: outcome,
 					ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID,
 					Details: map[string]string{"model": event.Model, "status": strconv.Itoa(event.Status), "request_bytes": strconv.FormatInt(event.RequestBytes, 10), "response_bytes": strconv.FormatInt(event.ResponseBytes, 10), "reason": event.Reason},
-				}); err != nil {
+				})
+				if err != nil {
 					auditErrors <- err
 				}
+				return err
 			},
 		})
 		if err != nil {

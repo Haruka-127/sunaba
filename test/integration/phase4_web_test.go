@@ -139,7 +139,7 @@ func TestPhase4WebGatewayInAgentVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelHandler, err := modelgateway.New(modelgateway.Config{UpstreamBaseURL: modelUpstream.URL, UpstreamAPIKey: "phase4-host-only-key", Capability: modelCapability})
+	modelHandler, err := modelgateway.New(modelgateway.Config{UpstreamBaseURL: modelUpstream.URL, UpstreamAPIKey: "phase4-host-only-key", Capability: modelCapability, Audit: func(modelgateway.AuditEvent) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

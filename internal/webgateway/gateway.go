@@ -196,6 +196,7 @@ type Gateway struct {
 	requests       atomic.Int64
 	totalBytes     atomic.Int64
 	revoked        atomic.Bool
+	auditFailed    atomic.Bool
 }
 
 type ruleLookup struct {
@@ -285,11 +286,18 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 	event := AuditEvent{ProjectID: g.capability.ProjectID, VMID: g.capability.VMID, SessionID: g.capability.SessionID, Method: request.Method, At: started.UTC()}
 	defer func() {
 		event.Duration = g.now().Sub(started)
-		_ = g.audit(event)
+		if err := g.audit(event); err != nil {
+			g.auditFailed.Store(true)
+			g.revoked.Store(true)
+		}
 	}()
 	reject := func(status int, reason string) {
 		event.Reason = reason
 		http.Error(response, http.StatusText(status), status)
+	}
+	if g.auditFailed.Load() {
+		reject(http.StatusServiceUnavailable, "audit_unavailable")
+		return
 	}
 	if g.revoked.Load() || !g.now().Before(g.capability.ExpiresAt) {
 		reject(http.StatusProxyAuthRequired, "capability_inactive")

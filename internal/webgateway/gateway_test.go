@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -321,6 +322,29 @@ func TestGatewayRejectsCapabilityLimitsOutsideProductBounds(t *testing.T) {
 	maximum.MaxTotalBytes = MaximumMaxTotalBytes
 	if _, err := New(Config{Policy: policy, Capability: maximum, Audit: func(AuditEvent) error { return nil }}); err != nil {
 		t.Fatalf("maximum capability was rejected: %v", err)
+	}
+}
+
+func TestAuditFailureRevokesWebGateway(t *testing.T) {
+	policy := Policy{Rules: []OriginRule{{Host: "allowed.example", Port: 80, Category: "general", AllowHTTP: true}}}
+	digest, err := policy.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := NewCapability(strings.Repeat("t", 32), "project", "vm", "session", digest, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := New(Config{Policy: policy, Capability: capability, Audit: func(AuditEvent) error { return errors.New("injected audit failure") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := httptest.NewRecorder()
+	gateway.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "http://allowed.example/", nil))
+	second := httptest.NewRecorder()
+	gateway.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "http://allowed.example/", nil))
+	if first.Code != http.StatusProxyAuthRequired || second.Code != http.StatusServiceUnavailable {
+		t.Fatalf("statuses=%d,%d", first.Code, second.Code)
 	}
 }
 

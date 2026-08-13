@@ -115,8 +115,8 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	capability.MaxResponseBytes = projectPolicy.Model.MaxResponseBytes
 	gateway, err := modelgateway.New(modelgateway.Config{
 		UpstreamBaseURL: upstreamBaseURL, UpstreamAPIKey: upstreamKey, AuthMode: projectPolicy.Model.AuthMode, OAuthTokens: oauthTokens, Capability: capability,
-		Audit: func(event modelgateway.AuditEvent) {
-			_ = recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
+		Audit: func(event modelgateway.AuditEvent) error {
+			return recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
 				"model": event.Model, "status": fmt.Sprint(event.Status), "request_bytes": fmt.Sprint(event.RequestBytes), "response_bytes": fmt.Sprint(event.ResponseBytes), "reason": event.Reason,
 			}})
 		},

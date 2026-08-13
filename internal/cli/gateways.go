@@ -197,12 +197,12 @@ func (a *app) configureGitRemoteGateway(ctx context.Context, projectPolicy polic
 		_ = closeBroker()
 		return configuredGitRemote{}, err
 	}
-	auditGit := func(event gitgateway.ReadAuditEvent) {
+	auditGit := func(event gitgateway.ReadAuditEvent) error {
 		outcome := "success"
 		if event.Status < http.StatusOK || event.Status >= http.StatusBadRequest {
 			outcome = "rejected"
 		}
-		_ = recorder.Append(audit.BoundaryEvent{
+		return recorder.Append(audit.BoundaryEvent{
 			At: event.At, Category: "git", Action: "git." + event.Operation, Outcome: outcome,
 			ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID,
 			Details: map[string]string{

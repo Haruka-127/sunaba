@@ -78,7 +78,7 @@ func TestStandardGitPushRequiresPendingApprovalAndExactRetry(t *testing.T) {
 	capability, _ := NewReadCapability(capabilityToken, "project", "vm", "session", time.Now().Add(5*time.Minute))
 	readGateway, err := NewReadGateway(ReadConfig{
 		UpstreamURL: upstreamServer.URL + "/upstream.git", GuestRepositoryPath: "/repository.git",
-		AuthorizationHeader: upstreamAuthorization, Capability: capability, HTTPClient: upstreamServer.Client(), Audit: func(ReadAuditEvent) {},
+		AuthorizationHeader: upstreamAuthorization, Capability: capability, HTTPClient: upstreamServer.Client(), Audit: func(ReadAuditEvent) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestStandardGitPushRequiresPendingApprovalAndExactRetry(t *testing.T) {
 		HookHelperPath: testExecutable, HookSocketPath: hookSocket, HookToken: hookToken,
 		Capability: capability, MaxRequestBytes: 64 << 20, MaxResponseBytes: 4 << 20, MaxConcurrent: 1,
 		BeforeAdvertise: executor.Sync,
-		Audit:           func(ReadAuditEvent) {},
+		Audit:           func(ReadAuditEvent) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,6 +193,26 @@ func TestStandardGitPushRequiresPendingApprovalAndExactRetry(t *testing.T) {
 		t.Fatal("push succeeded after session hook channel closed")
 	}
 	_ = second
+}
+
+func TestReceiveGatewayRejectsSharedCapabilityAfterAuditFailure(t *testing.T) {
+	capability, err := NewReadCapability(strings.Repeat("r", 32), "project", "vm", "session", time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := &ReceiveGateway{
+		backend:   http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("revoked request reached backend") }),
+		guestPath: "/repository.git", capability: capability, maxRequestBytes: 1024, maxResponseBytes: 1024,
+		semaphore: make(chan struct{}, 1), now: time.Now, beforeAdvertise: func(context.Context) error { return nil },
+		audit: func(ReadAuditEvent) error { return fmt.Errorf("injected audit failure") },
+	}
+	first := httptest.NewRecorder()
+	gateway.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/invalid", nil))
+	second := httptest.NewRecorder()
+	gateway.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/repository.git/info/refs?service=git-receive-pack", nil))
+	if first.Code != http.StatusNotFound || second.Code != http.StatusServiceUnavailable {
+		t.Fatalf("statuses=%d,%d", first.Code, second.Code)
+	}
 }
 
 func runGit(gitPath, directory string, args ...string) (string, error) {

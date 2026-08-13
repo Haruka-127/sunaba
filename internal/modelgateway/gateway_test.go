@@ -3,6 +3,7 @@ package modelgateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,7 +51,7 @@ func TestGatewayUsesCodexOAuthEndpointHeadersAndRequestShape(t *testing.T) {
 	gateway, err := New(Config{
 		UpstreamBaseURL: upstream.URL + "/backend-api/codex", AuthMode: modelcatalog.AuthOAuth,
 		OAuthTokens: staticOAuthSource{access: OAuthAccess{Token: "oauth-access-token", AccountID: "account-123"}},
-		Capability:  testCapability(t),
+		Capability:  testCapability(t), Audit: noopModelAudit,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -209,7 +210,7 @@ func TestGatewayAllowsEveryConfiguredModelAndAuditsRequestedModel(t *testing.T) 
 		t.Fatal(err)
 	}
 	var events []AuditEvent
-	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: capability, Audit: func(event AuditEvent) { events = append(events, event) }})
+	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: capability, Audit: func(event AuditEvent) error { events = append(events, event); return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func TestGatewayEnforcesConcurrency(t *testing.T) {
 	defer upstream.Close()
 	capability := testCapability(t)
 	capability.MaxConcurrent = 1
-	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: capability})
+	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: capability, Audit: noopModelAudit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,6 +321,31 @@ func TestGatewayEnforcesConcurrency(t *testing.T) {
 	wait.Wait()
 }
 
+func TestAuditFailureRevokesModelGateway(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = io.WriteString(response, `{}`)
+	}))
+	defer upstream.Close()
+	gateway, err := New(Config{
+		UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: testCapability(t),
+		Audit: func(AuditEvent) error { return errors.New("injected audit failure") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(gateway)
+	defer server.Close()
+	first := gatewayRequest(t, context.Background(), server.URL, testToken, testModel)
+	_ = first.Body.Close()
+	second := gatewayRequest(t, context.Background(), server.URL, testToken, testModel)
+	_ = second.Body.Close()
+	if first.StatusCode != http.StatusOK || second.StatusCode != http.StatusServiceUnavailable || calls != 1 {
+		t.Fatalf("statuses=%d,%d upstream calls=%d", first.StatusCode, second.StatusCode, calls)
+	}
+}
+
 func TestGatewayEnforcesExpiryQuotaAndBodyLimits(t *testing.T) {
 	var calls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
@@ -332,7 +358,7 @@ func TestGatewayEnforcesExpiryQuotaAndBodyLimits(t *testing.T) {
 	expired.ExpiresAt = time.Unix(100, 0)
 	expiredGateway, err := New(Config{
 		UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: expired,
-		Now: func() time.Time { return time.Unix(101, 0) },
+		Now: func() time.Time { return time.Unix(101, 0) }, Audit: noopModelAudit,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +374,7 @@ func TestGatewayEnforcesExpiryQuotaAndBodyLimits(t *testing.T) {
 	limited := testCapability(t)
 	limited.MaxRequests = 1
 	limited.MaxRequestBytes = 64
-	limitedGateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: limited})
+	limitedGateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: limited, Audit: noopModelAudit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +390,7 @@ func TestGatewayEnforcesExpiryQuotaAndBodyLimits(t *testing.T) {
 
 	oversized := testCapability(t)
 	oversized.MaxRequestBytes = 8
-	oversizedGateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: oversized})
+	oversizedGateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: testKey, Capability: oversized, Audit: noopModelAudit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,12 +405,19 @@ func TestGatewayEnforcesExpiryQuotaAndBodyLimits(t *testing.T) {
 
 func testGateway(t *testing.T, upstream string, audit func(AuditEvent)) *Gateway {
 	t.Helper()
-	gateway, err := New(Config{UpstreamBaseURL: upstream, UpstreamAPIKey: testKey, Capability: testCapability(t), Audit: audit})
+	gateway, err := New(Config{UpstreamBaseURL: upstream, UpstreamAPIKey: testKey, Capability: testCapability(t), Audit: func(event AuditEvent) error {
+		if audit != nil {
+			audit(event)
+		}
+		return nil
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return gateway
 }
+
+func noopModelAudit(AuditEvent) error { return nil }
 
 func testCapability(t *testing.T) Capability {
 	t.Helper()
