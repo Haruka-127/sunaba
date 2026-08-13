@@ -3,7 +3,6 @@ package webgateway
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +16,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	corecapability "sunaba/internal/capability"
 )
 
 const (
@@ -135,11 +136,12 @@ type Capability struct {
 	MaxUploadBytes   int64
 	MaxDownloadBytes int64
 	MaxTotalBytes    int64
-	tokenHash        [sha256.Size]byte
+	authority        *corecapability.Authority
 }
 
 func NewCapability(token, projectID, vmID, sessionID, policyDigest string, expiresAt time.Time) (Capability, error) {
-	if len(token) < 32 || projectID == "" || vmID == "" || sessionID == "" || len(policyDigest) != sha256.Size*2 || expiresAt.IsZero() {
+	authority, authorityErr := corecapability.NewAuthority(token, corecapability.Binding{ProjectID: projectID, VMID: vmID, SessionID: sessionID}, expiresAt)
+	if authorityErr != nil || len(policyDigest) != sha256.Size*2 {
 		return Capability{}, fmt.Errorf("Web Gateway capability requires a high-entropy token and bound identities")
 	}
 	if _, err := hex.DecodeString(policyDigest); err != nil {
@@ -149,7 +151,7 @@ func NewCapability(token, projectID, vmID, sessionID, policyDigest string, expir
 		ProjectID: projectID, VMID: vmID, SessionID: sessionID, PolicyDigest: policyDigest, ExpiresAt: expiresAt,
 		MaxRequests: DefaultMaxRequests, MaxConcurrent: DefaultMaxConcurrent, MaxConnectTime: DefaultMaxConnectTime,
 		MaxUploadBytes: DefaultMaxUploadBytes, MaxDownloadBytes: DefaultMaxDownloadBytes, MaxTotalBytes: DefaultMaxTotalBytes,
-		tokenHash: sha256.Sum256([]byte(token)),
+		authority: authority,
 	}, nil
 }
 
@@ -192,10 +194,8 @@ type Gateway struct {
 	dial           func(context.Context, string, string) (net.Conn, error)
 	audit          func(AuditEvent) error
 	now            func() time.Time
-	semaphore      chan struct{}
-	requests       atomic.Int64
+	gate           *corecapability.Gate
 	totalBytes     atomic.Int64
-	revoked        atomic.Bool
 	auditFailed    atomic.Bool
 }
 
@@ -223,7 +223,11 @@ func New(config Config) (*Gateway, error) {
 	if err := ValidateLimits(Limits{
 		MaxRequests: capability.MaxRequests, MaxConcurrent: capability.MaxConcurrent, MaxConnectTime: capability.MaxConnectTime,
 		MaxUploadBytes: capability.MaxUploadBytes, MaxDownloadBytes: capability.MaxDownloadBytes, MaxTotalBytes: capability.MaxTotalBytes,
-	}); err != nil || capability.ExpiresAt.IsZero() {
+	}); err != nil || capability.ExpiresAt.IsZero() || !capability.authority.Matches(corecapability.Binding{ProjectID: capability.ProjectID, VMID: capability.VMID, SessionID: capability.SessionID}) {
+		return nil, fmt.Errorf("Web Gateway capability limits are invalid")
+	}
+	gate, err := corecapability.NewGate(capability.authority, capability.ExpiresAt, capability.MaxRequests, capability.MaxConcurrent)
+	if err != nil {
 		return nil, fmt.Errorf("Web Gateway capability limits are invalid")
 	}
 	if config.Audit == nil {
@@ -246,7 +250,7 @@ func New(config Config) (*Gateway, error) {
 	return &Gateway{
 		policy: policy, blockedDomains: blockedDomains, exactRules: exactRules, suffixRules: suffixRules,
 		capability: capability, resolver: resolver, dial: dial, audit: config.Audit, now: now,
-		semaphore: make(chan struct{}, capability.MaxConcurrent),
+		gate: gate,
 	}, nil
 }
 
@@ -279,7 +283,7 @@ func compilePolicyIndex(policy Policy) (map[string]struct{}, map[ruleLookup]inde
 	return blocked, exact, suffix
 }
 
-func (g *Gateway) Revoke() { g.revoked.Store(true) }
+func (g *Gateway) Revoke() { g.gate.Revoke() }
 
 func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	started := g.now()
@@ -288,7 +292,7 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		event.Duration = g.now().Sub(started)
 		if err := g.audit(event); err != nil {
 			g.auditFailed.Store(true)
-			g.revoked.Store(true)
+			g.gate.Revoke()
 		}
 	}()
 	reject := func(status int, reason string) {
@@ -299,26 +303,31 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		reject(http.StatusServiceUnavailable, "audit_unavailable")
 		return
 	}
-	if g.revoked.Load() || !g.now().Before(g.capability.ExpiresAt) {
-		reject(http.StatusProxyAuthRequired, "capability_inactive")
-		return
-	}
-	if !g.authorized(request.Header.Get("Proxy-Authorization")) {
+	token, validHeader := proxyToken(request.Header.Get("Proxy-Authorization"))
+	if !validHeader {
 		response.Header().Set("Proxy-Authenticate", `Basic realm="sunaba"`)
 		reject(http.StatusProxyAuthRequired, "invalid_capability")
 		return
 	}
-	if g.requests.Add(1) > int64(g.capability.MaxRequests) {
+	lease, status := g.gate.Admit(token, g.now())
+	if status == corecapability.RequestQuotaExceeded {
 		reject(http.StatusTooManyRequests, "request_quota_exceeded")
 		return
 	}
-	select {
-	case g.semaphore <- struct{}{}:
-		defer func() { <-g.semaphore }()
-	default:
+	if status == corecapability.ConcurrencyExceeded {
 		reject(http.StatusTooManyRequests, "concurrency_exceeded")
 		return
 	}
+	if status == corecapability.Revoked || status == corecapability.Expired {
+		reject(http.StatusProxyAuthRequired, "capability_inactive")
+		return
+	}
+	if status != corecapability.Admitted {
+		response.Header().Set("Proxy-Authenticate", `Basic realm="sunaba"`)
+		reject(http.StatusProxyAuthRequired, "invalid_capability")
+		return
+	}
+	defer lease.Release()
 	if request.Method == http.MethodConnect {
 		g.serveConnect(response, request, &event, reject)
 		return
@@ -492,20 +501,18 @@ func (g *Gateway) serveConnect(response http.ResponseWriter, request *http.Reque
 	}
 }
 
-func (g *Gateway) authorized(header string) bool {
-	presented := ""
+func proxyToken(header string) (string, bool) {
 	if strings.HasPrefix(header, "Bearer ") {
-		presented = strings.TrimPrefix(header, "Bearer ")
+		return strings.TrimPrefix(header, "Bearer "), true
 	} else if strings.HasPrefix(header, "Basic ") {
 		request := &http.Request{Header: http.Header{"Authorization": []string{header}}}
 		_, password, ok := request.BasicAuth()
 		if !ok {
-			return false
+			return "", false
 		}
-		presented = password
+		return password, true
 	}
-	digest := sha256.Sum256([]byte(presented))
-	return subtle.ConstantTimeCompare(digest[:], g.capability.tokenHash[:]) == 1
+	return "", false
 }
 
 func (g *Gateway) allowedRule(host string, port uint16, connect bool) (OriginRule, bool) {

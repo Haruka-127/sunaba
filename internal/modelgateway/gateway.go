@@ -3,8 +3,6 @@ package modelgateway
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +11,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	corecapability "sunaba/internal/capability"
 	"sunaba/internal/modelcatalog"
 )
 
@@ -43,19 +41,20 @@ type Capability struct {
 	MaxConcurrent    int
 	MaxRequestBytes  int64
 	MaxResponseBytes int64
-	tokenHash        [sha256.Size]byte
+	authority        *corecapability.Authority
 }
 
 func NewCapability(token, projectID, vmID, sessionID string, allowedModels []string, expiresAt time.Time) (Capability, error) {
 	models, err := validateAllowedModels(allowedModels)
-	if len(token) < 32 || projectID == "" || vmID == "" || sessionID == "" || err != nil || expiresAt.IsZero() {
+	authority, authorityErr := corecapability.NewAuthority(token, corecapability.Binding{ProjectID: projectID, VMID: vmID, SessionID: sessionID}, expiresAt)
+	if authorityErr != nil || err != nil {
 		return Capability{}, fmt.Errorf("Model Gateway capability requires a high-entropy token and bound identities")
 	}
 	return Capability{
 		ProjectID: projectID, VMID: vmID, SessionID: sessionID, AllowedModels: models, ExpiresAt: expiresAt,
 		MaxRequests: DefaultMaxRequests, MaxConcurrent: DefaultMaxConcurrent,
 		MaxRequestBytes: DefaultMaxRequestBytes, MaxResponseBytes: DefaultMaxResponseBytes,
-		tokenHash: sha256.Sum256([]byte(token)),
+		authority: authority,
 	}, nil
 }
 
@@ -116,19 +115,17 @@ type OAuthTokenSource interface {
 }
 
 type Gateway struct {
-	upstream   *url.URL
-	apiKey     string
-	authMode   modelcatalog.AuthMode
-	oauth      OAuthTokenSource
-	capability Capability
-	client     *http.Client
-	audit      func(AuditEvent) error
-	now        func() time.Time
-	semaphore  chan struct{}
-	models     map[string]struct{}
-	mu         sync.Mutex
-	requests   int
-	revoked    atomic.Bool
+	upstream    *url.URL
+	apiKey      string
+	authMode    modelcatalog.AuthMode
+	oauth       OAuthTokenSource
+	capability  Capability
+	client      *http.Client
+	audit       func(AuditEvent) error
+	now         func() time.Time
+	gate        *corecapability.Gate
+	models      map[string]struct{}
+	auditFailed atomic.Bool
 }
 
 func New(config Config) (*Gateway, error) {
@@ -153,7 +150,12 @@ func New(config Config) (*Gateway, error) {
 	}
 	capability := config.Capability
 	models, err := validateAllowedModels(capability.AllowedModels)
-	if err != nil || capability.MaxRequests <= 0 || capability.MaxRequests > MaximumMaxRequests || capability.MaxConcurrent <= 0 || capability.MaxConcurrent > MaximumMaxConcurrent || capability.MaxRequestBytes <= 0 || capability.MaxRequestBytes > MaximumMaxRequestBytes || capability.MaxResponseBytes <= 0 || capability.MaxResponseBytes > MaximumMaxResponseBytes || capability.ExpiresAt.IsZero() {
+	binding := corecapability.Binding{ProjectID: capability.ProjectID, VMID: capability.VMID, SessionID: capability.SessionID}
+	if err != nil || capability.MaxRequests <= 0 || capability.MaxRequests > MaximumMaxRequests || capability.MaxConcurrent <= 0 || capability.MaxConcurrent > MaximumMaxConcurrent || capability.MaxRequestBytes <= 0 || capability.MaxRequestBytes > MaximumMaxRequestBytes || capability.MaxResponseBytes <= 0 || capability.MaxResponseBytes > MaximumMaxResponseBytes || capability.ExpiresAt.IsZero() || !capability.authority.Matches(binding) {
+		return nil, fmt.Errorf("Model Gateway capability limits are invalid")
+	}
+	gate, err := corecapability.NewGate(capability.authority, capability.ExpiresAt, capability.MaxRequests, capability.MaxConcurrent)
+	if err != nil {
 		return nil, fmt.Errorf("Model Gateway capability limits are invalid")
 	}
 	capability.AllowedModels = models
@@ -176,7 +178,7 @@ func New(config Config) (*Gateway, error) {
 	return &Gateway{
 		upstream: upstream, apiKey: config.UpstreamAPIKey, authMode: config.AuthMode, oauth: config.OAuthTokens, capability: capability,
 		client: &clientCopy, audit: config.Audit, now: now,
-		semaphore: make(chan struct{}, capability.MaxConcurrent), models: modelSet,
+		gate: gate, models: modelSet,
 	}, nil
 }
 
@@ -187,14 +189,15 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 	}
 	defer func() {
 		if err := g.audit(event); err != nil {
-			g.revoked.Store(true)
+			g.auditFailed.Store(true)
+			g.gate.Revoke()
 		}
 	}()
 	reject := func(status int, reason string) {
 		event.Status, event.Reason = status, reason
 		http.Error(response, http.StatusText(status), status)
 	}
-	if g.revoked.Load() {
+	if g.auditFailed.Load() {
 		reject(http.StatusServiceUnavailable, "audit_unavailable")
 		return
 	}
@@ -202,27 +205,26 @@ func (g *Gateway) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		reject(http.StatusNotFound, "route_not_allowed")
 		return
 	}
-	if !g.authorized(request.Header.Get("Authorization")) {
+	token, validHeader := bearerToken(request.Header.Get("Authorization"))
+	if !validHeader {
 		reject(http.StatusUnauthorized, "invalid_capability")
 		return
 	}
-	if !g.now().Before(g.capability.ExpiresAt) {
+	lease, status := g.gate.Admit(token, g.now())
+	switch status {
+	case corecapability.Admitted:
+		defer lease.Release()
+	case corecapability.Expired:
 		reject(http.StatusUnauthorized, "expired_capability")
 		return
-	}
-	g.mu.Lock()
-	if g.requests >= g.capability.MaxRequests {
-		g.mu.Unlock()
-		reject(http.StatusTooManyRequests, "request_quota_exceeded")
-		return
-	}
-	g.requests++
-	g.mu.Unlock()
-	select {
-	case g.semaphore <- struct{}{}:
-		defer func() { <-g.semaphore }()
-	default:
+	case corecapability.RequestQuotaExceeded, corecapability.ConcurrencyExceeded:
 		reject(http.StatusTooManyRequests, "concurrency_exceeded")
+		if status == corecapability.RequestQuotaExceeded {
+			event.Reason = "request_quota_exceeded"
+		}
+		return
+	default:
+		reject(http.StatusUnauthorized, "invalid_capability")
 		return
 	}
 
@@ -364,13 +366,12 @@ func normalizeOAuthRequest(body []byte) ([]byte, error) {
 	return json.Marshal(request)
 }
 
-func (g *Gateway) authorized(header string) bool {
+func bearerToken(header string) (string, bool) {
 	const prefix = "Bearer "
 	if !strings.HasPrefix(header, prefix) {
-		return false
+		return "", false
 	}
-	presented := sha256.Sum256([]byte(strings.TrimPrefix(header, prefix)))
-	return subtle.ConstantTimeCompare(presented[:], g.capability.tokenHash[:]) == 1
+	return strings.TrimPrefix(header, prefix), true
 }
 
 var errResponseLimit = errors.New("Model Gateway response limit exceeded")

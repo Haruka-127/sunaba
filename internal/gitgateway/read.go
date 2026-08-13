@@ -3,8 +3,6 @@ package gitgateway
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -12,9 +10,10 @@ import (
 	"net/url"
 	"path"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
+
+	corecapability "sunaba/internal/capability"
 )
 
 type ReadCapability struct {
@@ -26,18 +25,19 @@ type ReadCapability struct {
 	MaxConcurrent    int
 	MaxRequestBytes  int64
 	MaxResponseBytes int64
-	tokenHash        [sha256.Size]byte
+	authority        *corecapability.Authority
 	auditFailed      *atomic.Bool
 }
 
 func NewReadCapability(token, projectID, vmID, sessionID string, expiresAt time.Time) (ReadCapability, error) {
-	if len(token) < 32 || !gitIdentityPattern.MatchString(projectID) || !gitIdentityPattern.MatchString(vmID) || !gitIdentityPattern.MatchString(sessionID) || expiresAt.IsZero() {
+	authority, err := corecapability.NewAuthority(token, corecapability.Binding{ProjectID: projectID, VMID: vmID, SessionID: sessionID}, expiresAt)
+	if err != nil {
 		return ReadCapability{}, fmt.Errorf("Git Gateway read capability requires bound identities and a high-entropy token")
 	}
 	return ReadCapability{
 		ProjectID: projectID, VMID: vmID, SessionID: sessionID, ExpiresAt: expiresAt,
 		MaxRequests: 200, MaxConcurrent: 2, MaxRequestBytes: 4 << 20, MaxResponseBytes: 128 << 20,
-		tokenHash: sha256.Sum256([]byte(token)), auditFailed: &atomic.Bool{},
+		authority: authority, auditFailed: &atomic.Bool{},
 	}, nil
 }
 
@@ -71,9 +71,7 @@ type ReadGateway struct {
 	client        *http.Client
 	audit         func(ReadAuditEvent) error
 	now           func() time.Time
-	semaphore     chan struct{}
-	mu            sync.Mutex
-	requests      int
+	gate          *corecapability.Gate
 }
 
 func NewReadGateway(config ReadConfig) (*ReadGateway, error) {
@@ -91,7 +89,12 @@ func NewReadGateway(config ReadConfig) (*ReadGateway, error) {
 		return nil, fmt.Errorf("Git Gateway requires a host audit sink")
 	}
 	capability := config.Capability
-	if capability.MaxRequests <= 0 || capability.MaxConcurrent <= 0 || capability.MaxRequestBytes <= 0 || capability.MaxResponseBytes <= 0 || capability.ExpiresAt.IsZero() || capability.auditFailed == nil || !gitIdentityPattern.MatchString(capability.ProjectID) || !gitIdentityPattern.MatchString(capability.VMID) || !gitIdentityPattern.MatchString(capability.SessionID) {
+	binding := corecapability.Binding{ProjectID: capability.ProjectID, VMID: capability.VMID, SessionID: capability.SessionID}
+	if capability.MaxRequests <= 0 || capability.MaxConcurrent <= 0 || capability.MaxRequestBytes <= 0 || capability.MaxResponseBytes <= 0 || capability.ExpiresAt.IsZero() || capability.auditFailed == nil || !capability.authority.Matches(binding) {
+		return nil, fmt.Errorf("Git Gateway read capability limits are invalid")
+	}
+	gate, err := corecapability.NewGate(capability.authority, capability.ExpiresAt, capability.MaxRequests, capability.MaxConcurrent)
+	if err != nil {
 		return nil, fmt.Errorf("Git Gateway read capability limits are invalid")
 	}
 	client := config.HTTPClient
@@ -109,7 +112,7 @@ func NewReadGateway(config ReadConfig) (*ReadGateway, error) {
 	return &ReadGateway{
 		upstream: upstream, guestPath: config.GuestRepositoryPath, authorization: config.AuthorizationHeader,
 		capability: capability, client: &clientCopy, audit: config.Audit, now: now,
-		semaphore: make(chan struct{}, capability.MaxConcurrent),
+		gate: gate,
 	}, nil
 }
 
@@ -118,6 +121,7 @@ func (g *ReadGateway) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	defer func() {
 		if err := g.audit(event); err != nil {
 			g.capability.auditFailed.Store(true)
+			g.gate.Revoke()
 		}
 	}()
 	reject := func(status int, reason string) {
@@ -134,25 +138,25 @@ func (g *ReadGateway) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		reject(http.StatusNotFound, "route_not_allowed")
 		return
 	}
-	if !g.authorized(request.Header.Get("Authorization")) || !g.now().Before(g.capability.ExpiresAt) {
+	token, validHeader := bearerToken(request.Header.Get("Authorization"))
+	if !validHeader {
 		reject(http.StatusUnauthorized, "invalid_or_expired_capability")
 		return
 	}
-	g.mu.Lock()
-	if g.requests >= g.capability.MaxRequests {
-		g.mu.Unlock()
+	lease, status := g.gate.Admit(token, g.now())
+	if status == corecapability.RequestQuotaExceeded {
 		reject(http.StatusTooManyRequests, "request_quota_exceeded")
 		return
 	}
-	g.requests++
-	g.mu.Unlock()
-	select {
-	case g.semaphore <- struct{}{}:
-		defer func() { <-g.semaphore }()
-	default:
+	if status == corecapability.ConcurrencyExceeded {
 		reject(http.StatusTooManyRequests, "concurrency_exceeded")
 		return
 	}
+	if status != corecapability.Admitted {
+		reject(http.StatusUnauthorized, "invalid_or_expired_capability")
+		return
+	}
+	defer lease.Release()
 	body, err := io.ReadAll(io.LimitReader(request.Body, g.capability.MaxRequestBytes+1))
 	if err != nil || int64(len(body)) > g.capability.MaxRequestBytes {
 		reject(http.StatusRequestEntityTooLarge, "request_too_large")
@@ -209,13 +213,12 @@ func (g *ReadGateway) route(request *http.Request) (string, string, bool) {
 	return "", "", false
 }
 
-func (g *ReadGateway) authorized(header string) bool {
+func bearerToken(header string) (string, bool) {
 	const prefix = "Bearer "
 	if !strings.HasPrefix(header, prefix) {
-		return false
+		return "", false
 	}
-	presented := sha256.Sum256([]byte(strings.TrimPrefix(header, prefix)))
-	return subtle.ConstantTimeCompare(presented[:], g.capability.tokenHash[:]) == 1
+	return strings.TrimPrefix(header, prefix), true
 }
 
 func copyGitResponse(destination io.Writer, source io.Reader, maximum int64) (int64, error) {

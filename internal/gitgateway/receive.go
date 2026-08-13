@@ -2,8 +2,6 @@ package gitgateway
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,10 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	corecapability "sunaba/internal/capability"
 )
 
 type ReceiveConfig struct {
@@ -40,12 +39,10 @@ type ReceiveGateway struct {
 	capability       ReadCapability
 	maxRequestBytes  int64
 	maxResponseBytes int64
-	semaphore        chan struct{}
+	gate             *corecapability.Gate
 	audit            func(ReadAuditEvent) error
 	now              func() time.Time
 	beforeAdvertise  func(context.Context) error
-	mu               sync.Mutex
-	requests         int
 }
 
 func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
@@ -60,7 +57,12 @@ func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
 		return nil, fmt.Errorf("Git receive gateway limits and hook channel are invalid")
 	}
 	capability := config.Capability
-	if capability.MaxRequests <= 0 || capability.ExpiresAt.IsZero() || capability.auditFailed == nil || !gitIdentityPattern.MatchString(capability.ProjectID) || !gitIdentityPattern.MatchString(capability.VMID) || !gitIdentityPattern.MatchString(capability.SessionID) {
+	binding := corecapability.Binding{ProjectID: capability.ProjectID, VMID: capability.VMID, SessionID: capability.SessionID}
+	if capability.MaxRequests <= 0 || capability.ExpiresAt.IsZero() || capability.auditFailed == nil || !capability.authority.Matches(binding) {
+		return nil, fmt.Errorf("Git receive gateway capability is invalid")
+	}
+	gate, err := corecapability.NewGate(capability.authority, capability.ExpiresAt, capability.MaxRequests, config.MaxConcurrent)
+	if err != nil {
 		return nil, fmt.Errorf("Git receive gateway capability is invalid")
 	}
 	gitPath := config.GitPath
@@ -92,7 +94,7 @@ func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
 	return &ReceiveGateway{
 		backend: backend, guestPath: config.GuestRepositoryPath, capability: capability,
 		maxRequestBytes: config.MaxRequestBytes, maxResponseBytes: config.MaxResponseBytes,
-		semaphore: make(chan struct{}, config.MaxConcurrent), audit: config.Audit, now: now, beforeAdvertise: config.BeforeAdvertise,
+		gate: gate, audit: config.Audit, now: now, beforeAdvertise: config.BeforeAdvertise,
 	}, nil
 }
 
@@ -101,6 +103,7 @@ func (g *ReceiveGateway) ServeHTTP(response http.ResponseWriter, request *http.R
 	defer func() {
 		if err := g.audit(event); err != nil {
 			g.capability.auditFailed.Store(true)
+			g.gate.Revoke()
 		}
 	}()
 	reject := func(status int, reason string) {
@@ -115,7 +118,8 @@ func (g *ReceiveGateway) ServeHTTP(response http.ResponseWriter, request *http.R
 		reject(http.StatusNotFound, "route_not_allowed")
 		return
 	}
-	if !authorizedCapability(request.Header.Get("Authorization"), g.capability.tokenHash) || !g.now().Before(g.capability.ExpiresAt) {
+	token, validHeader := bearerToken(request.Header.Get("Authorization"))
+	if !validHeader {
 		reject(http.StatusUnauthorized, "invalid_or_expired_capability")
 		return
 	}
@@ -123,21 +127,20 @@ func (g *ReceiveGateway) ServeHTTP(response http.ResponseWriter, request *http.R
 		reject(http.StatusRequestEntityTooLarge, "request_too_large")
 		return
 	}
-	g.mu.Lock()
-	if g.requests >= g.capability.MaxRequests {
-		g.mu.Unlock()
+	lease, status := g.gate.Admit(token, g.now())
+	if status == corecapability.RequestQuotaExceeded {
 		reject(http.StatusTooManyRequests, "request_quota_exceeded")
 		return
 	}
-	g.requests++
-	g.mu.Unlock()
-	select {
-	case g.semaphore <- struct{}{}:
-		defer func() { <-g.semaphore }()
-	default:
+	if status == corecapability.ConcurrencyExceeded {
 		reject(http.StatusTooManyRequests, "concurrency_exceeded")
 		return
 	}
+	if status != corecapability.Admitted {
+		reject(http.StatusUnauthorized, "invalid_or_expired_capability")
+		return
+	}
+	defer lease.Release()
 	if request.Method == http.MethodGet {
 		if err := g.beforeAdvertise(request.Context()); err != nil {
 			reject(http.StatusBadGateway, "upstream_sync_failed")
@@ -157,15 +160,6 @@ func (g *ReceiveGateway) ServeHTTP(response http.ResponseWriter, request *http.R
 func (g *ReceiveGateway) route(request *http.Request) bool {
 	return (request.Method == http.MethodGet && request.URL.Path == g.guestPath+"/info/refs" && request.URL.RawQuery == "service=git-receive-pack") ||
 		(request.Method == http.MethodPost && request.URL.Path == g.guestPath+"/git-receive-pack" && request.URL.RawQuery == "")
-}
-
-func authorizedCapability(header string, expected [sha256.Size]byte) bool {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
-		return false
-	}
-	presented := sha256.Sum256([]byte(strings.TrimPrefix(header, prefix)))
-	return subtle.ConstantTimeCompare(presented[:], expected[:]) == 1
 }
 
 type limitedResponseWriter struct {

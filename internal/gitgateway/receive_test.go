@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"sunaba/internal/audit"
+	corecapability "sunaba/internal/capability"
 )
 
 func TestMain(m *testing.M) {
@@ -200,10 +201,14 @@ func TestReceiveGatewayRejectsSharedCapabilityAfterAuditFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	gate, err := corecapability.NewGate(capability.authority, capability.ExpiresAt, capability.MaxRequests, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gateway := &ReceiveGateway{
 		backend:   http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("revoked request reached backend") }),
 		guestPath: "/repository.git", capability: capability, maxRequestBytes: 1024, maxResponseBytes: 1024,
-		semaphore: make(chan struct{}, 1), now: time.Now, beforeAdvertise: func(context.Context) error { return nil },
+		gate: gate, now: time.Now, beforeAdvertise: func(context.Context) error { return nil },
 		audit: func(ReadAuditEvent) error { return fmt.Errorf("injected audit failure") },
 	}
 	first := httptest.NewRecorder()
