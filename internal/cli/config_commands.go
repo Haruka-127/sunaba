@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -354,7 +356,125 @@ func renderConfigComparison(applied, desired []byte) string {
 	if bytes.Equal(applied, desired) {
 		return "(no change)\n"
 	}
-	return "- " + string(bytes.ReplaceAll(bytes.TrimSpace(applied), []byte("\n"), []byte("\n- "))) + "\n+ " + string(bytes.ReplaceAll(bytes.TrimSpace(desired), []byte("\n"), []byte("\n+ "))) + "\n"
+	var left, right any
+	if json.Unmarshal(applied, &left) == nil && json.Unmarshal(desired, &right) == nil {
+		var output strings.Builder
+		renderJSONFieldDiff(&output, "", left, true, right, true)
+		if output.Len() > 0 {
+			return output.String()
+		}
+	}
+	return renderLineDiff(string(applied), string(desired))
+}
+
+func renderJSONFieldDiff(output *strings.Builder, path string, left any, leftExists bool, right any, rightExists bool) {
+	if leftExists && rightExists && reflect.DeepEqual(left, right) {
+		return
+	}
+	leftObject, leftIsObject := left.(map[string]any)
+	rightObject, rightIsObject := right.(map[string]any)
+	if leftExists && rightExists && leftIsObject && rightIsObject {
+		keys := make([]string, 0, len(leftObject)+len(rightObject))
+		seen := make(map[string]struct{}, len(leftObject)+len(rightObject))
+		for key := range leftObject {
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+		for key := range rightObject {
+			if _, exists := seen[key]; !exists {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			leftValue, leftOK := leftObject[key]
+			rightValue, rightOK := rightObject[key]
+			renderJSONFieldDiff(output, childPath, leftValue, leftOK, rightValue, rightOK)
+		}
+		return
+	}
+	if path == "" {
+		path = "$"
+	}
+	fmt.Fprintf(output, "@@ %s @@\n", path)
+	if leftExists {
+		encoded, _ := json.Marshal(left)
+		fmt.Fprintf(output, "- %s\n", encoded)
+	} else {
+		output.WriteString("- <missing>\n")
+	}
+	if rightExists {
+		encoded, _ := json.Marshal(right)
+		fmt.Fprintf(output, "+ %s\n", encoded)
+	} else {
+		output.WriteString("+ <missing>\n")
+	}
+}
+
+func renderLineDiff(applied, desired string) string {
+	left := strings.Split(strings.TrimSuffix(applied, "\n"), "\n")
+	right := strings.Split(strings.TrimSuffix(desired, "\n"), "\n")
+	if len(left)*len(right) > 2_000_000 {
+		return renderPrefixSuffixDiff(left, right)
+	}
+	width := len(right) + 1
+	lengths := make([]int32, (len(left)+1)*width)
+	for leftIndex := len(left) - 1; leftIndex >= 0; leftIndex-- {
+		for rightIndex := len(right) - 1; rightIndex >= 0; rightIndex-- {
+			cell := leftIndex*width + rightIndex
+			if left[leftIndex] == right[rightIndex] {
+				lengths[cell] = lengths[(leftIndex+1)*width+rightIndex+1] + 1
+			} else {
+				lengths[cell] = max(lengths[(leftIndex+1)*width+rightIndex], lengths[leftIndex*width+rightIndex+1])
+			}
+		}
+	}
+	var output strings.Builder
+	leftIndex, rightIndex := 0, 0
+	for leftIndex < len(left) || rightIndex < len(right) {
+		switch {
+		case leftIndex < len(left) && rightIndex < len(right) && left[leftIndex] == right[rightIndex]:
+			fmt.Fprintf(&output, "  %s\n", left[leftIndex])
+			leftIndex++
+			rightIndex++
+		case rightIndex == len(right) || leftIndex < len(left) && lengths[(leftIndex+1)*width+rightIndex] >= lengths[leftIndex*width+rightIndex+1]:
+			fmt.Fprintf(&output, "- %s\n", left[leftIndex])
+			leftIndex++
+		default:
+			fmt.Fprintf(&output, "+ %s\n", right[rightIndex])
+			rightIndex++
+		}
+	}
+	return output.String()
+}
+
+func renderPrefixSuffixDiff(left, right []string) string {
+	prefix := 0
+	for prefix < len(left) && prefix < len(right) && left[prefix] == right[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(left)-prefix && suffix < len(right)-prefix && left[len(left)-1-suffix] == right[len(right)-1-suffix] {
+		suffix++
+	}
+	var output strings.Builder
+	for _, line := range left[:prefix] {
+		fmt.Fprintf(&output, "  %s\n", line)
+	}
+	for _, line := range left[prefix : len(left)-suffix] {
+		fmt.Fprintf(&output, "- %s\n", line)
+	}
+	for _, line := range right[prefix : len(right)-suffix] {
+		fmt.Fprintf(&output, "+ %s\n", line)
+	}
+	for _, line := range left[len(left)-suffix:] {
+		fmt.Fprintf(&output, "  %s\n", line)
+	}
+	return output.String()
 }
 
 func existingWebBlocklist(effective policy.ProjectPolicy, projectState string, now time.Time) (string, string, error) {

@@ -109,6 +109,21 @@ func TestCommandTreeRejectsPrefixesAliasesAndMisplacedOptions(t *testing.T) {
 	}
 }
 
+func TestRenderConfigComparisonShowsFieldAndLineDiffs(t *testing.T) {
+	jsonDiff := renderConfigComparison([]byte(`{"session":{"ttl":10,"idle":5}}`), []byte(`{"session":{"ttl":20,"idle":5}}`))
+	for _, expected := range []string{"@@ session.ttl @@", "- 10", "+ 20"} {
+		if !strings.Contains(jsonDiff, expected) {
+			t.Fatalf("JSON diff missing %q: %s", expected, jsonDiff)
+		}
+	}
+	lineDiff := renderConfigComparison([]byte("common\nold\ntail\n"), []byte("common\nnew\ntail\n"))
+	for _, expected := range []string{"  common", "- old", "+ new", "  tail"} {
+		if !strings.Contains(lineDiff, expected) {
+			t.Fatalf("line diff missing %q: %s", expected, lineDiff)
+		}
+	}
+}
+
 func TestVerboseIsPersistentButDoesNotComeFromEnvironment(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(t.TempDir(), "state")}
 	seenVerbose := false
