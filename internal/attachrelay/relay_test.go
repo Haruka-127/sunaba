@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,10 +32,18 @@ func TestRelayAuthenticatesFiltersAndSanitizes(t *testing.T) {
 	}
 	var forbiddenReached atomic.Bool
 	var identityRequested atomic.Bool
+	type forwardedRequest struct {
+		host, path, query, forwarded, xForwardedFor string
+	}
+	forwarded := make(chan forwardedRequest, 1)
 	guestServer := &http.Server{Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/global/health":
 			identityRequested.Store(request.Header.Get("Accept-Encoding") == "identity")
+			forwarded <- forwardedRequest{
+				host: request.Host, path: request.URL.Path, query: request.URL.RawQuery,
+				forwarded: request.Header.Get("Forwarded"), xForwardedFor: request.Header.Get("X-Forwarded-For"),
+			}
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(response, `{"healthy":true,"version":"1.18.16","message":"evil\u001b]52;c;Y2xpcA==\u0007"}`)
 		case "/global/event":
@@ -68,8 +77,10 @@ func TestRelayAuthenticatesFiltersAndSanitizes(t *testing.T) {
 	if unauthorized.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status=%d", unauthorized.StatusCode)
 	}
-	healthRequest, _ := http.NewRequest(http.MethodGet, endpoint+"/global/health", nil)
+	healthRequest, _ := http.NewRequest(http.MethodGet, endpoint+"/global/health?probe=1", nil)
 	healthRequest.SetBasicAuth("opencode", relayTestPassword)
+	healthRequest.Header.Set("Forwarded", "for=untrusted.example")
+	healthRequest.Header.Set("X-Forwarded-For", "untrusted.example")
 	health, err := http.DefaultClient.Do(healthRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +92,11 @@ func TestRelayAuthenticatesFiltersAndSanitizes(t *testing.T) {
 	}
 	if !identityRequested.Load() {
 		t.Fatal("attach relay did not request an identity response from the guest")
+	}
+	forwardedHealth := <-forwarded
+	endpointURL, _ := url.Parse(endpoint)
+	if forwardedHealth.host != endpointURL.Host || forwardedHealth.path != "/global/health" || forwardedHealth.query != "probe=1" || forwardedHealth.forwarded != "" || forwardedHealth.xForwardedFor != "" {
+		t.Fatalf("rewritten request=%+v endpoint=%s", forwardedHealth, endpointURL.Host)
 	}
 	forbiddenRequest, _ := http.NewRequest(http.MethodPost, endpoint+"/tui/execute-command", strings.NewReader(`{"command":"editor.open"}`))
 	forbiddenRequest.SetBasicAuth("opencode", relayTestPassword)

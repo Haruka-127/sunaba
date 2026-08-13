@@ -71,12 +71,14 @@ func (r Relay) ListenAndServe(ctx context.Context) (string, <-chan error, error)
 		},
 	}
 	target := &url.URL{Scheme: "http", Host: "sunaba-guest"}
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	director := proxy.Director
-	proxy.Director = func(request *http.Request) {
-		director(request)
-		request.Header.Set("Accept-Encoding", "identity")
-	}
+	proxy := &httputil.ReverseProxy{Rewrite: func(request *httputil.ProxyRequest) {
+		request.SetURL(target)
+		request.Out.Host = request.In.Host
+		request.Out.Header.Set("Accept-Encoding", "identity")
+		for _, header := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+			request.Out.Header.Del(header)
+		}
+	}}
 	proxy.Transport = transport
 	proxy.ModifyResponse = func(response *http.Response) error { return sanitizeResponse(response, r.OnReject) }
 	proxy.ErrorHandler = func(response http.ResponseWriter, _ *http.Request, _ error) {

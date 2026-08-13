@@ -29,6 +29,9 @@ func TestHTTPProxyAllowsOnlyBodylessReadsAndPinsDialedIP(t *testing.T) {
 		if request.Host != "allowed.example" {
 			t.Errorf("unexpected upstream Host %q", request.Host)
 		}
+		if request.Header.Get("X-Sunaba-Hop") != "" {
+			t.Errorf("dynamic request hop header reached upstream: %q", request.Header.Get("X-Sunaba-Hop"))
+		}
 		response.Header().Set("Content-Type", "text/plain")
 		_, _ = io.WriteString(response, "safe response")
 	}))
@@ -51,7 +54,10 @@ func TestHTTPProxyAllowsOnlyBodylessReadsAndPinsDialedIP(t *testing.T) {
 	server := httptest.NewServer(gateway)
 	defer server.Close()
 	client := proxyClient(t, server.URL, token)
-	response, err := client.Get("http://allowed.example/private/path?secret=query")
+	proxyRequest, _ := http.NewRequest(http.MethodGet, "http://allowed.example/private/path?secret=query", nil)
+	proxyRequest.Header.Set("Connection", "X-Sunaba-Hop")
+	proxyRequest.Header.Set("X-Sunaba-Hop", "remove-me")
+	response, err := client.Do(proxyRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +88,25 @@ func TestHTTPProxyAllowsOnlyBodylessReadsAndPinsDialedIP(t *testing.T) {
 		if strings.Contains(encoded, forbidden) {
 			t.Fatalf("audit event leaked request content %q", forbidden)
 		}
+	}
+}
+
+func TestRemoveHopHeadersRemovesConnectionTokens(t *testing.T) {
+	header := http.Header{
+		"Connection":   {"keep-alive, X-First-Hop", "X-Second-Hop"},
+		"Keep-Alive":   {"timeout=5"},
+		"X-First-Hop":  {"first"},
+		"X-Second-Hop": {"second"},
+		"X-End-To-End": {"keep"},
+	}
+	removeHopHeaders(header)
+	for _, removed := range []string{"Connection", "Keep-Alive", "X-First-Hop", "X-Second-Hop"} {
+		if header.Get(removed) != "" {
+			t.Fatalf("hop-by-hop header %s survived: %q", removed, header.Get(removed))
+		}
+	}
+	if header.Get("X-End-To-End") != "keep" {
+		t.Fatalf("end-to-end header was removed: %q", header.Get("X-End-To-End"))
 	}
 }
 
