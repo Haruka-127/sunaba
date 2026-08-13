@@ -45,6 +45,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 			t.Fatalf("guest setup missing %q: %s", expected, fake.setup)
 		}
 	}
+	assertGuestRuntimeInputPermissions(t, fake.setup)
 	if strings.Contains(fake.setup, "runuser -u sunaba-agent -- /bin/bash -lc 'set -a") {
 		t.Fatal("OpenCode server was not started as VM root")
 	}
@@ -96,6 +97,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if !strings.Contains(fake.setup, "test -d /var/lib/sunaba/repository") {
 		t.Fatalf("resume did not restart guest services: %s", fake.setup)
 	}
+	assertGuestRuntimeInputPermissions(t, fake.setup)
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +122,23 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	}
 	if strings.Contains(string(encodedAudit), cfg.ModelToken) || strings.Contains(string(encodedAudit), cfg.ServerPassword) {
 		t.Fatal("session secret was written to host audit")
+	}
+}
+
+func assertGuestRuntimeInputPermissions(t *testing.T, command string) {
+	t.Helper()
+	for _, expected := range []string{
+		"chown 0:1000 /run/sunaba",
+		"chmod 0710 /run/sunaba",
+		"chown 0:0 /run/sunaba/guest-relay",
+		"chmod 0700 /run/sunaba/guest-relay",
+		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper",
+		"chmod 0400 /run/sunaba/session.env /run/sunaba/opencode.json",
+		"chmod 0500 /run/sunaba/shell-wrapper",
+	} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("guest session input permissions missing %q: %s", expected, command)
+		}
 	}
 }
 
@@ -415,6 +434,7 @@ func TestSessionBindsOptionalWebGatewayAndProxyEnvironmentToLifecycle(t *testing
 			t.Fatalf("Web guest setup missing %q: %s", expected, fake.setup)
 		}
 	}
+	assertGuestWebRuntimeInputPermissions(t, fake.setup)
 	if strings.Contains(fake.setup, cfg.WebToken) {
 		t.Fatal("guest setup command leaked Web capability")
 	}
@@ -443,6 +463,7 @@ func TestSessionBindsOptionalWebGatewayAndProxyEnvironmentToLifecycle(t *testing
 	if err := s.Resume(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	assertGuestWebRuntimeInputPermissions(t, fake.setup)
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -451,6 +472,18 @@ func TestSessionBindsOptionalWebGatewayAndProxyEnvironmentToLifecycle(t *testing
 	}
 	if _, err := os.Lstat(filepath.Join(s.Root, "apt-proxy.conf")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("host apt capability file remained: %v", err)
+	}
+}
+
+func assertGuestWebRuntimeInputPermissions(t *testing.T, command string) {
+	t.Helper()
+	for _, expected := range []string{
+		"chown 1000:1000 /run/sunaba/apt-proxy.conf",
+		"chmod 0400 /run/sunaba/apt-proxy.conf",
+	} {
+		if !strings.Contains(command, expected) {
+			t.Fatalf("guest Web session input permissions missing %q: %s", expected, command)
+		}
 	}
 }
 

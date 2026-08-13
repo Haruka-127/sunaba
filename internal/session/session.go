@@ -574,11 +574,14 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 func (s *Session) resumeGuest(ctx context.Context) error {
 	commands := []string{
 		"set -eu",
+	}
+	commands = append(commands, s.guestRuntimeInputPermissionCommands()...)
+	commands = append(commands,
 		"if ! grep -Fqs ' /var/lib/sunaba/overlay ' /proc/mounts; then mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay; fi",
-		"if ! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/overlay/upper,workdir=/var/lib/sunaba/overlay/work " + s.WorkspacePath + "; fi",
+		"if ! grep -Fqs ' "+s.WorkspacePath+" ' /proc/mounts; then mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/overlay/upper,workdir=/var/lib/sunaba/overlay/work "+s.WorkspacePath+"; fi",
 		"test -d /var/lib/sunaba/repository",
 		"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4141 --unix-target /run/sunaba/model-gateway.sock >/run/sunaba/model-relay.log 2>&1 &",
-	}
+	)
 	if s.cfg.GitGateway != nil {
 		commands = append(commands, "nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4242 --unix-target /run/sunaba/git-gateway.sock >/run/sunaba/git-relay.log 2>&1 &")
 	}
@@ -607,28 +610,27 @@ func (s *Session) configureGuest(ctx context.Context) error {
 	}
 	commands := []string{
 		"set -eu",
-		"chmod 0700 /run/sunaba/guest-relay",
 		"getent group sunaba-agent >/dev/null || groupadd -g 1000 sunaba-agent",
 		"id sunaba-agent >/dev/null 2>&1 || useradd -u 1000 -g sunaba-agent -M -d /run/sunaba/home -s /bin/bash sunaba-agent",
-		"chmod 0400 /run/sunaba/session.env /run/sunaba/opencode.json",
-		"chmod 0500 /run/sunaba/shell-wrapper",
-		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper",
-		"mkdir -p " + s.WorkspacePath + " /run/sunaba/home /run/sunaba/config /run/sunaba/data /var/lib/sunaba/overlay",
+	}
+	commands = append(commands, s.guestRuntimeInputPermissionCommands()...)
+	commands = append(commands,
+		"mkdir -p "+s.WorkspacePath+" /run/sunaba/home /run/sunaba/config /run/sunaba/data /var/lib/sunaba/overlay",
 		fmt.Sprintf("truncate -s %d /var/lib/sunaba/overlay.img", s.cfg.DiskBytes),
 		"mkfs.ext4 -q -F -m 0 /var/lib/sunaba/overlay.img",
 		"mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay",
 		"mkdir -p /var/lib/sunaba/overlay/upper /var/lib/sunaba/overlay/work /var/lib/sunaba/overlay/repository",
 		"ln -s overlay/repository /var/lib/sunaba/repository",
 		"chown -R 1000:1000 /var/lib/sunaba/lower /var/lib/sunaba/overlay /run/sunaba/home /run/sunaba/config /run/sunaba/data",
-		"mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/overlay/upper,workdir=/var/lib/sunaba/overlay/work " + s.WorkspacePath,
-		"cd " + s.WorkspacePath,
+		"mount -t overlay overlay -o lowerdir=/var/lib/sunaba/lower,upperdir=/var/lib/sunaba/overlay/upper,workdir=/var/lib/sunaba/overlay/work "+s.WorkspacePath,
+		"cd "+s.WorkspacePath,
 		"runuser -u sunaba-agent -- git init -q --bare /var/lib/sunaba/repository",
-		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config user.name sunaba-baseline",
-		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config user.email sunaba@localhost",
-		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " config core.hooksPath /dev/null",
-		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " add -A && runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree=" + s.WorkspacePath + " commit -qm 'sunaba synthetic baseline' --no-verify || true",
+		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree="+s.WorkspacePath+" config user.name sunaba-baseline",
+		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree="+s.WorkspacePath+" config user.email sunaba@localhost",
+		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree="+s.WorkspacePath+" config core.hooksPath /dev/null",
+		"runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree="+s.WorkspacePath+" add -A && runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository --work-tree="+s.WorkspacePath+" commit -qm 'sunaba synthetic baseline' --no-verify || true",
 		"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4141 --unix-target /run/sunaba/model-gateway.sock >/run/sunaba/model-relay.log 2>&1 &",
-	}
+	)
 	if s.cfg.GitGateway != nil {
 		for _, remote := range s.cfg.GitRemotes {
 			commands = append(commands, "runuser -u sunaba-agent -- git --git-dir=/var/lib/sunaba/repository config remote."+remote.Name+".url http://127.0.0.1:4242/"+remote.Name+".git")
@@ -637,8 +639,6 @@ func (s *Session) configureGuest(ctx context.Context) error {
 	}
 	if s.cfg.WebGateway != nil {
 		commands = append(commands,
-			"chmod 0400 /run/sunaba/apt-proxy.conf",
-			"chown 1000:1000 /run/sunaba/apt-proxy.conf",
 			"nohup /run/sunaba/guest-relay --tcp-listen 127.0.0.1:4343 --unix-target /run/sunaba/web-gateway.sock >/run/sunaba/web-relay.log 2>&1 &",
 		)
 	}
@@ -653,6 +653,25 @@ func (s *Session) configureGuest(ctx context.Context) error {
 		return fmt.Errorf("configure secure guest: %w: %s", err, out)
 	}
 	return s.validateGuestResources(out)
+}
+
+func (s *Session) guestRuntimeInputPermissionCommands() []string {
+	commands := []string{
+		"chown 0:1000 /run/sunaba",
+		"chmod 0710 /run/sunaba",
+		"chown 0:0 /run/sunaba/guest-relay",
+		"chmod 0700 /run/sunaba/guest-relay",
+		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper",
+		"chmod 0400 /run/sunaba/session.env /run/sunaba/opencode.json",
+		"chmod 0500 /run/sunaba/shell-wrapper",
+	}
+	if s.cfg.WebGateway != nil {
+		commands = append(commands,
+			"chown 1000:1000 /run/sunaba/apt-proxy.conf",
+			"chmod 0400 /run/sunaba/apt-proxy.conf",
+		)
+	}
+	return commands
 }
 
 func (s *Session) restoreGuestRuntimeInputs(ctx context.Context) (err error) {
