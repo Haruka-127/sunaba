@@ -2,6 +2,7 @@ package projectconfig
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,17 @@ func TestStoreKeepsEditableConfigurationOutsideProject(t *testing.T) {
 	}
 	if _, err := os.Lstat(store.Root); err != nil {
 		t.Fatalf("configuration root was removed with one Project: %v", err)
+	}
+}
+
+func TestRemoveDoesNotCreateMissingConfigurationRoots(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing", "sunaba")
+	store := &Store{Root: root}
+	if err := store.Remove("0123456789ab"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Remove created a missing configuration root: %v", err)
 	}
 }
 

@@ -630,12 +630,21 @@ func (a *app) recreate(ctx context.Context, dir string, discard bool) error {
 	return nil
 }
 
-func (a *app) down(ctx context.Context, dir string) error {
-	_, _, projectState, err := a.loadEffectivePolicy(dir)
+func (a *app) down(ctx context.Context, selector projectSelector) error {
+	target, err := a.resolveProjectStateTarget(selector)
 	if err != nil {
 		return err
 	}
-	if client, err := openSupervisorClient(projectState); err == nil {
+	if client, err := openSupervisorClient(target.ProjectState); err == nil {
+		info, infoErr := client.info(ctx)
+		if infoErr != nil {
+			client.close()
+			return infoErr
+		}
+		if info.ProjectID != target.ProjectID {
+			client.close()
+			return fmt.Errorf("active supervisor Project identity does not match down target")
+		}
 		pauseContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		err = client.operation(pauseContext, "pause")
 		cancel()
@@ -646,7 +655,7 @@ func (a *app) down(ctx context.Context, dir string) error {
 		fmt.Fprintln(a.output, "Persistent Agent VM is stopped with its isolated upper state retained.")
 		return nil
 	} else if errors.Is(err, errStaleSupervisor) {
-		if err := a.recoverStaleSupervisor(ctx, projectState); err != nil {
+		if err := a.recoverStaleSupervisor(ctx, target.ProjectState); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, errNoSupervisor) {
@@ -658,18 +667,31 @@ func (a *app) down(ctx context.Context, dir string) error {
 	return nil
 }
 
-func (a *app) destroy(ctx context.Context, dir string, yes, discard bool) error {
+func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discard bool) error {
 	if !yes {
 		return fmt.Errorf("destroy requires --yes")
 	}
-	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
+	target, err := a.resolveProjectStateTarget(selector)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil && !discard {
-		return fmt.Errorf("pending Change Set exists; pass --discard-pending explicitly to destroy it")
+	if _, err := os.Lstat(filepath.Join(target.ProjectState, "pending", "change.json")); err == nil {
+		if !discard {
+			return fmt.Errorf("pending Change Set exists; pass --discard-pending explicitly to destroy it")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect pending Change Set: %w", err)
 	}
-	if client, err := openSupervisorClient(projectState); err == nil {
+	if client, err := openSupervisorClient(target.ProjectState); err == nil {
+		info, infoErr := client.info(ctx)
+		if infoErr != nil {
+			client.close()
+			return infoErr
+		}
+		if info.ProjectID != target.ProjectID {
+			client.close()
+			return fmt.Errorf("active supervisor Project identity does not match destroy target")
+		}
 		if !discard {
 			client.close()
 			return fmt.Errorf("a persistent Agent VM may contain unexported changes; run 'sunaba changes export' or pass --discard-pending")
@@ -682,13 +704,13 @@ func (a *app) destroy(ctx context.Context, dir string, yes, discard bool) error 
 			return err
 		}
 		waitContext, waitCancel := context.WithTimeout(ctx, 5*time.Second)
-		err = waitSupervisorGone(waitContext, projectState)
+		err = waitSupervisorGone(waitContext, target.ProjectState)
 		waitCancel()
 		if err != nil {
 			return err
 		}
 	} else if errors.Is(err, errStaleSupervisor) {
-		if err := a.recoverStaleSupervisor(ctx, projectState); err != nil {
+		if err := a.recoverStaleSupervisor(ctx, target.ProjectState); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, errNoSupervisor) {
@@ -702,30 +724,30 @@ func (a *app) destroy(ctx context.Context, dir string, yes, discard bool) error 
 		return err
 	}
 	for _, item := range items {
-		if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == projectPolicy.ProjectID {
+		if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == target.ProjectID {
 			return fmt.Errorf("refusing to delete Project state while owned VM %s still exists", item.Name)
 		}
 	}
 	if discard {
-		if err := removePending(projectState); err != nil {
+		if err := removePending(target.ProjectState); err != nil {
 			return err
 		}
 	}
-	info, err := os.Lstat(projectState)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || filepath.Dir(projectState) != filepath.Join(a.store.Root, "projects") || filepath.Base(projectState) != projectPolicy.ProjectID {
+	verified, err := a.store.LookupProjectState(target.ProjectID)
+	if err != nil || verified.Path != target.ProjectState {
 		return fmt.Errorf("refusing to remove unverified Project state")
 	}
-	if err := os.RemoveAll(projectState); err != nil {
+	if err := os.RemoveAll(target.ProjectState); err != nil {
 		return err
 	}
 	configStore, err := a.projectConfigStore()
 	if err != nil {
 		return err
 	}
-	if err := configStore.Remove(projectPolicy.ProjectID); err != nil {
+	if err := configStore.Remove(target.ProjectID); err != nil {
 		return fmt.Errorf("Project state was removed, but its host configuration could not be removed: %w", err)
 	}
-	fmt.Fprintf(a.output, "Destroyed Project state and host configuration %s. Host Project files were not removed.\n", projectPolicy.ProjectID)
+	fmt.Fprintf(a.output, "Destroyed Project state and host configuration %s. Host Project files were not removed.\n", target.ProjectID)
 	return nil
 }
 

@@ -38,13 +38,14 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		{"git", "remote", "--help"},
 		{"changes", "--help"},
 		{"up", "--help"},
+		{"destroy", "--help"},
 	} {
 		if err := a.run(context.Background(), args); err != nil {
 			t.Fatal(err)
 		}
 	}
 	text := output.String()
-	for _, expected := range []string{"credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "remote", "add", "web", "approvals", "changes", "export", "--mode", "secure", "dev", "never bind-mounted"} {
+	for _, expected := range []string{"credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "remote", "add", "web", "approvals", "changes", "export", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -140,6 +141,250 @@ func TestProjectInitDefaultsToCurrentDirectoryAndOAuth(t *testing.T) {
 	expectedAPI, defaultsErr := modelcatalog.DefaultModels(modelcatalog.AuthAPIKey)
 	if err != nil || defaultsErr != nil || apiPolicy.Model.AuthMode != modelcatalog.AuthAPIKey || strings.Join(apiPolicy.Model.AllowedModels, ",") != strings.Join(expectedAPI, ",") {
 		t.Fatalf("API key Project policy=%+v error=%v defaults_error=%v", apiPolicy, err, defaultsErr)
+	}
+}
+
+func TestProjectIDSelectsNormalReadAndMutationCommands(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	a := &app{store: store, configs: configs, runtime: &projectListRuntime{}, output: io.Discard, errors: io.Discard}
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	for _, args := range [][]string{
+		{"config", "path", "--project-id", projectID},
+		{"config", "validate", "--project-id", projectID},
+		{"model", "list", "--project-id", projectID},
+		{"git", "remote", "list", "--project-id", projectID},
+		{"status", "--project-id", projectID},
+		{"down", "--project-id", projectID},
+	} {
+		if err := a.run(context.Background(), args); err != nil {
+			t.Fatalf("command %v failed: %v", args, err)
+		}
+	}
+	if err := a.run(context.Background(), []string{"model", "auth", "api-key", "--project-id", projectID}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, _, err := a.loadPolicy(project)
+	if err != nil || loaded.Model.AuthMode != modelcatalog.AuthAPIKey {
+		t.Fatalf("ID-selected mutation policy=%+v error=%v", loaded.Model, err)
+	}
+	if err := a.run(context.Background(), []string{"status", "--dir", project, "--project-id", projectID}); err == nil {
+		t.Fatal("normal command accepted both --dir and --project-id")
+	}
+}
+
+func TestEveryPublicProjectCommandExposesProjectIDSelector(t *testing.T) {
+	commands := [][]string{
+		{"config", "path"}, {"config", "edit"}, {"config", "validate"}, {"config", "diff"}, {"config", "apply"}, {"config", "show"},
+		{"model", "auth", "api-key"}, {"model", "auth", "oauth"}, {"model", "set"}, {"model", "list"},
+		{"up"}, {"agent"}, {"git", "remote", "add"}, {"git", "remote", "remove"}, {"git", "remote", "list"}, {"git", "disable"},
+		{"web", "enable"}, {"web", "refresh"}, {"web", "disable"}, {"shell"}, {"status"},
+		{"changes", "export"}, {"changes", "apply"}, {"approvals"}, {"recreate"}, {"down"}, {"destroy"},
+	}
+	for _, command := range commands {
+		var output bytes.Buffer
+		a := &app{output: &output, errors: io.Discard}
+		args := append(append([]string(nil), command...), "--help")
+		if err := a.run(context.Background(), args); err != nil {
+			t.Fatalf("help %v failed: %v", command, err)
+		}
+		if !strings.Contains(output.String(), "--project-id") || !strings.Contains(output.String(), "--dir") {
+			t.Errorf("Project selector missing from %v help: %s", command, output.String())
+		}
+	}
+	for _, command := range [][]string{{"project", "init", "--help"}, {"project", "list", "--help"}, {"credentials", "--help"}, {"firewall", "--help"}} {
+		var output bytes.Buffer
+		a := &app{output: &output, errors: io.Discard}
+		if err := a.run(context.Background(), command); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(output.String(), "--project-id") {
+			t.Errorf("non-Project selector command exposed --project-id: %v", command)
+		}
+	}
+}
+
+func TestDestroyByProjectIDWorksWithoutOriginalProjectDirectory(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	var output bytes.Buffer
+	a := &app{store: store, configs: configs, runtime: &projectListRuntime{}, output: &output, errors: &output}
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	projectState := filepath.Join(store.Root, "projects", projectID)
+	configPaths, err := configs.ProjectPaths(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(project); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.run(context.Background(), []string{"status", "--project-id", projectID}); err == nil {
+		t.Fatal("normal Project operation accepted an ID whose Project root is missing")
+	}
+	if _, err := store.LookupProjectState(projectID); err != nil {
+		t.Fatalf("failed normal operation changed Project state: %v", err)
+	}
+	output.Reset()
+	if err := a.run(context.Background(), []string{"destroy", "--project-id", projectID, "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(projectState); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Project state remained: %v", err)
+	}
+	if _, err := os.Lstat(configPaths.Directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Project configuration remained: %v", err)
+	}
+	if !strings.Contains(output.String(), projectID) || !strings.Contains(output.String(), "Host Project files were not removed") {
+		t.Fatalf("destroy output=%q", output.String())
+	}
+}
+
+func TestDestroyByProjectIDRemovesSafeUnknownStateWithoutPolicyOrConfig(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectID := "0123456789ab"
+	projectState := filepath.Join(store.Root, "projects", projectID)
+	if err := os.Mkdir(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "missing-config", "sunaba")}
+	a := &app{store: store, configs: configs, runtime: &projectListRuntime{}, output: io.Discard, errors: io.Discard}
+	if err := a.run(context.Background(), []string{"down", "--project-id", projectID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LookupProjectState(projectID); err != nil {
+		t.Fatalf("down removed safe unknown Project state: %v", err)
+	}
+	if err := a.run(context.Background(), []string{"destroy", "--project-id", projectID, "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(projectState); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unknown Project state remained: %v", err)
+	}
+	if _, err := os.Lstat(configs.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destroy created a missing configuration root: %v", err)
+	}
+}
+
+func TestDestroyProjectSelectorsRequireExactUnambiguousID(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	a := &app{store: store, configs: configs, runtime: &projectListRuntime{}, output: io.Discard, errors: io.Discard}
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	for _, args := range [][]string{
+		{"destroy", "--project-id", strings.ToUpper(projectID), "--yes"},
+		{"destroy", "--project-id", projectID[:8], "--yes"},
+		{"destroy", "--project-id", "abcdefabcdef", "--yes"},
+		{"destroy", "--dir", project, "--project-id", projectID, "--yes"},
+		{"destroy", "--project-id", projectID, "--project-id", projectID, "--yes"},
+	} {
+		if err := a.run(context.Background(), args); err == nil {
+			t.Errorf("destroy unexpectedly accepted: %v", args)
+		}
+		if _, err := store.LookupProjectState(projectID); err != nil {
+			t.Fatalf("rejected selector changed Project state: %v", err)
+		}
+	}
+	pendingDirectory := filepath.Join(store.Root, "projects", projectID, "pending")
+	if err := os.Mkdir(pendingDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pendingDirectory, "change.json"), []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.run(context.Background(), []string{"destroy", "--project-id", projectID, "--yes"}); err == nil || !strings.Contains(err.Error(), "pending Change Set") {
+		t.Fatalf("pending Change Set was not protected: %v", err)
+	}
+	if _, err := store.LookupProjectState(projectID); err != nil {
+		t.Fatalf("pending protection changed Project state: %v", err)
+	}
+}
+
+func TestRecoveryByProjectIDRejectsMismatchedSupervisorIdentity(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectID := "0123456789ab"
+	projectState := filepath.Join(store.Root, "projects", projectID)
+	if err := os.Mkdir(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := os.MkdirTemp("/private/tmp", "sunaba-destroy-identity-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(runtimeBase)
+	if err := os.Chmod(runtimeBase, 0700); err != nil {
+		t.Fatal(err)
+	}
+	controlled := &controlledSession{
+		active: &fakeSessionControlTarget{}, projectID: "different-project", sessionID: "session",
+		container: "sunaba-different-project-session", runtimeRoot: filepath.Join(runtimeBase, "sunaba-session-session"),
+		workspacePath: "/workspace/sunaba-session", attachURL: "http://127.0.0.1:12345", projectState: projectState,
+		serverPassword: strings.Repeat("s", 32), expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute,
+		lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
+	}
+	control, err := startApprovalControl(projectState, runtimeBase, nil, controlled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	a := &app{store: store, runtime: &projectListRuntime{}, output: io.Discard, errors: io.Discard}
+	for _, args := range [][]string{
+		{"down", "--project-id", projectID},
+		{"destroy", "--project-id", projectID, "--yes", "--discard-pending"},
+	} {
+		err = a.run(context.Background(), args)
+		if err == nil || !strings.Contains(err.Error(), "identity does not match") {
+			t.Fatalf("mismatched Supervisor was not rejected by %v: %v", args, err)
+		}
+	}
+	if _, err := store.LookupProjectState(projectID); err != nil {
+		t.Fatalf("identity rejection changed Project state: %v", err)
 	}
 }
 

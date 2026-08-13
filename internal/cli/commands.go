@@ -40,22 +40,20 @@ func (a *app) command() *urfavecli.Command {
 	}
 	command.Commands = []*urfavecli.Command{
 		a.projectCommand(), a.configCommand(), a.credentialsCommand(), a.modelCommand(),
-		a.simpleProjectCommand("up", "Project VMを準備", []urfavecli.Flag{dirFlag(), &urfavecli.StringFlag{Name: "mode", Usage: "実行モード (secure または dev)"}}, func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.up(ctx, cmd.String("dir"), cmd.String("mode"))
-		}),
-		a.simpleProjectCommand("agent", "Project Agentを起動", []urfavecli.Flag{dirFlag()}, func(ctx context.Context, cmd *urfavecli.Command) error { return a.agent(ctx, cmd.String("dir")) }),
+		a.simpleProjectCommand("up", "Project VMを準備", projectSelectorFlags(&urfavecli.StringFlag{Name: "mode", Usage: "実行モード (secure または dev)"}), a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.up(ctx, dir, cmd.String("mode"))
+		})),
+		a.simpleProjectCommand("agent", "Project Agentを起動", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.agent(ctx, dir) })),
 		a.gitCommand(), a.webCommand(),
-		a.simpleProjectCommand("shell", "隔離VM内のsanitized shellを起動", []urfavecli.Flag{dirFlag()}, func(ctx context.Context, cmd *urfavecli.Command) error { return a.shell(ctx, cmd.String("dir")) }),
-		a.simpleProjectCommand("status", "Projectの状態を表示", []urfavecli.Flag{dirFlag()}, func(ctx context.Context, cmd *urfavecli.Command) error { return a.status(ctx, cmd.String("dir")) }),
+		a.simpleProjectCommand("shell", "隔離VM内のsanitized shellを起動", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.shell(ctx, dir) })),
+		a.simpleProjectCommand("status", "Projectの状態を表示", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.status(ctx, dir) })),
 		a.changesCommand(),
-		a.simpleProjectCommand("approvals", "保留中のホスト承認を処理", []urfavecli.Flag{dirFlag()}, func(ctx context.Context, cmd *urfavecli.Command) error { return a.approvals(ctx, cmd.String("dir")) }),
-		a.simpleProjectCommand("recreate", "Project VMをクリーンな状態で再作成", []urfavecli.Flag{dirFlag(), &urfavecli.BoolFlag{Name: "discard-pending", Usage: "保留中のChange Setを破棄"}}, func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.recreate(ctx, cmd.String("dir"), cmd.Bool("discard-pending"))
-		}),
-		a.simpleProjectCommand("down", "Project VMを停止して隔離状態を保持", []urfavecli.Flag{dirFlag()}, func(ctx context.Context, cmd *urfavecli.Command) error { return a.down(ctx, cmd.String("dir")) }),
-		a.simpleProjectCommand("destroy", "Project状態とホスト設定を削除", []urfavecli.Flag{dirFlag(), &urfavecli.BoolFlag{Name: "yes", Usage: "削除を明示的に確認"}, &urfavecli.BoolFlag{Name: "discard-pending", Usage: "保留中のChange Setと未export変更を破棄"}}, func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.destroy(ctx, cmd.String("dir"), cmd.Bool("yes"), cmd.Bool("discard-pending"))
-		}),
+		a.simpleProjectCommand("approvals", "保留中のホスト承認を処理", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.approvals(ctx, dir) })),
+		a.simpleProjectCommand("recreate", "Project VMをクリーンな状態で再作成", projectSelectorFlags(&urfavecli.BoolFlag{Name: "discard-pending", Usage: "保留中のChange Setを破棄"}), a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.recreate(ctx, dir, cmd.Bool("discard-pending"))
+		})),
+		a.downCommand(),
+		a.destroyCommand(),
 		a.firewallCommand(),
 		{Name: "_supervisor", Hidden: true, Flags: []urfavecli.Flag{dirFlag()}, Action: func(ctx context.Context, cmd *urfavecli.Command) error { return a.supervisor(ctx, cmd.String("dir")) }},
 	}
@@ -64,6 +62,29 @@ func (a *app) command() *urfavecli.Command {
 
 func (a *app) simpleProjectCommand(name, usage string, flags []urfavecli.Flag, action urfavecli.ActionFunc) *urfavecli.Command {
 	return &urfavecli.Command{Name: name, Usage: usage, Flags: flags, Action: rejectArguments(action)}
+}
+
+func (a *app) destroyCommand() *urfavecli.Command {
+	return &urfavecli.Command{
+		Name:  "destroy",
+		Usage: "Project状態とホスト設定を削除",
+		Flags: projectSelectorFlags(
+			&urfavecli.BoolFlag{Name: "yes", Usage: "削除を明示的に確認"},
+			&urfavecli.BoolFlag{Name: "discard-pending", Usage: "保留中のChange Setと未export変更を破棄"},
+		),
+		Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
+			return a.destroy(ctx, projectSelectorFromCommand(cmd), cmd.Bool("yes"), cmd.Bool("discard-pending"))
+		}),
+	}
+}
+
+func (a *app) downCommand() *urfavecli.Command {
+	return &urfavecli.Command{
+		Name: "down", Usage: "Project VMを停止して隔離状態を保持", Flags: projectSelectorFlags(),
+		Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
+			return a.down(ctx, projectSelectorFromCommand(cmd))
+		}),
+	}
 }
 
 func rejectArguments(action urfavecli.ActionFunc) urfavecli.ActionFunc {
@@ -107,13 +128,13 @@ func (a *app) configCommand() *urfavecli.Command {
 	commands := make([]*urfavecli.Command, 0, 6)
 	for _, action := range []string{"path", "edit", "validate", "diff", "apply", "show"} {
 		action := action
-		flags := []urfavecli.Flag{dirFlag()}
+		flags := projectSelectorFlags()
 		if action == "show" {
 			flags = append(flags, &urfavecli.BoolFlag{Name: "effective", Usage: "コンパイル済みのeffective policyを表示"})
 		}
-		commands = append(commands, &urfavecli.Command{Name: action, Usage: configActionUsage(action), Flags: flags, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.config(ctx, action, cmd.String("dir"), cmd.Bool("effective"))
-		})})
+		commands = append(commands, &urfavecli.Command{Name: action, Usage: configActionUsage(action), Flags: flags, Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.config(ctx, action, dir, cmd.Bool("effective"))
+		}))})
 	}
 	return &urfavecli.Command{Name: "config", Usage: "Projectのホスト設定を管理", Commands: commands}
 }
@@ -155,56 +176,56 @@ func (a *app) modelCommand() *urfavecli.Command {
 	auth := &urfavecli.Command{Name: "auth", Usage: "Projectのモデル認証方式を変更", Commands: []*urfavecli.Command{}}
 	for _, mode := range []string{"api-key", "oauth"} {
 		mode := mode
-		auth.Commands = append(auth.Commands, &urfavecli.Command{Name: mode, Usage: mode + "認証を使用", Flags: []urfavecli.Flag{dirFlag()}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.modelPolicy(ctx, "auth", mode, cmd.String("dir"), nil)
-		})})
+		auth.Commands = append(auth.Commands, &urfavecli.Command{Name: mode, Usage: mode + "認証を使用", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.modelPolicy(ctx, "auth", mode, dir, nil)
+		}))})
 	}
 	return &urfavecli.Command{Name: "model", Usage: "Model Gatewayの認証方式と許可モデルを管理", Commands: []*urfavecli.Command{
 		auth,
-		{Name: "set", Usage: "許可モデルを設定", Flags: []urfavecli.Flag{dirFlag(), &urfavecli.StringSliceFlag{Name: "model", Usage: "許可するモデルID (複数回指定可能)"}}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.modelPolicy(ctx, "set", "", cmd.String("dir"), cmd.StringSlice("model"))
-		})},
-		{Name: "list", Usage: "利用可能なモデルと許可状態を表示", Flags: []urfavecli.Flag{dirFlag()}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.modelPolicy(ctx, "list", "", cmd.String("dir"), nil)
-		})},
+		{Name: "set", Usage: "許可モデルを設定", Flags: projectSelectorFlags(&urfavecli.StringSliceFlag{Name: "model", Usage: "許可するモデルID (複数回指定可能)"}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.modelPolicy(ctx, "set", "", dir, cmd.StringSlice("model"))
+		}))},
+		{Name: "list", Usage: "利用可能なモデルと許可状態を表示", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.modelPolicy(ctx, "list", "", dir, nil)
+		}))},
 	}}
 }
 
 func (a *app) gitCommand() *urfavecli.Command {
 	remote := &urfavecli.Command{Name: "remote", Usage: "Git Gatewayの固定remoteを管理", Commands: []*urfavecli.Command{
-		{Name: "add", Usage: "固定HTTPS remoteを追加", Flags: []urfavecli.Flag{dirFlag(), &urfavecli.StringFlag{Name: "name", Usage: "remote名"}, &urfavecli.StringFlag{Name: "url", Usage: "credentialを含まない固定HTTPS .git URL"}}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.gitPolicy(ctx, "remote-add", cmd.String("dir"), cmd.String("name"), cmd.String("url"))
-		})},
-		{Name: "remove", Usage: "固定remoteを削除", Flags: []urfavecli.Flag{dirFlag(), &urfavecli.StringFlag{Name: "name", Usage: "remote名"}}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.gitPolicy(ctx, "remote-remove", cmd.String("dir"), cmd.String("name"), "")
-		})},
-		{Name: "list", Usage: "固定remoteを一覧表示", Flags: []urfavecli.Flag{dirFlag()}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.gitPolicy(ctx, "remote-list", cmd.String("dir"), "", "")
-		})},
+		{Name: "add", Usage: "固定HTTPS remoteを追加", Flags: projectSelectorFlags(&urfavecli.StringFlag{Name: "name", Usage: "remote名"}, &urfavecli.StringFlag{Name: "url", Usage: "credentialを含まない固定HTTPS .git URL"}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.gitPolicy(ctx, "remote-add", dir, cmd.String("name"), cmd.String("url"))
+		}))},
+		{Name: "remove", Usage: "固定remoteを削除", Flags: projectSelectorFlags(&urfavecli.StringFlag{Name: "name", Usage: "remote名"}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.gitPolicy(ctx, "remote-remove", dir, cmd.String("name"), "")
+		}))},
+		{Name: "list", Usage: "固定remoteを一覧表示", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.gitPolicy(ctx, "remote-list", dir, "", "")
+		}))},
 	}}
 	return &urfavecli.Command{Name: "git", Usage: "Project Git Gatewayを管理", Commands: []*urfavecli.Command{
 		remote,
-		{Name: "disable", Usage: "Git Gatewayを無効化", Flags: []urfavecli.Flag{dirFlag()}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.gitPolicy(ctx, "disable", cmd.String("dir"), "", "")
-		})},
+		{Name: "disable", Usage: "Git Gatewayを無効化", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.gitPolicy(ctx, "disable", dir, "", "")
+		}))},
 	}}
 }
 
 func (a *app) webCommand() *urfavecli.Command {
 	return &urfavecli.Command{Name: "web", Usage: "Project Web Gatewayを管理", Commands: []*urfavecli.Command{
-		{Name: "enable", Usage: "許可originを固定してWeb Gatewayを有効化", Flags: []urfavecli.Flag{dirFlag(),
+		{Name: "enable", Usage: "許可originを固定してWeb Gatewayを有効化", Flags: projectSelectorFlags(
 			&urfavecli.BoolFlag{Name: "include-subdomains", Usage: "指定originのsubdomainも許可"},
 			&urfavecli.BoolFlag{Name: "default-origins", Value: true, Usage: "組み込みの一般的な開発origin presetを含める"},
 			&urfavecli.StringSliceFlag{Name: "origin", Usage: "許可origin (複数回指定可能)"},
-		}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.webPolicy(ctx, "enable", cmd.String("dir"), cmd.Bool("include-subdomains"), cmd.Bool("default-origins"), cmd.StringSlice("origin"))
-		})},
-		{Name: "refresh", Usage: "固定blocklist snapshotを更新", Flags: []urfavecli.Flag{dirFlag()}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.webPolicy(ctx, "refresh", cmd.String("dir"), false, false, nil)
-		})},
-		{Name: "disable", Usage: "Web Gatewayを無効化", Flags: []urfavecli.Flag{dirFlag()}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.webPolicy(ctx, "disable", cmd.String("dir"), false, false, nil)
-		})},
+		), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.webPolicy(ctx, "enable", dir, cmd.Bool("include-subdomains"), cmd.Bool("default-origins"), cmd.StringSlice("origin"))
+		}))},
+		{Name: "refresh", Usage: "固定blocklist snapshotを更新", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.webPolicy(ctx, "refresh", dir, false, false, nil)
+		}))},
+		{Name: "disable", Usage: "Web Gatewayを無効化", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.webPolicy(ctx, "disable", dir, false, false, nil)
+		}))},
 	}}
 }
 
@@ -212,9 +233,9 @@ func (a *app) changesCommand() *urfavecli.Command {
 	commands := make([]*urfavecli.Command, 0, 2)
 	for _, action := range []string{"export", "apply"} {
 		action := action
-		commands = append(commands, &urfavecli.Command{Name: action, Usage: map[string]string{"export": "VM変更をtrusted Change Setとしてexport", "apply": "承認したChange SetをホストProjectへ適用"}[action], Flags: []urfavecli.Flag{dirFlag()}, Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.changes(ctx, action, cmd.String("dir"))
-		})})
+		commands = append(commands, &urfavecli.Command{Name: action, Usage: map[string]string{"export": "VM変更をtrusted Change Setとしてexport", "apply": "承認したChange SetをホストProjectへ適用"}[action], Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.changes(ctx, action, dir)
+		}))})
 	}
 	return &urfavecli.Command{Name: "changes", Usage: "Project変更をexport・適用", Commands: commands}
 }

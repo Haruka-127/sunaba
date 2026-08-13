@@ -93,3 +93,47 @@ func TestListProjectStatesIsReadOnlyAndIsolatesUnsafeEntries(t *testing.T) {
 		t.Fatalf("unsafe entries were not isolated: %+v", byID)
 	}
 }
+
+func TestLookupProjectStateRequiresExactSafeDirectChild(t *testing.T) {
+	store := &Store{Root: filepath.Join(t.TempDir(), "sunaba")}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectsRoot := filepath.Join(store.Root, "projects")
+	projectID := "0123456789ab"
+	projectState := filepath.Join(projectsRoot, projectID)
+	if err := os.Mkdir(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.LookupProjectState(projectID)
+	if err != nil || resolved.ProjectID != projectID || resolved.Path != projectState {
+		t.Fatalf("resolved=%+v error=%v", resolved, err)
+	}
+	for _, invalid := range []string{"", "0123456789a", "0123456789AB", "../0123456789ab", "0123456789abcdef"} {
+		if _, err := store.LookupProjectState(invalid); err == nil {
+			t.Errorf("invalid Project ID was accepted: %q", invalid)
+		}
+	}
+	if _, err := store.LookupProjectState("abcdefabcdef"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing Project ID error=%v", err)
+	}
+	if err := os.Chmod(projectState, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LookupProjectState(projectID); err == nil {
+		t.Fatal("unsafe Project state directory was accepted")
+	}
+	if err := os.RemoveAll(projectState); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, projectState); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LookupProjectState(projectID); err == nil {
+		t.Fatal("symlink Project state directory was accepted")
+	}
+}

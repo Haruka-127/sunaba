@@ -105,11 +105,16 @@ bin/sunaba web disable --dir /absolute/project/path
 
 既定の利用者設定は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/`、内部stateは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`配下です。内部stateはProject policy、audit、lease、managed tool、pending Change Setをmode `0700`/`0600`で保持します。Project本文やcredentialをauditへ記録しません。
 
+Projectを対象にする公開commandでは`--dir`の代わりに、`project list`が表示する完全な12桁のProject IDを`--project-id`へ指定できます。通常操作は保存されたProject rootが現存してpolicyとのidentityが一致する場合だけIDを解決します。元のProject folderやpolicyを失ったstateに対しては、`down`と`destroy`だけが復旧用のID指定を受け付けます。`--dir`と`--project-id`は同時指定できず、どちらも省略するとcurrent directoryを使います。
+
 ```sh
 bin/sunaba status --dir /absolute/project/path
+bin/sunaba status --project-id 0123456789ab
 bin/sunaba recreate --dir /absolute/project/path
 bin/sunaba down --dir /absolute/project/path
 bin/sunaba destroy --dir /absolute/project/path --yes --discard-pending
+# 元のProject folderが存在しない場合はproject listの完全なIDを使う
+bin/sunaba destroy --project-id 0123456789ab --yes --discard-pending
 ```
 
 cleanupは`sunaba-` prefixだけでは削除せず、完全名、owner/project/session label、永続leaseを再検証します。他ユーザーのcontainer、network、volume、imageは変更しません。

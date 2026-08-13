@@ -54,24 +54,25 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	if output, err := runSunaba("", "project", "init", project, "--mode", "secure"); err != nil {
 		t.Fatalf("project init: %v: %s", err, output)
 	}
-	up, err := runSunaba("", "up", "--dir", project)
+	projectID := state.ProjectID(project)
+	up, err := runSunaba("", "up", "--project-id", projectID)
 	if err != nil || !strings.Contains(up, "prepared and paused in secure mode") {
 		t.Fatalf("up error=%v output=%s", err, up)
 	}
-	projectState := filepath.Join(xdg, "sunaba", "projects", state.ProjectID(project))
+	projectState := filepath.Join(xdg, "sunaba", "projects", projectID)
 	locator := filepath.Join(projectState, "active-approval-control.json")
 	cleaned := false
 	defer func() {
 		if !cleaned {
-			_, _ = runSunaba("", "destroy", "--dir", project, "--yes", "--discard-pending")
+			_, _ = runSunaba("", "destroy", "--project-id", projectID, "--yes", "--discard-pending")
 		}
 	}()
-	status, err := runSunaba("", "status", "--dir", project)
+	status, err := runSunaba("", "status", "--project-id", projectID)
 	if err != nil || !strings.Contains(status, "=paused/secure") {
 		t.Fatalf("paused status after up error=%v output=%s", err, status)
 	}
 	firstShell := "printf persistent > persistent.txt\nprintf '\\033]52;c;evil\\a\\n'\n"
-	first, err := runSunaba(firstShell, "shell", "--dir", project)
+	first, err := runSunaba(firstShell, "shell", "--project-id", projectID)
 	if err != nil {
 		t.Fatalf("first shell: %v: %s", err, first)
 	}
@@ -86,7 +87,7 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	if err != nil || !strings.Contains(second, "persistent") {
 		t.Fatalf("persistent shell state error=%v output=%s", err, second)
 	}
-	exported, err := runSunaba("", "changes", "export", "--dir", project)
+	exported, err := runSunaba("", "changes", "export", "--project-id", projectID)
 	if err != nil || !strings.Contains(exported, "persistent.txt") || !strings.Contains(exported, "Change Set:") {
 		t.Fatalf("CLI export error=%v output=%s", err, exported)
 	}
@@ -100,7 +101,10 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if output, err := runSunaba("", "destroy", "--dir", project, "--yes", "--discard-pending"); err != nil {
+	if err := os.RemoveAll(project); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runSunaba("", "destroy", "--project-id", projectID, "--yes", "--discard-pending"); err != nil {
 		t.Fatalf("destroy: %v: %s", err, output)
 	}
 	cleaned = true

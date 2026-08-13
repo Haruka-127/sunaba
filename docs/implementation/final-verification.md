@@ -34,6 +34,8 @@ SUNABA_FUZZ=1 scripts/verify.sh
 
 2026-08-12のhost対話設定追加でも通常gateを再実行してPASSした。`config edit`のcancel/EOF/input上限、dev警告、固定Model catalog選択、検出Git remoteの明示選択、Git Gateway remote構成、宣言設定と実効policyの同期適用をunit/CLI testで固定した。fuzzとApple Container実機integrationはこの変更では再実行していない。
 
+2026-08-13の共通Project ID selector追加でも通常gateを再実行してPASSした。すべての公開Project操作で`--project-id`の完全一致、`--dir`との排他、重複指定を共通化し、通常操作ではread-only policy、Project ID、現存するcanonical Project rootを検証する。復旧操作の`down`と`destroy`では、unsafe/symlink stateとSupervisor ID不一致を拒否し、元Project directoryとpolicy・host設定がないsafeな`unknown` stateを扱う経路をunit/race/CLI/static gateで検証した。公開CLI integrationは`up`、`status`、`shell`、`changes export`をID指定で実行し、元Project directoryを除去してからID指定でdestroyする経路へ更新してintegration tagでcompileした。Apple Container実機integrationとfuzzはこの変更では再実行していない。
+
 ## 最新の実機gate
 
 2026-08-11の最新HEADで次を直接実行した。

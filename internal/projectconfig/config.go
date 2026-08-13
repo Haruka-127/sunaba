@@ -213,10 +213,21 @@ func (s *Store) Remove(projectID string) error {
 	if filepath.Dir(paths.Directory) != filepath.Join(s.Root, "projects") || filepath.Base(paths.Directory) != projectID {
 		return fmt.Errorf("refusing to remove an unbound Project configuration directory")
 	}
+	if _, err := os.Lstat(s.Root); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
 	if err := checkPrivateDirectory(s.Root); err != nil {
 		return err
 	}
-	if err := checkPrivateDirectory(filepath.Join(s.Root, "projects")); err != nil {
+	projectsRoot := filepath.Join(s.Root, "projects")
+	if _, err := os.Lstat(projectsRoot); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := checkPrivateDirectory(projectsRoot); err != nil {
 		return err
 	}
 	info, err := os.Lstat(paths.Directory)

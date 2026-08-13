@@ -257,20 +257,25 @@ pf操作には、[`plan/allowed-host-operations.md`](./plan/allowed-host-operati
 
 ## 10. 状態確認、停止、再生成、破棄
 
+Projectを対象にする公開commandでは`--dir "$PROJECT"`の代わりに、`project list`が表示する完全な12桁のIDを`--project-id`へ指定できる。通常操作のID指定は、保存されたProject rootが現存しpolicyとのidentityが一致するときだけ成功する。元のProject folderやpolicyを失ったstateは`down`と`destroy`だけがIDで扱える。`--dir`と`--project-id`は同時指定できず、どちらも省略した場合はcurrent directoryが対象になる。
+
 ```sh
 bin/sunaba project list
 bin/sunaba project list --active
 bin/sunaba status --dir "$PROJECT"
+bin/sunaba status --project-id 0123456789ab
 bin/sunaba down --dir "$PROJECT"
 bin/sunaba recreate --dir "$PROJECT"
 bin/sunaba destroy --dir "$PROJECT" --yes --discard-pending
+# 元のProject folderが存在しない場合
+bin/sunaba destroy --project-id 0123456789ab --yes --discard-pending
 ```
 
 - `project list`: 登録済みProjectとSupervisor、VM、pending Change Setの状態を一覧表示する。`--active`は到達可能なSupervisorまたはrunning状態のsunaba所有VMがあるProjectだけを表示する。pause中のVMでもSupervisorが起動中なら表示対象になる。自動修復や停止は行わず、機械処理には`--json`を使用できる
 - `status`: mode、VM状態、期限、resource、quota、Git/Web policy、pending Change Setを表示する
 - `down`: secure VMをpauseし、隔離されたupperを保持する
 - `recreate`: VMがあれば原則exportし、次回をclean host Snapshotから開始する。pending Change Setはapplyまたは明示破棄が必要
-- `destroy`: sunabaのProject state、host-only Project設定、所有確認済みVMを削除する。host Project自体は削除しない。未export/pending変更の破棄には`--discard-pending`が必要
+- `destroy`: sunabaのProject state、host-only Project設定、所有確認済みVMを削除する。host Project自体は削除しない。`--project-id`には`project list`が表示した12桁の小文字16進IDを完全一致で指定でき、元のProject folderが存在しない`unknown`状態も回収できる。`--dir`と`--project-id`は同時指定できない。未export/pending変更の破棄には`--discard-pending`が必要
 
 既定の利用者設定は`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/`、内部stateは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/`に置かれる。利用者設定は`config` commandで検証・適用し、内部stateを手作業で編集・削除しない。
 
