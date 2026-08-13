@@ -7,12 +7,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"sunaba/internal/audit"
+	"sunaba/internal/terminal"
 )
 
 var ErrApprovalInvalid = errors.New("approval is invalid, expired, or already consumed")
@@ -169,22 +168,5 @@ func equalBinding(left, right Binding) bool {
 }
 
 func SanitizeText(text string) string {
-	var output strings.Builder
-	for len(text) > 0 {
-		r, size := utf8.DecodeRuneInString(text)
-		if r == utf8.RuneError && size == 1 {
-			output.WriteString("<INVALID-UTF8>")
-			text = text[1:]
-			continue
-		}
-		if r == '\n' {
-			output.WriteString("<U+000A>")
-		} else if r == '\r' || r == '\t' || r == 0x1b || r == 0x7f || (r >= 0 && r < 0x20) || (r >= 0x80 && r <= 0x9f) || r == 0x200e || r == 0x200f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
-			fmt.Fprintf(&output, "<U+%04X>", r)
-		} else {
-			output.WriteRune(r)
-		}
-		text = text[size:]
-	}
-	return output.String()
+	return terminal.SingleLine(text)
 }

@@ -20,7 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
+
+	"sunaba/internal/terminal"
 )
 
 const maximumJSONResponse = 16 << 20
@@ -365,27 +366,5 @@ func sanitizeValue(value any) any {
 }
 
 func sanitizeTerminalText(text string) string {
-	var output strings.Builder
-	for len(text) > 0 {
-		r, size := utf8.DecodeRuneInString(text)
-		if r == utf8.RuneError && size == 1 {
-			output.WriteString("<INVALID-UTF8>")
-			text = text[size:]
-			continue
-		}
-		if unsafeTerminalRune(r) {
-			fmt.Fprintf(&output, "<U+%04X>", r)
-		} else {
-			output.WriteRune(r)
-		}
-		text = text[size:]
-	}
-	return output.String()
-}
-
-func unsafeTerminalRune(r rune) bool {
-	if (r >= 0 && r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
-		return true
-	}
-	return r == 0x200e || r == 0x200f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
+	return terminal.MultilineWithTabs(text)
 }

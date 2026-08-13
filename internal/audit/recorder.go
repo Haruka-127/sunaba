@@ -9,9 +9,10 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
+
+	"sunaba/internal/terminal"
 )
 
 const maxRecordBytes = 64 << 10
@@ -125,22 +126,7 @@ func redactText(value string) string {
 }
 
 func sanitizeText(value string) string {
-	var output strings.Builder
-	for len(value) > 0 {
-		r, size := utf8.DecodeRuneInString(value)
-		if r == utf8.RuneError && size == 1 {
-			output.WriteString("<INVALID-UTF8>")
-			value = value[1:]
-			continue
-		}
-		if r == '\n' || r == '\r' || r == '\t' || r == 0x1b || r == 0x7f || (r >= 0 && r < 0x20) || (r >= 0x80 && r <= 0x9f) || r == 0x200e || r == 0x200f || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
-			fmt.Fprintf(&output, "<U+%04X>", r)
-		} else {
-			output.WriteRune(r)
-		}
-		value = value[size:]
-	}
-	return output.String()
+	return terminal.SingleLine(value)
 }
 
 func (r *Recorder) ensureRoot() error {

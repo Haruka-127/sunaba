@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"sunaba/internal/terminal"
 )
 
 const maxHookMessageBytes = 256 << 10
@@ -238,16 +240,7 @@ func RunPreReceiveHook(socketPath, token, objectDirectory string, input io.Reade
 }
 
 func sanitizeHookMessage(message string) string {
-	if len(message) > 1024 {
-		message = message[:1024]
-	}
-	var output strings.Builder
-	for _, character := range message {
-		if character >= 0x20 && character < 0x7f {
-			output.WriteRune(character)
-		}
-	}
-	return output.String()
+	return terminal.ASCIIHookMessage(message, 1024)
 }
 
 func filepathIsPrivateSocketParent(socketPath string) bool {
