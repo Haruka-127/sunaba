@@ -19,11 +19,11 @@ OpenAIやGitの実credentialはホストに保持され、VMにはsession限定�
 - Apple silicon搭載Mac
 - macOS 26
 - Apple Container exact `1.2.2`
-- OpenCode host TUI exact `1.18.16`
+- OpenCode host TUI: sunabaがlockしたv1系exact version（bootstrap値`1.18.16`）
 - Go 1.22以降（ソースからビルドする場合）
 - OpenAI API key、またはCodexを利用できるChatGPT subscription
 
-Apple ContainerとOpenCodeは検証済みのversionへ固定されています。範囲指定、`latest`、自動update、OpenCode v2、hostとguestのversion混在は使用できません。
+Apple ContainerとOpenCodeは検証済みのversionへ固定されます。OpenCodeは明示的な確認と適用で別のv1系exact versionへ更新できますが、範囲指定、session開始時の`latest`解決、OpenCode自身の自動update、OpenCode v2、hostとguestのversion混在は使用できません。
 
 ### Apple Containerを起動する
 
@@ -36,7 +36,7 @@ container system version
 
 ### OpenCodeをインストールする
 
-macOS側へ[OpenCode v1.18.16](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)のApple silicon版をインストールし、`opencode`コマンドを実行できる状態にします。特定のdirectoryへ手動配置する必要はありません。インストール後にversionを確認してください。
+初回はmacOS側へ[OpenCode v1.18.16](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)のApple silicon版をインストールし、`opencode`コマンドを実行できる状態にします。特定のdirectoryへ手動配置する必要はありません。インストール後にversionを確認してください。
 
 ```sh
 opencode --version
@@ -48,7 +48,7 @@ opencode --version
 1e670c94341a374824dc6700b6f38b2cb6634baf3ca20e645084c33ce6639320
 ```
 
-sunabaは実行前に、macOSへインストールされたOpenCodeのversionと実行ファイルの固定digestを検証し、検証済みbinaryをsunabaの管理領域へcopyします。不一致の場合、別versionへ自動fallbackしません。固定値は[`internal/dependency/manifest.json`](../internal/dependency/manifest.json)で確認できます。
+sunabaは実行前に、macOSへインストールされたOpenCodeのversionと実行ファイルの固定digestを検証し、検証済みbinaryをsunabaの管理領域へcopyします。不一致の場合、別versionへ自動fallbackしません。初回のbootstrap固定値は[`internal/dependency/manifest.json`](../internal/dependency/manifest.json)で確認できます。
 
 VM側のOpenCode serverを利用者がインストールする必要はありません。sunabaはAgent imageのbuild時に固定したLinux arm64 artifactを取得し、SHA-256を検証してimageへ組み込みます。OpenCodeを更新するときは、互換性を検証したうえでhost TUIとVM側serverを同じversionへ更新します。VM側だけを独立して更新したり、`latest`へ自動追従したりはしません。
 
@@ -76,6 +76,95 @@ sunaba help
 ```
 
 `sunaba help`が実行できることを確認してください。以降の例は、`sunaba`、`sunaba-guest-relay`、`sunaba-git-hook`が同じ`PATH`上のdirectoryに配置されている前提です。
+
+### 初回setupを実行する
+
+Apple Container systemを起動し、macOS側でbootstrap版の`opencode`を実行できる状態にしてから、次を実行します。
+
+```sh
+sunaba setup
+```
+
+`setup`はmacOS、Apple Container、host OpenCodeのversionと実行ファイルdigestを検証し、VM用OpenCodeを組み込んだAgent imageをbuildします。すべて成功した場合だけ、適用済みversion lockを確定します。`project init`、`up`、`agent`、`shell`はsetup完了前に拒否されます。
+
+version設定とlockはProjectやrepository内ではなく、次のhost-only fileへ保存されます。
+
+```text
+${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/versions.json
+${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/versions.lock.json
+```
+
+実際のpathと現在の宣言・lockは次のコマンドで確認できます。
+
+```sh
+sunaba versions path
+sunaba versions show
+```
+
+`versions.json`は利用者が直接編集することもできます。exact指定の形式は次のとおりです。編集後もactive lockは変わらず、反映には`update check`と`update apply`が必要です。
+
+```json
+{
+  "schema_version": 1,
+  "opencode": {
+    "strategy": "exact",
+    "value": "1.18.16"
+  }
+}
+```
+
+channel指定では`strategy`を`channel`、`value`を`v1-stable`にします。未知field、v2、range、`latest`、不正なfile modeやsymlinkは拒否されます。`versions.lock.json`はsunabaが生成するため、手作業で編集しないでください。
+
+初回からbootstrap以外のv1 versionを使う場合は、Agent imageをまだ作らず宣言fileだけを用意します。その後の手順は[「OpenCodeを更新する」](#opencodeを更新する)と同じです。
+
+```sh
+sunaba setup --config-only
+printf 'OpenCode v1 exact version: '
+read -r OPENCODE_VERSION
+sunaba versions set "$OPENCODE_VERSION"
+sunaba update check
+# checkが示したexact versionのOpenCodeをmacOSへインストールする
+sunaba update apply
+```
+
+### OpenCodeを更新する
+
+特定のv1系exact versionへ更新する場合は、そのversionを宣言します。
+
+```sh
+printf 'OpenCode v1 exact version: '
+read -r OPENCODE_VERSION
+sunaba versions set "$OPENCODE_VERSION"
+```
+
+明示的に確認した時点の最新stable v1を選びたい場合だけ、固定channelを宣言します。この設定でも`up`や`agent`の実行時には更新されません。
+
+```sh
+sunaba versions track v1-stable
+```
+
+次に更新候補を確認します。
+
+```sh
+sunaba update check
+```
+
+`update check`は公式releaseからexact versionとsource commitを解決し、macOS/guest artifactをhost-only quarantineへdownloadしてSHA-256を計算します。現在のlock、Project policy、VMは変更しません。表示されたexact versionのApple silicon版OpenCodeをmacOSへインストールし、versionを確認します。
+
+```sh
+opencode --version
+```
+
+すべてのsunaba VMとSupervisorを終了してから、保存済み候補を適用します。pending Change Setはhost側に保持したままでも構いません。
+
+```sh
+sunaba project list --active
+sunaba update apply
+```
+
+`update apply`はcheck後に設定や現行lockが変わっていないこと、候補が期限内であること、macOS側OpenCodeのversionとdigestが候補と一致することを再検証します。その後、同じguest versionのAgent imageをno-cacheでbuildし、Project policyとglobal lockをjournal付きtransactionで切り替えます。apply時にreleaseの`latest`を再解決せず、旧imageや旧managed TUIを自動削除しません。
+
+VM内のOpenCodeだけを直接updateする操作はありません。host TUIとguest serverは常に同じlockから更新されます。
 
 ## OpenAI credentialを登録する
 
@@ -371,6 +460,7 @@ sunaba destroy \
 
 ```sh
 container system version
+sunaba versions show
 sunaba project list
 sunaba status --dir /path/to/project
 sunaba credentials openai oauth status
@@ -386,7 +476,7 @@ sunaba credentials openai api-key status
 - pending Change Setがある: `changes apply`で反映するか、破棄を明示して`recreate`または`destroy`する
 - `capability expired`: `changes export`で成果物を保存するか、`recreate`でclean環境へ移る
 - baseline競合: host側の変更を整理し、新しいSnapshotから作業をやり直す
-- OpenCode versionまたはdigest不一致: `1.18.16`の固定artifactを再取得する
+- OpenCode versionまたはdigest不一致: `sunaba versions show`でactive lockのexact versionを確認し、そのversionの公式Apple silicon artifactをmacOSへ再インストールする
 - Web blocklist期限切れ: VMがない状態で`web refresh`を実行する
 
 Apple Container clientが停止・削除中に応答しなくなった場合、任意のcontainerやserviceを広く停止・削除しないでください。[ホスト操作の許可範囲](./plan/allowed-host-operations.md)にある限定復旧手順を確認し、個別承認が必要な操作は実行前に承認を得てください。

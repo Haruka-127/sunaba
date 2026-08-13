@@ -31,9 +31,18 @@ dependency manifest schema v2は次を固定する。
 - base OCI index digest
 - embedded `Containerfile` / `entrypoint.sh`のSHA-256
 
-image buildはembedded bytesをmanifestへ再照合してから実行する。version更新candidateはexact versionが変わり、artifact digest、runtime version、lifecycle、network isolation、copy/export、resource limitの全証拠が揃わなければ拒否する。`latest`と部分的な更新証拠はtestで拒否する。
+image buildはembedded bytesをmanifestへ再照合してから実行する。Apple Container、base image、build inputを変更する開発時のdependency candidateは、exact versionが変わり、artifact digest、runtime version、lifecycle、network isolation、copy/export、resource limitの全証拠が揃わなければ拒否する。利用者向けのOpenCode-only updateはこれらのplatform pinを完全一致で維持し、OpenCodeのofficial artifact、source tag/commit、host executable digest、guest image buildだけを差し替える。`latest`と部分的なplatform更新証拠はtestで拒否する。
 
-現行固定版の再検証にはPhase 0〜4の実機gateを再実行する。新versionへ更新するときは、先にmanifest/source pinをreviewし、同じgateの結果を新しいimplementation recordへ記録する。自動updateは行わない。
+現行固定版の再検証にはPhase 0〜4の実機gateを再実行する。新versionへ更新するときは、先にmanifest/source pinをreviewし、同じgateの結果を新しいimplementation recordへ記録する。Agent Session開始時の自動updateは行わない。
+
+利用者向けの明示更新経路として、host-onlyな`versions.json` / `versions.lock.json`と`setup`、`versions`、`update check|apply`を追加した。
+
+- version宣言はv1系exactまたは固定channel `v1-stable`だけを受理し、channelは`update check`時だけexactへ解決する
+- checkはGitHubの公開release/tag APIからofficial asset名とsource commitを確認し、host/guest artifactをprivate quarantineへ取得してarchive/executable digestを実測する
+- candidateは設定digest、現行lock digest、exact manifest、quarantine artifact digest、有効期限へ束縛し、applyはreleaseを再解決しない
+- applyはsystem OpenCodeのexact version/executable digest、Apple Container、全VM/Supervisor不在、全Projectの現行dependency identityを再検証し、Agent imageをno-cache buildする
+- Project policy、global active dependency、lockの切替はglobal operation lockとprivate journalを使い、通常Project操作のshared lockとsetup/updateのexclusive lockを競合させる。commit decision前の中断はrollback、decision後はroll-forwardする。pending Change Setと旧imageは削除しない
+- `project init`はsetup完了前に拒否し、`up`、`agent`、`shell`、SupervisorはProject dependencyとactive lockの完全一致を要求する。`config apply`も埋め込みbootstrap値ではなくactive lockを維持する
 
 ## Project policy migration
 
@@ -106,7 +115,7 @@ scripts/verify.sh
 - `sunaba`、Linux/AArch64 guest relay、Git hook helperのbuildとguest relay ELF形式検証
 - CLI helpと旧unsafe entrypointのstatic boundary
 
-static boundaryは旧`_audit` daemon、永続`server-password`/Project env API、`OPENAI_API_KEY`環境変数、Project bind mount、default network、firewall bypass、guest側automatic approvalがproduction codeへ戻ることも拒否する。旧prototypeのstate/audit API自体を削除し、global image stateはowner-only mode `0600` regular fileとしてno-followで読み、同一private directory内のfsync済みtempから原子的に置換する。
+static boundaryは旧`_audit` daemon、永続`server-password`/Project env API、`OPENAI_API_KEY`環境変数、Project bind mount、default network、firewall bypass、guest側automatic approvalがproduction codeへ戻ることも拒否する。旧prototypeのstate/audit API自体を削除し、global active dependencyとhost-only version設定はowner-only mode `0600` regular fileとしてno-followで読み、同一private directory内のfsync済みtempから原子的に置換する。
 
 container mutation、pf、optional fuzz、live credentialは通常gateで暗黙に実行しない。
 

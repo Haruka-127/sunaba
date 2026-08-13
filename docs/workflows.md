@@ -14,7 +14,8 @@ secure modeの通常作業は、VM内で編集し、明示的にexportしてか�
 
 ```mermaid
 flowchart LR
-    Init[Project登録] --> Up[VMを準備]
+    Setup[利用基盤をsetup] --> Init[Project登録]
+    Init --> Up[VMを準備]
     Up --> Work[agent / shellで作業]
     Work --> Pause[VMをpause]
     Pause --> Work
@@ -34,21 +35,28 @@ flowchart LR
 
 ## 初めてのプロジェクト
 
-### 1. 利用基盤を確認する
+### 1. 利用基盤をsetupする
 
 [ユーザーガイドの「利用前の準備」](./user-guide.md#利用前の準備)に従ってApple Container、OpenCode、sunabaを用意し、OpenAI credentialを登録します。
 
-OAuthを使う場合:
+最初にApple Container、macOS側OpenCode、Agent image、適用済みversion lockを検証・作成します。
 
 ```sh
 container system version
+opencode --version
+sunaba setup
+sunaba versions show
+```
+
+その後、OAuthを使う場合:
+
+```sh
 sunaba credentials openai oauth status
 ```
 
 API keyを使う場合:
 
 ```sh
-container system version
 sunaba credentials openai api-key status
 ```
 
@@ -144,6 +152,45 @@ export後はVMが破棄されます。次の作業は、apply済みのhost Proje
 sunaba up --dir "$PROJECT"
 sunaba agent --dir "$PROJECT"
 ```
+
+## OpenCode v1を更新する
+
+まず、全Projectの隔離中の作業をexportするか破棄し、SupervisorとVMを終了します。export済みのpending Change Setはhost-only領域に保持できます。
+
+```sh
+sunaba project list --active
+```
+
+特定versionへ更新する場合:
+
+```sh
+printf 'OpenCode v1 exact version: '
+read -r OPENCODE_VERSION
+sunaba versions set "$OPENCODE_VERSION"
+sunaba update check
+```
+
+確認時点の最新stable v1を選ぶ場合:
+
+```sh
+sunaba versions track v1-stable
+sunaba update check
+```
+
+`update check`は候補のexact version、公式artifact、source commit、digestを確認してhost quarantineへ保存するだけで、現在の実行環境を変更しません。出力されたexact versionと同じOpenCodeをmacOSへインストールします。
+
+```sh
+opencode --version
+```
+
+macOS側のversionを確認後、保存済み候補を明示適用します。
+
+```sh
+sunaba update apply
+sunaba versions show
+```
+
+applyは同じversionのguest Agent imageを再buildし、すべてのProject policyとglobal lockをまとめて切り替えます。`agent`や`up`の実行だけでupdateされることはありません。apply後、pending Change SetがあるProjectは通常どおり確認・適用できます。
 
 ## Change Setを適用せず破棄する
 

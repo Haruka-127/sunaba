@@ -26,17 +26,18 @@ OpenCodeとその実行コマンドはVM内で自由に動かしながら、ホ�
 
 - Apple silicon Mac / macOS 26
 - Apple Container `1.2.2`
-- OpenCode host TUI / guest server `1.18.16`
+- OpenCode host TUI / guest server: 同じv1系exact version（初期値`1.18.16`）
 - Go 1.22以降（ソースからビルドする場合）
 - OpenAI API key、またはCodexを利用できるChatGPT subscription
 
-Apple ContainerとOpenCodeは検証済みのexact versionへ固定されています。`latest`への自動追従、OpenCode v2、host TUIとguest serverの異なるversionは使用できません。
+Apple ContainerとOpenCodeは検証済みのexact versionへ固定されます。OpenCodeは利用者が明示的な`update check` / `update apply`でv1系の別versionへ更新できますが、`latest`へのsession時の自動追従、OpenCode v2、host TUIとguest serverのversion混在は使用できません。
 
 ## 最短の利用例
 
-ビルド後、3つのsunaba binaryがあるdirectoryを`PATH`へ追加するか、3つとも既存の`PATH`上へ配置してください。また、macOS側へ固定versionのOpenCodeをインストールし、`opencode`コマンドを実行できる状態にします。credential登録を済ませたあと、対象プロジェクトで次を実行します。
+ビルド後、3つのsunaba binaryがあるdirectoryを`PATH`へ追加するか、3つとも既存の`PATH`上へ配置してください。また、macOS側へ固定versionのOpenCodeをインストールし、`opencode`コマンドを実行できる状態にします。最初に利用基盤をsetupし、credential登録を済ませたあと、対象プロジェクトで次を実行します。
 
 ```sh
+sunaba setup
 sunaba project init
 sunaba up
 sunaba agent
