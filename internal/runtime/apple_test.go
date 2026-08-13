@@ -2,23 +2,23 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestContainsExactImageTag(t *testing.T) {
-	var payload any
-	if err := json.Unmarshal([]byte(`[{"configuration":{"name":"sunaba-base:1.20"}}]`), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if containsExactString(payload, "sunaba-base:1.2") {
+func TestParseImageListMatchesOnlyConfigurationName(t *testing.T) {
+	payload := `[{"id":"sunaba-base:1.2","configuration":{"name":"sunaba-base:1.20"},"variants":[]}]`
+	if exists, err := parseImageList(payload, "sunaba-base:1.2"); err != nil || exists {
 		t.Fatal("partial image tag matched")
 	}
-	if !containsExactString(payload, "sunaba-base:1.20") {
-		t.Fatal("exact image tag did not match")
+	if exists, err := parseImageList(payload, "sunaba-base:1.20"); err != nil || !exists {
+		t.Fatalf("exact image tag did not match: exists=%t error=%v", exists, err)
+	}
+	if _, err := parseImageList(`[{"configuration":{"name":"ok","name":"other"}}]`, "ok"); err == nil {
+		t.Fatal("duplicate image schema key was accepted")
 	}
 }
 
@@ -62,29 +62,59 @@ func TestStopArgsUseBoundedGracePeriod(t *testing.T) {
 }
 
 func TestParseInspectLabels(t *testing.T) {
-	info, err := parseInspect(`{
-		"configuration": {"labels": {"dev.sunaba.test": "run-1"}},
-		"status": "running"
-	}`, "sunaba-test")
+	info, err := parseInspect(`[{
+		"id": "sunaba-test",
+		"configuration": {
+			"id": "sunaba-test",
+			"image": {"reference": "sunaba-base:test"},
+			"labels": {"dev.sunaba.test": "run-1"},
+			"resources": {"cpus": 2, "memoryInBytes": 2147483648},
+			"nested": {"id": "attacker", "state": "stopped"}
+		},
+		"status": {"state": "running", "networks": [{"ipv4Address": "192.168.64.3/24"}]}
+	}]`, "sunaba-test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Labels["dev.sunaba.test"] != "run-1" {
-		t.Fatalf("labels=%v", info.Labels)
+	if info.Name != "sunaba-test" || info.State != StateRunning || info.Image != "sunaba-base:test" || info.IP != "192.168.64.3" || info.CPUs != "2" || info.Memory != "2147483648" || info.Labels["dev.sunaba.test"] != "run-1" {
+		t.Fatalf("info=%+v", info)
 	}
 }
 
 func TestParseListPreservesOwnershipLabels(t *testing.T) {
-	items := parseList(`[{
-		"configuration": {"name": "sunaba-project-session", "labels": {
+	items, err := parseList(`[{
+		"id": "sunaba-project-session",
+		"configuration": {"id": "sunaba-project-session", "image": {"reference": "sunaba-base:test"}, "labels": {
 			"dev.sunaba.owner": "sunaba-supervisor",
 			"dev.sunaba.project": "project",
 			"dev.sunaba.session": "session"
-		}},
-		"status": "running"
+		}, "resources": {"cpus": 2, "memoryInBytes": 2147483648}},
+		"status": {"state": "running", "networks": []}
 	}]`)
-	if len(items) != 1 || items[0].Name != "sunaba-project-session" || items[0].State != StateRunning || items[0].Labels["dev.sunaba.owner"] != "sunaba-supervisor" {
-		t.Fatalf("parsed list=%+v", items)
+	if err != nil || len(items) != 1 || items[0].Name != "sunaba-project-session" || items[0].State != StateRunning || items[0].Labels["dev.sunaba.owner"] != "sunaba-supervisor" {
+		t.Fatalf("parsed list=%+v error=%v", items, err)
+	}
+}
+
+func TestAppleContainerParserRejectsSchemaDriftAndAmbiguity(t *testing.T) {
+	valid := `[{"id":"sunaba-test","configuration":{"id":"sunaba-test","image":{"reference":"sunaba-base:test"},"labels":{},"resources":{"cpus":2,"memoryInBytes":2147483648}},"status":{"state":"running","networks":[]}}]`
+	tests := map[string]string{
+		"malformed":         `[`,
+		"null list":         `null`,
+		"missing identity":  `[{"configuration":{"id":"sunaba-test","image":{"reference":"sunaba-base:test"},"labels":{},"resources":{"cpus":2,"memoryInBytes":2147483648}},"status":{"state":"running","networks":[]}}]`,
+		"identity mismatch": strings.Replace(valid, `"id":"sunaba-test","image"`, `"id":"other","image"`, 1),
+		"unknown state":     strings.Replace(valid, `"state":"running"`, `"state":"paused"`, 1),
+		"duplicate field":   strings.Replace(valid, `"state":"running"`, `"state":"running","state":"stopped"`, 1),
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseList(payload); err == nil {
+				t.Fatal("unsafe Apple Container JSON was accepted")
+			}
+		})
+	}
+	if _, err := parseInspect(valid, "different-name"); err == nil {
+		t.Fatal("inspect fallback identity mismatch was accepted")
 	}
 }
 

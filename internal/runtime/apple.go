@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,16 +32,9 @@ func (r *AppleContainer) ImageExists(ctx context.Context, tag string) (bool, err
 	defer cancel()
 	out, err := r.output(ctx, "container", "image", "ls", "--format", "json")
 	if err != nil {
-		out, err = r.output(ctx, "container", "images", "--format", "json")
-	}
-	if err != nil {
 		return false, err
 	}
-	var payload any
-	if err := json.Unmarshal([]byte(out), &payload); err != nil {
-		return false, fmt.Errorf("cannot parse container image list JSON: %w", err)
-	}
-	return containsExactString(payload, tag), nil
+	return parseImageList(out, tag)
 }
 
 func (r *AppleContainer) BuildImage(ctx context.Context, tag, contextDir string, buildArgs map[string]string) error {
@@ -286,7 +281,7 @@ func (r *AppleContainer) List(ctx context.Context) ([]Info, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseList(out), nil
+	return parseList(out)
 }
 
 func (r *AppleContainer) timeout() time.Duration {
@@ -325,191 +320,209 @@ func (r *AppleContainer) output(ctx context.Context, name string, args ...string
 	return out.String(), nil
 }
 
-func parseInspect(out, fallbackName string) (Info, error) {
-	var v any
-	if err := json.Unmarshal([]byte(out), &v); err != nil {
+type appleContainerDocument struct {
+	ID            string                       `json:"id"`
+	Configuration *appleContainerConfiguration `json:"configuration"`
+	Status        *appleContainerStatus        `json:"status"`
+}
+
+type appleContainerConfiguration struct {
+	ID        string            `json:"id"`
+	Image     appleImage        `json:"image"`
+	Labels    map[string]string `json:"labels"`
+	Resources appleResources    `json:"resources"`
+}
+
+type appleImage struct {
+	Reference string `json:"reference"`
+}
+
+type appleResources struct {
+	CPUs          int    `json:"cpus"`
+	MemoryInBytes uint64 `json:"memoryInBytes"`
+}
+
+type appleContainerStatus struct {
+	State    string         `json:"state"`
+	Networks []appleNetwork `json:"networks"`
+}
+
+type appleNetwork struct {
+	IPv4Address string `json:"ipv4Address"`
+}
+
+type appleImageListEntry struct {
+	Configuration *struct {
+		Name string `json:"name"`
+	} `json:"configuration"`
+}
+
+func parseImageList(out, tag string) (bool, error) {
+	if tag == "" {
+		return false, fmt.Errorf("container image tag is required")
+	}
+	data := []byte(out)
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return false, fmt.Errorf("cannot parse container image list JSON: %w", err)
+	}
+	var entries []appleImageListEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return false, fmt.Errorf("cannot parse container image list JSON: %w", err)
+	}
+	if entries == nil {
+		return false, fmt.Errorf("container image list JSON must be an array")
+	}
+	for index, entry := range entries {
+		if entry.Configuration == nil || entry.Configuration.Name == "" {
+			return false, fmt.Errorf("container image list entry %d is missing configuration.name", index)
+		}
+		if entry.Configuration.Name == tag {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func parseInspect(out, expectedName string) (Info, error) {
+	infos, err := parseContainerDocuments(out)
+	if err != nil {
 		return Info{}, err
 	}
-	if arr, ok := v.([]any); ok && len(arr) > 0 {
-		v = arr[0]
+	if len(infos) != 1 || expectedName == "" || infos[0].Name != expectedName {
+		return Info{}, fmt.Errorf("container inspect identity does not match %q", expectedName)
 	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return Info{}, errors.New("unexpected inspect JSON")
-	}
-	info := Info{Name: fallbackName}
-	info.Labels = findStringMap(m, "labels")
-	walk(m, func(path []string, val any) {
-		key := strings.ToLower(path[len(path)-1])
-		s, _ := val.(string)
-		switch key {
-		case "id", "name":
-			if info.Name == "" && s != "" {
-				info.Name = s
-			}
-		case "image", "imagename":
-			if info.Image == "" {
-				info.Image = s
-			}
-		case "status", "state":
-			if info.State == "" {
-				info.State = normalizeState(s)
-			}
-		case "ipaddress", "address", "ipv4address":
-			if info.IP == "" && looksIPv4(s) {
-				info.IP = strings.Split(s, "/")[0]
-			}
-		case "cpus":
-			if info.CPUs == "" {
-				info.CPUs = fmt.Sprint(val)
-			}
-		case "memory":
-			if info.Memory == "" {
-				info.Memory = fmt.Sprint(val)
-			}
-		}
-	})
-	if info.State == "" {
-		info.State = StateUnknown
-	}
-	return info, nil
+	return infos[0], nil
 }
 
-func findStringMap(value any, wantKey string) map[string]string {
-	switch x := value.(type) {
-	case map[string]any:
-		for key, child := range x {
-			if strings.EqualFold(key, wantKey) {
-				if raw, ok := child.(map[string]any); ok {
-					out := make(map[string]string, len(raw))
-					for label, value := range raw {
-						if text, ok := value.(string); ok {
-							out[label] = text
-						}
-					}
-					return out
-				}
-			}
-			if found := findStringMap(child, wantKey); found != nil {
-				return found
-			}
-		}
-	case []any:
-		for _, child := range x {
-			if found := findStringMap(child, wantKey); found != nil {
-				return found
-			}
-		}
-	}
-	return nil
+func parseList(out string) ([]Info, error) {
+	return parseContainerDocuments(out)
 }
 
-func parseList(out string) []Info {
-	var arr []map[string]any
-	if err := json.Unmarshal([]byte(out), &arr); err != nil {
-		return nil
+func parseContainerDocuments(out string) ([]Info, error) {
+	data := []byte(out)
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, fmt.Errorf("cannot parse Apple Container JSON: %w", err)
 	}
-	infos := make([]Info, 0, len(arr))
-	for _, m := range arr {
-		info := Info{Labels: findStringMap(m, "labels")}
-		walk(m, func(path []string, val any) {
-			key := strings.ToLower(path[len(path)-1])
-			s, _ := val.(string)
-			switch key {
-			case "id", "name":
-				if info.Name == "" {
-					info.Name = s
-				}
-			case "image", "imagename":
-				if info.Image == "" {
-					info.Image = s
-				}
-			case "status", "state":
-				if info.State == "" {
-					info.State = normalizeState(s)
-				}
-			case "ipaddress", "address", "ipv4address":
-				if info.IP == "" && looksIPv4(s) {
-					info.IP = strings.Split(s, "/")[0]
-				}
-			}
+	var documents []appleContainerDocument
+	if err := json.Unmarshal(data, &documents); err != nil {
+		return nil, fmt.Errorf("cannot parse Apple Container JSON: %w", err)
+	}
+	if documents == nil {
+		return nil, fmt.Errorf("Apple Container JSON must be an array")
+	}
+	infos := make([]Info, 0, len(documents))
+	seen := make(map[string]struct{}, len(documents))
+	for index, document := range documents {
+		if document.Configuration == nil || document.Status == nil || document.ID == "" ||
+			document.Configuration.ID == "" || document.ID != document.Configuration.ID ||
+			document.Configuration.Image.Reference == "" || document.Configuration.Labels == nil ||
+			document.Configuration.Resources.CPUs <= 0 || document.Configuration.Resources.MemoryInBytes == 0 ||
+			document.Status.Networks == nil {
+			return nil, fmt.Errorf("Apple Container entry %d is missing required identity, configuration, resources, or status", index)
+		}
+		if _, exists := seen[document.ID]; exists {
+			return nil, fmt.Errorf("Apple Container list contains duplicate identity %q", document.ID)
+		}
+		seen[document.ID] = struct{}{}
+		state, err := parseAppleContainerState(document.Status.State)
+		if err != nil {
+			return nil, fmt.Errorf("Apple Container %q: %w", document.ID, err)
+		}
+		ip, err := parseAppleContainerIP(document.Status.Networks)
+		if err != nil {
+			return nil, fmt.Errorf("Apple Container %q: %w", document.ID, err)
+		}
+		infos = append(infos, Info{
+			Name: document.ID, Image: document.Configuration.Image.Reference, State: state, IP: ip,
+			CPUs: fmt.Sprint(document.Configuration.Resources.CPUs), Memory: fmt.Sprint(document.Configuration.Resources.MemoryInBytes),
+			Labels: document.Configuration.Labels,
 		})
-		if info.State == "" {
-			info.State = StateUnknown
-		}
-		infos = append(infos, info)
 	}
-	return infos
+	return infos, nil
 }
 
-func walk(v any, fn func([]string, any)) {
-	var rec func([]string, any)
-	rec = func(path []string, cur any) {
-		switch x := cur.(type) {
-		case map[string]any:
-			for k, v := range x {
-				rec(append(path, k), v)
+func parseAppleContainerState(value string) (State, error) {
+	switch value {
+	case "running":
+		return StateRunning, nil
+	case "stopped":
+		return StateStopped, nil
+	default:
+		return StateUnknown, fmt.Errorf("unsupported runtime state %q", value)
+	}
+}
+
+func parseAppleContainerIP(networks []appleNetwork) (string, error) {
+	ip := ""
+	for _, network := range networks {
+		prefix, err := netip.ParsePrefix(network.IPv4Address)
+		if err != nil || !prefix.Addr().Is4() {
+			return "", fmt.Errorf("invalid ipv4Address %q", network.IPv4Address)
+		}
+		candidate := prefix.Addr().String()
+		if ip != "" && ip != candidate {
+			return "", fmt.Errorf("multiple IPv4 addresses are ambiguous")
+		}
+		ip = candidate
+	}
+	return ip, nil
+}
+
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var consume func() error
+	consume = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delimiter {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return fmt.Errorf("JSON object key is not a string")
+				}
+				if _, exists := seen[key]; exists {
+					return fmt.Errorf("duplicate JSON key %q", key)
+				}
+				seen[key] = struct{}{}
+				if err := consume(); err != nil {
+					return err
+				}
 			}
-		case []any:
-			for _, v := range x {
-				rec(path, v)
+		case '[':
+			for decoder.More() {
+				if err := consume(); err != nil {
+					return err
+				}
 			}
 		default:
-			if len(path) > 0 {
-				fn(path, cur)
-			}
+			return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
 		}
+		_, err = decoder.Token()
+		return err
 	}
-	rec(nil, v)
-}
-
-func containsExactString(v any, want string) bool {
-	switch x := v.(type) {
-	case map[string]any:
-		for _, value := range x {
-			if containsExactString(value, want) {
-				return true
-			}
+	if err := consume(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
 		}
-	case []any:
-		for _, value := range x {
-			if containsExactString(value, want) {
-				return true
-			}
-		}
-	case string:
-		return x == want
+		return err
 	}
-	return false
-}
-
-func normalizeState(s string) State {
-	switch strings.ToLower(s) {
-	case "running":
-		return StateRunning
-	case "stopped", "exited", "created":
-		return StateStopped
-	case "":
-		return StateUnknown
-	default:
-		if strings.Contains(strings.ToLower(s), "running") {
-			return StateRunning
-		}
-		return StateStopped
-	}
-}
-
-func looksIPv4(s string) bool {
-	parts := strings.Split(strings.Split(s, "/")[0], ".")
-	if len(parts) != 4 {
-		return false
-	}
-	for _, p := range parts {
-		if p == "" {
-			return false
-		}
-	}
-	return true
+	return nil
 }
 
 func isNotFound(err error) bool {
