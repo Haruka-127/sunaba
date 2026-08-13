@@ -2,97 +2,74 @@ package image
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	sunabaassets "sunaba/assets"
+	"sunaba/internal/dependency"
 	"sunaba/internal/runtime"
-	"sunaba/internal/state"
 )
 
-const repoLatestURL = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
-
 func Tag(version string) string {
-	return "sunaba-base:" + version
+	return "sunaba-base:" + version + "-secure.1"
 }
 
-func LatestVersion(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, repoLatestURL, nil)
-	if err != nil {
+func EnsureManifest(ctx context.Context, rt runtime.Runtime, manifest dependency.Manifest) (string, error) {
+	if err := dependency.ValidateRuntimeManifest(manifest); err != nil {
 		return "", err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
+	if rt == nil {
+		return "", fmt.Errorf("container runtime is required")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub latest release request failed: %s; pass --opencode-version explicitly", resp.Status)
-	}
-	var payload struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", err
-	}
-	version := strings.TrimPrefix(payload.TagName, "v")
-	if version == "" {
-		return "", fmt.Errorf("latest release response did not include tag_name")
-	}
-	return version, nil
-}
-
-func Ensure(ctx context.Context, rt runtime.Runtime, st *state.Store, explicit string) (string, error) {
-	cfg, err := st.LoadGlobal()
-	if err != nil {
-		return "", err
-	}
-	version := explicit
-	if version == "" {
-		version = cfg.ImageVersion
-	}
-	if version == "" {
-		version, err = LatestVersion(ctx)
-		if err != nil {
-			return "", err
-		}
-	}
-	exists, err := rt.ImageExists(ctx, Tag(version))
+	exists, err := rt.ImageExists(ctx, manifest.AgentImage.Tag)
 	if err != nil {
 		return "", err
 	}
 	if !exists {
-		if err := Build(ctx, rt, version); err != nil {
+		if err := BuildManifest(ctx, rt, manifest); err != nil {
 			return "", err
 		}
 	}
-	if cfg.ImageVersion != version {
-		cfg.ImageVersion = version
-		if err := st.SaveGlobal(cfg); err != nil {
-			return "", err
-		}
-	}
-	return version, nil
+	return manifest.OpenCode.Version, nil
 }
 
 func Build(ctx context.Context, rt runtime.Runtime, version string) error {
+	pinned := dependency.MustPinned()
+	if version != pinned.OpenCode.Version {
+		return fmt.Errorf("refusing to build unpinned OpenCode version %q; expected %s", version, pinned.OpenCode.Version)
+	}
+	return BuildManifest(ctx, rt, pinned)
+}
+
+func BuildManifest(ctx context.Context, rt runtime.Runtime, manifest dependency.Manifest) error {
+	if err := dependency.ValidateRuntimeManifest(manifest); err != nil {
+		return err
+	}
+	if rt == nil {
+		return fmt.Errorf("container runtime is required")
+	}
+	buildInputs := make(map[string][]byte, 2)
+	for _, name := range []string{"Containerfile", "entrypoint.sh"} {
+		data, err := sunabaassets.FS.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		buildInputs[name] = data
+	}
+	if err := verifyBuildInputProvenance(manifest, buildInputs); err != nil {
+		return err
+	}
 	dir, err := os.MkdirTemp("", "sunaba-image-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(dir)
 	for _, name := range []string{"Containerfile", "entrypoint.sh"} {
-		b, err := sunabaassets.FS.ReadFile(name)
-		if err != nil {
-			return err
-		}
+		b := buildInputs[name]
 		mode := os.FileMode(0644)
 		if strings.HasSuffix(name, ".sh") {
 			mode = 0755
@@ -101,5 +78,21 @@ func Build(ctx context.Context, rt runtime.Runtime, version string) error {
 			return err
 		}
 	}
-	return rt.BuildImage(ctx, Tag(version), dir, map[string]string{"OPENCODE_VERSION": version})
+	return rt.BuildImage(ctx, manifest.AgentImage.Tag, dir, map[string]string{
+		"OPENCODE_VERSION": manifest.OpenCode.Version,
+		"OPENCODE_SHA256":  manifest.OpenCode.Guest.SHA256,
+	})
+}
+
+func verifyBuildInputProvenance(manifest dependency.Manifest, inputs map[string][]byte) error {
+	if len(inputs) != 2 {
+		return fmt.Errorf("Agent image build requires exactly two pinned inputs")
+	}
+	for name, data := range inputs {
+		digest := sha256.Sum256(data)
+		if manifest.Provenance.BuildInputs["assets/"+name] != hex.EncodeToString(digest[:]) {
+			return fmt.Errorf("Agent image build input %q does not match dependency provenance", name)
+		}
+	}
+	return nil
 }

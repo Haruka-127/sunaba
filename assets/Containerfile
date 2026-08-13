@@ -1,23 +1,28 @@
-FROM debian:bookworm-slim
+FROM docker.io/library/debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
 
 ARG OPENCODE_VERSION
+ARG OPENCODE_SHA256
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash ca-certificates curl wget git tar unzip zip ripgrep \
-        sudo procps openssh-client locales \
+        sudo procps openssh-client locales e2fsprogs \
     && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
     curl -fsSL -o /tmp/opencode.tar.gz \
       "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-arm64.tar.gz"; \
+    printf '%s  %s\n' "${OPENCODE_SHA256}" /tmp/opencode.tar.gz | sha256sum -c -; \
     tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode; \
     chmod +x /usr/local/bin/opencode; \
     rm -f /tmp/opencode.tar.gz; \
     opencode --version
 
-ENV OPENCODE_DISABLE_AUTOUPDATE=1
+ENV OPENCODE_DISABLE_AUTOUPDATE=1 \
+    OPENCODE_DISABLE_MODELS_FETCH=1 \
+    OPENCODE_DISABLE_LSP_DOWNLOAD=1
 
 LABEL dev.sunaba.opencode-version="${OPENCODE_VERSION}"
+LABEL dev.sunaba.opencode-guest-sha256="${OPENCODE_SHA256}"
 
 COPY entrypoint.sh /usr/local/bin/sunaba-entrypoint
 RUN chmod +x /usr/local/bin/sunaba-entrypoint

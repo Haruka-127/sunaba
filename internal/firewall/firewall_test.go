@@ -33,20 +33,38 @@ func TestAnchorBlockIdempotent(t *testing.T) {
 }
 
 func TestGenerateRules(t *testing.T) {
-	got := GenerateRules(Network{Interface: "bridge100", Subnet: "192.168.64.0/24", Gateway: "192.168.64.1"})
+	got := GenerateRules(Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"})
 	for _, want := range []string{
-		"pass in quick",
-		"port 53",
-		"flags A/A",
-		"block drop in quick on bridge100 inet from 192.168.64.0/24 to self",
-		"block drop in quick on bridge100 inet6 from any to self",
+		"pass in quick inet proto { tcp udp } from 192.168.65.0/24 to 192.168.65.1 port 53 keep state",
+		"block drop in quick inet from 192.168.65.0/24 to self",
+		"block drop in quick inet from 192.168.65.0/24 to 10.0.0.0/8",
+		"block drop out quick inet from any to 192.168.65.0/24",
+		"block drop in quick inet6 from fd00:65::/64 to self",
+		"block drop in quick inet6 from fd00:65::/64 to fc00::/7",
+		"block drop out quick inet6 from any to fd00:65::/64",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
 	}
-	if strings.Index(got, "flags A/A") > strings.Index(got, "block drop") {
-		t.Fatalf("ACK pass rule must precede block rule:\n%s", got)
+	if strings.Index(got, "port 53") > strings.Index(got, "to self") {
+		t.Fatalf("DNS pass rule must precede private/host block rules:\n%s", got)
+	}
+}
+
+func TestGenerateQuiescedRulesDeniesAllDevSourceTraffic(t *testing.T) {
+	n := Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
+	rules := GenerateQuiescedRules(n)
+	for _, item := range []struct{ family, source string }{{"inet", n.Subnet}, {"inet6", n.IPv6Subnet}} {
+		if !hasBlockToAny(rules, item.family, item.source) {
+			t.Fatalf("missing deny-all %s rule: %s", item.family, rules)
+		}
+	}
+	if strings.Contains(rules, "pass ") || strings.Contains(rules, "keep state") {
+		t.Fatalf("quiesced rules retained an egress pass: %s", rules)
+	}
+	if hasBlockToAny(rules, "inet", "192.168.66.0/24") {
+		t.Fatal("quiesced parser accepted a different source subnet")
 	}
 }
 
@@ -54,19 +72,23 @@ func TestGeneratedRulesAcceptedByPF(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("pfctl is only available on macOS")
 	}
-	path := filepath.Join(t.TempDir(), "sunaba.rules")
-	rules := GenerateRules(Network{Interface: "bridge100", Subnet: "192.168.64.0/24", Gateway: "192.168.64.1"})
-	if err := os.WriteFile(path, []byte(rules), 0600); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command("/sbin/pfctl", "-a", "sunaba", "-nf", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("pfctl rejected generated rules: %v: %s", err, out)
+	n := Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
+	for name, rules := range map[string]string{"active": GenerateRules(n), "quiesced": GenerateQuiescedRules(n)} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "sunaba.rules")
+			if err := os.WriteFile(path, []byte(rules), 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("/sbin/pfctl", "-a", "sunaba", "-nf", path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("pfctl rejected generated rules: %v: %s", err, out)
+			}
+		})
 	}
 }
 
 func TestValidateNetwork(t *testing.T) {
-	valid := Network{Interface: "bridge100", Subnet: "192.168.64.0/24", Gateway: "192.168.64.1"}
+	valid := Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
 	if err := ValidateNetwork(valid); err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +96,7 @@ func TestValidateNetwork(t *testing.T) {
 		{Interface: "bridge100\nblock all", Subnet: valid.Subnet, Gateway: valid.Gateway},
 		{Interface: valid.Interface, Subnet: "anything", Gateway: valid.Gateway},
 		{Interface: valid.Interface, Subnet: valid.Subnet, Gateway: "anything"},
+		{Interface: valid.Interface, Subnet: valid.Subnet, Gateway: valid.Gateway, IPv6Subnet: "anything"},
 	} {
 		if err := ValidateNetwork(invalid); err == nil {
 			t.Fatalf("accepted invalid network: %#v", invalid)
@@ -82,9 +105,9 @@ func TestValidateNetwork(t *testing.T) {
 }
 
 func TestParseLivePFStateRequiresAllLayers(t *testing.T) {
-	n := Network{Interface: "bridge100", Subnet: "192.168.64.0/24", Gateway: "192.168.64.1"}
+	n := Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
 	rules := GenerateRules(n)
-	liveRules := strings.ReplaceAll(rules, "to self", "to 192.168.98.150")
+	liveRules := strings.ReplaceAll(strings.ReplaceAll(rules, "to self", "to 192.168.98.150"), "fd00:65::/64", "fd00:65::/64")
 	loaded := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, liveRules, rules, n)
 	if !loaded.loaded() {
 		t.Fatalf("unexpected state: %#v", loaded)
@@ -96,7 +119,7 @@ func TestParseLivePFStateRequiresAllLayers(t *testing.T) {
 	if parseLivePFState("Status: Disabled", `anchor "sunaba" all`, liveRules, rules, n).Enabled {
 		t.Fatal("disabled pf reported as enabled")
 	}
-	missingIPv6Rules := "block drop in quick on bridge100 inet from 192.168.64.0/24 to self\n"
+	missingIPv6Rules := "block drop in quick inet from 192.168.65.0/24 to self\n"
 	missingIPv6 := parseLivePFState("Status: Enabled", `anchor "sunaba" all`,
 		strings.ReplaceAll(missingIPv6Rules, "to self", "to 192.168.98.150"), missingIPv6Rules, n)
 	if missingIPv6.loaded() || !missingIPv6.IPv4Block || missingIPv6.IPv6Block {
@@ -111,7 +134,7 @@ func TestParseLivePFStateRequiresAllLayers(t *testing.T) {
 	if staleFile.loaded() || !staleFile.IPv4Block || staleFile.IPv6Block {
 		t.Fatalf("stale configured rules reported as loaded: %#v", staleFile)
 	}
-	wrongNetwork := Network{Interface: "bridge101", Subnet: "192.168.65.0/24", Gateway: "192.168.65.1"}
+	wrongNetwork := Network{Subnet: "192.168.66.0/24", Gateway: "192.168.66.1", IPv6Subnet: "fd00:66::/64"}
 	stale := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, liveRules, rules, wrongNetwork)
 	if stale.loaded() || stale.IPv4Block || stale.IPv6Block {
 		t.Fatalf("stale rules reported as loaded: %#v", stale)

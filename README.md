@@ -1,147 +1,55 @@
 # sunaba
 
-sunaba は、opencode server をプロジェクト専用の apple/container Linux VM 内で起動し、ホスト側の opencode TUI から接続するための CLI です。
+sunabaは、OpenCodeをプロジェクト専用のApple Container VMで動かす、Apple silicon Mac向けの実行基盤です。
 
-## 前提
+OpenCodeとその実行コマンドはVM内で自由に動かしながら、ホストの作業ツリー、認証情報、他のプロジェクト、外部ネットワークとの境界をホスト側で管理します。VM内の変更はホストへ直接書き込まず、確認可能なChange Setとして取り出してから反映します。
 
-- macOS / Apple silicon
-- apple/container 1.0 以上
-- `container system start` 済み
-- ホスト側に opencode CLI がインストール済み
-- Go 1.22 以上
+## ドキュメント
 
-## インストール
+- [ユーザーガイド](./docs/user-guide.md): 動作環境、ビルド、初期設定、各機能、トラブルシューティング
+- [利用ワークフロー](./docs/workflows.md): 初回セットアップから日常作業、変更の反映、復旧までの目的別手順
+- [セキュリティ設計・製品仕様](./docs/plan/sunaba-secure-agent-platform.md): 保証範囲、脅威モデル、アーキテクチャ、残余リスク
+- [ホスト操作の許可範囲](./docs/plan/allowed-host-operations.md): sunabaの実装・検証で許可される`sudo`、pf、Apple Container操作
 
-```sh
-go build -o bin/sunaba ./cmd/sunaba
-```
+初めて使う場合は、[ユーザーガイドの「利用前の準備」](./docs/user-guide.md#利用前の準備)を済ませてから、[「初めてのプロジェクト」ワークフロー](./docs/workflows.md#初めてのプロジェクト)へ進んでください。
 
-必要なら `bin/sunaba` を PATH の通った場所へ配置してください。
+## 主な特徴
 
-## 初回セットアップ
+- プロジェクトごとに独立したAgent VMを使用
+- ホストの作業ツリーをVMへbind mountしない
+- OpenAIやGitの実credentialをVMへ渡さない
+- 既定のsecure modeでは、許可したGateway以外の外向き通信を拒否
+- ホストへ反映する変更とGit pushを、ホスト側の明示的な承認に束縛
+- 同じVMを再利用でき、必要なときは承認済みのホスト状態からクリーン再生成可能
 
-```sh
-container system start
-bin/sunaba update
-cd /path/to/project
-bin/sunaba up
-```
+## 動作環境
 
-初回 `up` ではプロジェクト状態が `~/.local/share/sunaba/projects/<projectID>/` に作成されます。opencode の認証情報はコンテナ内で設定します。
+- Apple silicon Mac / macOS 26
+- Apple Container `1.2.2`
+- OpenCode host TUI / guest server: 同じv1系exact version（初期値`1.18.18`）
+- Go 1.22以降（ソースからビルドする場合）
+- OpenAI API key、またはCodexを利用できるChatGPT subscription
 
-```sh
-bin/sunaba shell
-opencode auth login
-```
+Apple ContainerとOpenCodeは検証済みのexact versionへ固定されます。OpenCodeは利用者が明示的な`update check` / `update apply`でv1系の別versionへ更新できますが、`latest`へのsession時の自動追従、OpenCode v2、host TUIとguest serverのversion混在は使用できません。
 
-認証情報は `opencode-data/` に保存され、通常の `reset` では保持されます。
+## 最短の利用例
 
-## コマンド
+ビルド後、3つのsunaba binaryがあるdirectoryを`PATH`へ追加するか、3つとも既存の`PATH`上へ配置してください。また、macOS側へ固定versionのOpenCodeをインストールし、`opencode`コマンドを実行できる状態にします。最初に利用基盤をsetupし、credential登録を済ませたあと、対象プロジェクトで次を実行します。
 
 ```sh
-sunaba up [--dir PATH] [--cpus N] [--memory SIZE] [--no-attach] [--no-firewall]
+sunaba setup
+sunaba project init
+sunaba up
+sunaba agent
+sunaba changes export
+sunaba changes review
+sunaba changes apply
 ```
 
-プロジェクト用コンテナを作成または起動し、opencode server の health を待ってから監査デーモンを起動します。既定ではホスト側 TUI を `opencode attach` で接続します。
-
-```sh
-sunaba shell [--dir PATH] [--no-firewall]
-```
-
-起動中のコンテナへ `agent` ユーザーとして入ります。コンテナが停止中または未作成の場合は先に起動します。`--no-firewall` を付けると、起動時の host firewall 適用をスキップします。`agent` は必要時に `sudo` を利用できます。
-
-```sh
-sunaba stop [--dir PATH]
-```
-
-監査デーモンを止め、プロジェクトコンテナを停止します。
-
-```sh
-sunaba reset [--dir PATH] [--full] [--yes]
-```
-
-通常 reset はコンテナのみを削除し、セッション履歴、認証情報、環境変数、server password、監査ログは保持します。`--full` はプロジェクト状態ディレクトリ全体を削除します。
-
-```sh
-sunaba update [--opencode-version X.Y.Z]
-```
-
-埋め込み Containerfile から `sunaba-base:<version>` をローカルビルドします。既存コンテナには次回 `reset` 後に反映されます。
-
-```sh
-sunaba status [--dir PATH]
-sunaba list
-```
-
-プロジェクト状態、コンテナ状態、IP、opencode バージョン、firewall、監査デーモン状態を確認します。
-
-```sh
-sunaba env set KEY=VALUE... [--dir PATH]
-sunaba env unset KEY... [--dir PATH]
-sunaba env list [--dir PATH]
-```
-
-プロジェクト単位の環境変数を管理します。値は `env` ファイルに 0600 で保存され、コンテナ作成時に注入されます。稼働中コンテナには反映されないため、変更後は `sunaba reset` を実行してください。`list` は値をマスクして表示します。
-
-```sh
-sunaba config firewall [enabled|disabled|inherit] [--global] [--dir PATH]
-```
-
-firewall の自動適用設定を管理します。既定は有効です。`--global disabled` は全体の既定を無効にします。プロジェクト単位では `disabled` / `enabled` / `inherit` を設定でき、プロジェクト設定がグローバル設定を上書きします。引数なしで現在の設定と実効値を表示します。
-
-例:
-
-```sh
-sunaba config firewall disabled --global
-sunaba config firewall disabled --dir /path/to/project
-sunaba config firewall enabled --dir /path/to/project
-sunaba config firewall inherit --dir /path/to/project
-```
-
-```sh
-sunaba firewall enable
-sunaba firewall disable
-sunaba firewall status
-```
-
-pf anchor `sunaba` を管理し、コンテナからホスト自身への IPv4 / IPv6 通信を遮断します。root 権限が必要な場合は `sudo` で自分自身を再実行します。許可された host 操作の範囲は `docs/plan/allowed-host-operations.md` に限定されます。
-
-```sh
-sunaba logs [--dir PATH] [-f]
-```
-
-当日の監査ログのパスを表示し、内容を出力します。`-f` で追尾します。
+`agent`を終了しても、secure modeのVM内にある編集状態は保持されます。`changes export`はVMを停止・検証してChange Setを作成し、`changes review`は固定した変更前後の内容をhostへ書き込まずに表示します。`changes apply`は同じreviewを再表示し、ホスト側で承認した場合だけ作業ツリーへ反映します。
 
 ## セキュリティ上の注意
 
-- LLM API キーは sunaba 専用の低権限キーを使い、プロバイダ側で支出上限を設定してください
-- `~/.ssh`、グローバル git 設定、Keychain などのホスト秘密情報はコンテナへマウントしません
-- `sunaba env` で注入するトークンは、対象リポジトリを限定した fine-grained PAT など最小権限のものにしてください
-- エージェントがプロジェクトフォルダに書いた git hooks、`.vscode`、`node_modules` などは、後からホスト側の git やエディタが実行し得ます。ホスト側でビルドやコミットをする前に diff を確認してください
-- コンテナから外向きインターネット通信は許可されます。プロジェクト内容やコンテナ内認証情報の流出を完全には防げません
-- 使わないプロジェクトは `sunaba stop` で停止してください。macOS の仮想化は稼働中コンテナのメモリを保持し続ける場合があります
+secure modeでも、利用者が許可したLLMやWeb originへ送信した情報の安全性までは保証しません。特にWeb GatewayのHTTPS通信は暗号化されたtunnel内部のmethodやuploadを識別できません。
 
-## 既知の制限
-
-- apple/container 1.0.0 の `container run` にディスク上限フラグが見当たらないため、ディスクサイズはランタイム既定に従います
-- LAN 宛て通信は本版では許可のままです
-- ホスト側編集のファイルウォッチイベントがコンテナ内へ即時伝播しない場合があります
-- `sunaba update` は GitHub API のレート制限を受ける場合があります。その場合は `--opencode-version` を指定してください
-
-## 検証
-
-ビルド、静的解析、単体テストのみを実行する場合:
-
-```sh
-scripts/verify.sh
-```
-
-コンテナ作成、pf変更、自動承認、reset、イメージ更新を含むA2〜A21の統合検証には、opencodeの有効な認証・モデル設定と、一つ前の有効なリリース番号を指定します。
-
-```sh
-SUNABA_FULL_VERIFY=1 \
-SUNABA_PREVIOUS_OPENCODE_VERSION=1.17.12 \
-scripts/verify.sh
-```
-
-統合検証は `sunaba-` プレフィックスの検証コンテナと一時プロジェクトを作成し、終了時に削除します。pf変更に必要な `sudo` を対話的に許可できる端末で実行してください。
+dev modeはactive session中の直接Internet接続を許可するため、情報流出防止を保証しません。必要な場合だけ明示的に選択してください。詳しくは[利用ワークフローの「直接Internet接続が必要な作業」](./docs/workflows.md#直接internet接続が必要な作業)を参照してください。

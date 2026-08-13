@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
+
+	"sunaba/internal/dependency"
 )
 
 type Health struct {
@@ -18,41 +19,97 @@ type Health struct {
 }
 
 func CheckPrerequisites(ctx context.Context) error {
+	return CheckPrerequisitesFor(ctx, dependency.MustPinned())
+}
+
+func CheckPrerequisitesFor(ctx context.Context, manifest dependency.Manifest) error {
+	if err := dependency.ValidateRuntimeManifest(manifest); err != nil {
+		return err
+	}
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("sunaba requires macOS with apple/container; current OS is %s", runtime.GOOS)
 	}
 	if runtime.GOARCH != "arm64" {
 		return fmt.Errorf("sunaba requires Apple silicon (darwin/arm64); current arch is %s", runtime.GOARCH)
 	}
-	macVersion, err := commandOutput(ctx, 10*time.Second, "sw_vers", "-productVersion")
-	if err != nil {
-		return fmt.Errorf("cannot determine macOS version: %w", err)
-	}
-	if CompareVersion(macVersion, "26.0.0") < 0 {
-		return fmt.Errorf("sunaba requires macOS 26 or later; current version is %s", macVersion)
-	}
 	if _, err := exec.LookPath("container"); err != nil {
 		return fmt.Errorf("container CLI not found. Install apple/container, then run 'container system start'")
 	}
 	if _, err := exec.LookPath("opencode"); err != nil {
-		return fmt.Errorf("opencode CLI not found. Install OpenCode CLI; desktop app is not sufficient")
+		return fmt.Errorf("opencode CLI %s not found", manifest.OpenCode.Version)
 	}
-	containerVersionOutput, err := commandOutput(ctx, 10*time.Second, "container", "--version")
-	if err != nil {
-		return fmt.Errorf("cannot determine apple/container version: %w", err)
+	var macVersion, hostVersion, containerVersionOutput, systemStatus string
+	var macErr, hostErr, containerErr, statusErr error
+	var checks sync.WaitGroup
+	checks.Add(4)
+	go func() {
+		defer checks.Done()
+		macVersion, macErr = commandOutput(ctx, 10*time.Second, "sw_vers", "-productVersion")
+	}()
+	go func() {
+		defer checks.Done()
+		hostVersion, hostErr = HostVersion(ctx)
+	}()
+	go func() {
+		defer checks.Done()
+		containerVersionOutput, containerErr = commandOutput(ctx, 10*time.Second, "container", "--version")
+	}()
+	go func() {
+		defer checks.Done()
+		systemStatus, statusErr = commandOutput(ctx, 10*time.Second, "container", "system", "status")
+	}()
+	checks.Wait()
+	if macErr != nil {
+		return fmt.Errorf("cannot determine macOS version: %w", macErr)
 	}
-	containerVersion := firstSemanticVersion(containerVersionOutput)
-	if containerVersion == "" {
-		return fmt.Errorf("cannot parse apple/container version from %q", containerVersionOutput)
+	comparison, versionErr := compareVersion(macVersion, "26.0.0")
+	if versionErr != nil {
+		return fmt.Errorf("cannot parse macOS version %q", macVersion)
 	}
-	if CompareVersion(containerVersion, "1.0.0") < 0 {
-		return fmt.Errorf("sunaba requires apple/container 1.0 or later; current version is %s", containerVersion)
+	if comparison < 0 {
+		return fmt.Errorf("sunaba requires macOS 26 or later; current version is %s", macVersion)
 	}
-	c, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(c, "container", "system", "status").CombinedOutput()
-	if err != nil || !strings.Contains(strings.ToLower(string(out)), "running") {
+	if hostErr != nil {
+		return fmt.Errorf("cannot determine host OpenCode version: %w", hostErr)
+	}
+	if err := validateOpenCodeVersionFor(hostVersion, manifest.OpenCode.Version); err != nil {
+		return err
+	}
+	if containerErr != nil {
+		return fmt.Errorf("cannot determine apple/container version: %w", containerErr)
+	}
+	if err := validateAppleContainerVersionFor(containerVersionOutput, manifest.AppleContainer.Version); err != nil {
+		return err
+	}
+	if statusErr != nil || !strings.Contains(strings.ToLower(systemStatus), "running") {
 		return fmt.Errorf("container system is not running. Run 'container system start'")
+	}
+	return nil
+}
+
+func validateAppleContainerVersion(output string) error {
+	return validateAppleContainerVersionFor(output, dependency.AppleContainerVersion)
+}
+
+func validateAppleContainerVersionFor(output, expected string) error {
+	containerVersion := firstExactVersionToken(output)
+	if containerVersion == "" {
+		return fmt.Errorf("cannot parse apple/container version from %q", output)
+	}
+	if containerVersion != expected {
+		return fmt.Errorf("sunaba requires exact apple/container %s; current version is %s", expected, containerVersion)
+	}
+	return nil
+}
+
+func validateOpenCodeVersion(output string) error {
+	return validateOpenCodeVersionFor(output, dependency.OpenCodeVersion)
+}
+
+func validateOpenCodeVersionFor(output, expected string) error {
+	version := strings.TrimPrefix(strings.TrimSpace(output), "v")
+	if version != expected {
+		return fmt.Errorf("sunaba requires exact OpenCode %s for host TUI and guest server; current host version is %s", expected, version)
 	}
 	return nil
 }
@@ -80,30 +137,51 @@ func HostVersion(ctx context.Context) (string, error) {
 func WaitHealth(ctx context.Context, url, password string, max time.Duration) (Health, error) {
 	deadline, cancel := context.WithTimeout(ctx, max)
 	defer cancel()
-	t := time.NewTicker(2 * time.Second)
-	defer t.Stop()
+	// A published guest socket can accept a connection before OpenCode begins
+	// listening behind it. Bound each readiness probe separately so that one
+	// half-open startup connection cannot consume most of the overall deadline.
+	client := DirectHTTPClient(200 * time.Millisecond)
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		defer transport.CloseIdleConnections()
+	}
+	delay := 25 * time.Millisecond
 	var last error
 	for {
-		h, err := GetHealth(deadline, url, password)
+		h, err := getHealth(deadline, client, url, password)
 		if err == nil {
 			return h, nil
 		}
 		last = err
+		timer := time.NewTimer(delay)
 		select {
 		case <-deadline.Done():
+			timer.Stop()
 			return Health{}, fmt.Errorf("server health did not become ready: %w", last)
-		case <-t.C:
+		case <-timer.C:
+		}
+		if delay < 100*time.Millisecond {
+			delay *= 2
+			if delay > 100*time.Millisecond {
+				delay = 100 * time.Millisecond
+			}
 		}
 	}
 }
 
 func GetHealth(ctx context.Context, url, password string) (Health, error) {
+	client := DirectHTTPClient(10 * time.Second)
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		defer transport.CloseIdleConnections()
+	}
+	return getHealth(ctx, client, url, password)
+}
+
+func getHealth(ctx context.Context, client *http.Client, url, password string) (Health, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(url, "/")+"/global/health", nil)
 	if err != nil {
 		return Health{}, err
 	}
 	req.SetBasicAuth("opencode", password)
-	client := DirectHTTPClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return Health{}, err
@@ -119,15 +197,6 @@ func GetHealth(ctx context.Context, url, password string) (Health, error) {
 	return h, nil
 }
 
-func Attach(ctx context.Context, url, dir, password string) error {
-	cmd := exec.CommandContext(ctx, "opencode", "attach", url, "--dir", dir)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = attachEnvironment(os.Environ(), url, password)
-	return cmd.Run()
-}
-
 // DirectHTTPClient returns a client for host-to-VM communication. These
 // requests carry the server password and must never be sent through a proxy
 // configured in the host environment.
@@ -135,38 +204,6 @@ func DirectHTTPClient(timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	return &http.Client{Timeout: timeout, Transport: transport}
-}
-
-func attachEnvironment(base []string, serverURL, password string) []string {
-	host := ""
-	if u, err := url.Parse(serverURL); err == nil {
-		host = u.Hostname()
-	}
-	noProxy := mergeNoProxy(environmentValue(base, "NO_PROXY"), environmentValue(base, "no_proxy"))
-	noProxy = mergeNoProxy(noProxy, host)
-	env := base
-	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
-		env = removeEnvironment(env, key)
-	}
-	env = setEnvironment(env, "NO_PROXY", noProxy)
-	env = setEnvironment(env, "no_proxy", noProxy)
-	env = setEnvironment(env, "OPENCODE_SERVER_PASSWORD", password)
-	return setEnvironment(env, "OPENCODE_SERVER_USERNAME", "opencode")
-}
-
-func mergeNoProxy(current, host string) string {
-	if host == "" {
-		return current
-	}
-	for _, entry := range strings.Split(current, ",") {
-		if strings.TrimSpace(entry) == host {
-			return current
-		}
-	}
-	if strings.TrimSpace(current) == "" {
-		return host
-	}
-	return current + "," + host
 }
 
 func environmentValue(env []string, key string) string {
@@ -177,26 +214,4 @@ func environmentValue(env []string, key string) string {
 		}
 	}
 	return ""
-}
-
-func setEnvironment(env []string, key, value string) []string {
-	prefix := key + "="
-	out := make([]string, 0, len(env)+1)
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
-			out = append(out, entry)
-		}
-	}
-	return append(out, prefix+value)
-}
-
-func removeEnvironment(env []string, key string) []string {
-	prefix := key + "="
-	out := make([]string, 0, len(env))
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
-			out = append(out, entry)
-		}
-	}
-	return out
 }

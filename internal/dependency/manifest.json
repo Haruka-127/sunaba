@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "apple_container": {
+    "version": "1.2.2",
+    "commit": "0190097d06df0b9065f4c2d2c7873c649d81d493"
+  },
+  "base_image": {
+    "reference": "docker.io/library/debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
+    "index_sha256": "60eac759739651111db372c07be67863818726f754804b8707c90979bda511df"
+  },
+  "agent_image": {
+    "tag": "sunaba-base:1.18.18-secure.1"
+  },
+  "go_modules": {
+    "github.com/urfave/cli/v3": "v3.10.1",
+    "golang.org/x/sys": "v0.30.0"
+  },
+  "opencode": {
+    "version": "1.18.18",
+    "host": {
+      "os": "darwin",
+      "arch": "arm64",
+      "artifact": "opencode-darwin-arm64.zip",
+      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.18/opencode-darwin-arm64.zip",
+      "sha256": "7d668bf26496fec8686d4e51ebb1ac2bd2e393f0c1620aa696c4c242a9e5806a",
+      "executable_sha256": "4f5979c2dadb06fbff1335335afaaea274e58f92e79aa43cf2ed98618d555422"
+    },
+    "guest": {
+      "os": "linux",
+      "arch": "arm64",
+      "artifact": "opencode-linux-arm64.tar.gz",
+      "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.18/opencode-linux-arm64.tar.gz",
+      "sha256": "dcb1b5ec5687b43f87749560021f9203f3809e0ce5ae44ff9be8ae17083fe4ba"
+    }
+  },
+  "provenance": {
+    "apple_container": {
+      "repository": "https://github.com/apple/container",
+      "tag": "1.2.2",
+      "commit": "0190097d06df0b9065f4c2d2c7873c649d81d493"
+    },
+    "opencode": {
+      "repository": "https://github.com/anomalyco/opencode",
+      "tag": "v1.18.18",
+      "commit": "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
+    },
+    "base_image": {
+      "registry": "docker.io",
+      "repository": "library/debian",
+      "digest": "sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df"
+    },
+    "build_inputs": {
+      "assets/Containerfile": "0eafeb17833254001d0962679d489ba15c4c5849021b4148c98a852d33d3f273",
+      "assets/entrypoint.sh": "5ac778fff0f962f1530d94ec4c0631ca2609a80b5d40c318eed1731f4f3f9236"
+    }
+  }
+}
