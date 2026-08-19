@@ -91,11 +91,13 @@ Git GatewayやWeb Gatewayが不要なら、有効にする必要はありませ�
 ### 4. VMを準備してOpenCodeを起動する
 
 ```sh
+sunaba snapshot preview --dir "$PROJECT"
+sunaba snapshot approve --dir "$PROJECT" --digest <表示されたdigest>
 sunaba up --dir "$PROJECT"
 sunaba agent --dir "$PROJECT"
 ```
 
-`up`はhost ProjectのSnapshotからVMを作成し、分離とresourceを検証してpauseします。`agent`はそのVMを再開し、ホストのOpenCode TUIをVM内serverへ接続します。
+previewは内容を表示せず、件数、容量、大容量file、秘密らしいfile名とdigestを表示します。必要ならhost-onlyな`snapshot.exclude`を直して`config apply`し、再previewします。`up`は承認された同一digestのhost ProjectからSnapshotとVMを作成し、分離とresourceを検証してpauseします。`agent`はそのVMを再開し、ホストのOpenCode TUIをVM内serverへ接続します。
 
 TUIを終了するとsession用Gatewayとrelayが失効し、VMは再びpauseします。まだhost Projectに変更はありません。
 
@@ -299,37 +301,33 @@ sunaba git remote add \
 
 hostのGit credential helperが、このURLのcredentialを非対話で取得できることを確認してください。SSH remote、credential入りURL、Git LFS endpointは利用できません。
 
-### 2. VM内へcloneする
+### 2. 既定workspaceへhistoryを取得する
 
-`agent`または`shell`を開始すると、sunabaが固定Gateway URLをremoteとしてVMへ設定します。既定workspaceはhost Snapshot由来のsynthetic repositoryなので、外部historyが必要な場合は隔離領域の別directoryへcloneします。
+`agent`または`shell`を開始すると、sunabaが既定workspaceのguest-local gitdirへ固定Gateway URLをremoteとして設定します。別directoryへcloneせず、このrepositoryへhistoryを取得します。
 
 VM内で実行:
 
 ```sh
-REMOTE_URL=$(git remote get-url origin)
-env -u GIT_DIR -u GIT_WORK_TREE \
-  git clone "$REMOTE_URL" /var/lib/sunaba/overlay/origin-clone
+git fetch origin
+git log --oneline --decorate --all -n 20
 ```
 
-以後、そのcloneで通常のGit操作を行います。
+必要なbranchを確認して、既定workspaceへmergeまたはrebaseします。
 
 ```sh
-env -u GIT_DIR -u GIT_WORK_TREE \
-  git -C /var/lib/sunaba/overlay/origin-clone fetch origin
-env -u GIT_DIR -u GIT_WORK_TREE \
-  git -C /var/lib/sunaba/overlay/origin-clone pull --ff-only origin main
+git merge --ff-only origin/main
 ```
 
-clone、fetch、pullにはhost承認は不要です。固定remote、session、quotaの範囲はGatewayが強制します。
+fetch、pullにはhost承認は不要です。固定remote、session、quotaの範囲はGatewayが強制します。
+
+互換目的で別directoryへcloneしたrepositoryが残っている場合、dirty working treeまたは未push commitがある間はexportを拒否します。必要なworking fileを既定workspaceへ移し、commitをpushしてからexportしてください。
 
 ### 3. pushを承認する
 
 VM内でpushすると、最初の試行はpending approvalを作って拒否されます。
 
 ```sh
-env -u GIT_DIR -u GIT_WORK_TREE \
-  git -C /var/lib/sunaba/overlay/origin-clone \
-  push origin HEAD:refs/heads/main
+git push origin HEAD:refs/heads/main
 ```
 
 Agent Sessionを動かしたまま、別のhost terminalで承認requestを確認します。

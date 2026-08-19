@@ -215,6 +215,15 @@ sunaba project list
 
 登録後の通常手順は[「初めてのプロジェクト」ワークフロー](./workflows.md#初めてのプロジェクト)を参照してください。
 
+`project init`はSnapshotを作りません。VM作成前に対象をpreviewし、件数、容量、大容量file、秘密らしいfile名を確認してexact digestを承認します。内容や秘密の値はpreviewへ表示されません。
+
+```sh
+sunaba snapshot preview --dir /path/to/project
+sunaba snapshot approve --dir /path/to/project --digest <表示されたdigest>
+```
+
+Projectが変わった後に新しいVMを作る場合は、再度previewと承認が必要です。
+
 ## Project設定
 
 Project設定は作業ツリー内ではなく、ホスト専用の次のdirectoryへ保存されます。
@@ -247,7 +256,15 @@ sunaba config apply --dir /path/to/project
 
 設定変更は、activeまたはpaused VMとpending Change Setがないときだけ適用できます。先に`changes export`、`changes review`、`changes apply`、`recreate --discard-pending`などで現在の状態を処理してください。未適用または不正な設定がある間、`up`、`agent`、`shell`はfail closedで拒否されます。
 
-`project.json`には利用者が選ぶmode、resource、session、Model、Git、Web、export、auditの設定だけを記述します。dependency digest、credential、capability、push承認方針、Protected Pathなど、sunabaが強制する値は変更できません。内部の実効policyは手作業で編集しないでください。
+`project.json`には利用者が選ぶmode、resource、session、Model、Git、Web、Snapshot除外、export、auditの設定だけを記述します。dependency digest、credential、capability、push承認方針、Protected Pathなど、sunabaが強制する値は変更できません。内部の実効policyは手作業で編集しないでください。
+
+Snapshotから外すroot-relative literal pathは`snapshot.exclude`へ記述します。`.gitignore`は自動適用されません。literal entryだけを候補として明示importできます。import後は`project.json`を確認し、`config apply`します。
+
+```sh
+sunaba snapshot exclude import-gitignore --dir /path/to/project
+sunaba config diff --dir /path/to/project
+sunaba config apply --dir /path/to/project
+```
 
 ## Modelを選ぶ
 
@@ -320,6 +337,8 @@ sunaba changes export --dir /path/to/project
 
 exportはVMをfreeze・破棄し、追加、変更、削除、renameをホスト側で再構成します。unsafeなpath、symlink、hardlink、special file、`.git/`、sunaba管理領域、上限超過はホスト作業ツリーへ到達する前に拒否されます。
 
+既定workspace以外に作ったGit cloneにdirty fileまたは未push commitがある場合、exportは作業損失を避けるため拒否します。main workspaceへ必要なworking fileを移し、commitを登録remoteへpushしてから再実行するか、VM全体を破棄する場合だけ明示的なdiscardを選びます。
+
 exportされたbaselineとMerged Viewはhost-only stateへ固定されます。次に、host worktreeへ書き込まずに内容差分を確認します。
 
 ```sh
@@ -360,7 +379,7 @@ sunaba approvals --dir /path/to/project
 
 承認後、VM内で内容が変わっていない同じpushを期限内に再実行します。承認はone-shotで、remote、object、ref、force/deleteのいずれかが変わると再承認が必要です。
 
-VMの既定workspaceはhost Snapshotから作るsynthetic Git repositoryです。外部repositoryのhistoryが必要な作業は、登録済みGateway remoteからVM内の別directoryへcloneしてください。詳細な手順は[「外部Git履歴を使う」ワークフロー](./workflows.md#外部git履歴を使う)を参照してください。
+VMの既定workspaceはhost Snapshotとguest-local gitdirを組み合わせたsynthetic Git repositoryです。登録remoteはこのrepositoryへ設定されるため、外部historyは既定workspaceで`git fetch origin`して参照します。Change Set対象外の別directoryへcloneしないでください。詳細な手順は[「外部Git履歴を使う」ワークフロー](./workflows.md#外部git履歴を使う)を参照してください。
 
 ```sh
 sunaba git remote remove --name origin --dir /path/to/project

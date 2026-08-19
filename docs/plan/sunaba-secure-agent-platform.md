@@ -442,6 +442,10 @@ SnapshotはcanonicalなProject rootをdirectory descriptorとして開き、そ�
 
 Snapshotへ含める対象はhost側Project policyで決め、Project内のfileがそのpolicyを広げられないようにする。
 
+`project.json`の`snapshot.exclude`はhost-onlyなroot-relative literal pathの集合とし、該当path以下をSnapshot対象から外す。Project内の`.gitignore`を暗黙のセキュリティ境界には使わない。利用者が明示的にimportした場合だけ、negationやglobを含まないliteral entryを除外候補へ取り込み、`config apply`前にhost-only設定として確認する。
+
+各VM作成前にSnapshot previewを生成し、entry/file数、総size、boundedな大容量file一覧、秘密らしいfile名だけを内容を表示せず提示する。利用者はpreviewのexact manifest digestをhost側で承認し、VM作成時は同じpolicy digestかつ同じmanifest digestでなければ拒否する。`project init`は登録とhost-only設定の作成だけを行い、未使用のSnapshotを作らない。
+
 - source、`opencode.json`、`.opencode/`、`.gitignore`、`.gitmodules`は通常のProject fileとして含められる。Project固有のOpenCode設定やpluginはVM内serverだけが読み込む
 - `.git/`はhostのcredential、hook、config、管理状態を含み得るためSnapshotへcopyしない
 - Phase 1ではVM内でsyntheticなbaseline commitを持つguest-local repositoryを作る。Phase 3で履歴が必要になったら、Git Gateway経由のclone/fetchまたはcredentialとhookを含まない検証済みbundleを使う
@@ -763,6 +767,8 @@ Agent VM内のエージェントには通常のGit UXを提供しつつ、Git to
 
 VM内の`.git/`はguest-localな状態であり、Change Setを通じてhostの`.git/`へ上書きしない。local commit、branch、tagはVM内で自由に作成できるが、host worktreeへ昇格するのはworking treeのChange Setだけである。外部remoteへ反映する場合はGit Gatewayのpush承認を別に受ける。
 
+既定workspaceはSnapshot由来のworking treeと、overlay内のguest-local gitdirを組み合わせる。登録済みGateway remoteはこのgitdirへ設定し、外部historyが必要な場合は既定workspaceで`git fetch`して参照・mergeする。Change Set対象外の別directoryへcloneする通常導線は提供しない。互換上存在する別cloneは、dirty working treeまたはremoteへ存在しないlocal commitがあればexportをfail closedで拒否する。
+
 ### 13.2 操作ポリシー
 
 | 操作 | 方針 |
@@ -906,7 +912,7 @@ Phase 0のprobeで既存許可範囲にない操作が必要になった場合�
 
 利用者共通のversion宣言と適用済みlockは`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/versions.json`と`versions.lock.json`、Projectの利用者設定は同directoryの`projects/<ProjectID>/`を正本とし、Project worktree外のhost-only領域へ保存する。Project directory、Snapshot、VM、session input、exportへこの設定directoryをmountまたはcopyせず、VMから参照・変更できる経路を作らない。directoryはcurrent user所有のmode `0700`、設定とlockはmode `0600`の通常fileに限定し、symlink、未知field、trailing data、上限超過を拒否する。
 
-`project.json`にはmode、resource、session、Model、Git remote、Webの有効状態・`origin_presets`・quota、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、組み込みpreset内容/digest、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
+`project.json`にはmode、resource、session、Model、Git remote、Webの有効状態・`origin_presets`・quota、Snapshot除外、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、組み込みpreset内容/digest、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
 
 Project固有のWeb allowlist追加分は同じhost-only directoryの固定名`web-origins.txt`で管理する。組み込みpresetの内容をこのfileへ複製しない。空行と`#`で始まるcommentを除き、各行は`http://host`または`https://host`と、任意の第2token `include-subdomains`だけを受け付ける。path、query、fragment、userinfo、非標準port、IP literal、重複rule、未知optionを1件でも含む場合はfile全体を拒否する。sizeは64 KiB、Project固有ruleは1024件、preset展開後の実効ruleも1024件を上限とする。Web Gateway無効時もpreset選択とProject固有追加分はinactiveな宣言として保持できる。
 
@@ -1149,7 +1155,10 @@ sunaba update apply                保存済みcandidateを明示適用
 sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登録・確認・削除
 sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
 sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
-sunaba project init [path]       Project登録と初期snapshot。path省略時はcurrent directory、Model認証はOAuthが既定
+sunaba project init [path]       Project登録。path省略時はcurrent directory、Model認証はOAuthが既定
+sunaba snapshot preview          Snapshot対象の件数、size、警告、digestを内容非表示で確認
+sunaba snapshot approve          previewのexact digestを次のVM作成へ束縛して承認
+sunaba snapshot exclude import-gitignore  literalな.gitignore entryをhost-only除外候補へ明示import
 sunaba project list [--active]   登録ProjectとSupervisor・VM状態をread-onlyで一覧
 sunaba config path               host-only Project設定fileのpath表示
 sunaba config edit               host上の対話ウィザードで宣言設定を編集・検証・適用
@@ -1177,6 +1186,7 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 - fresh hostでは最初に`sunaba setup`を実行する。初回からbootstrap以外を使う場合は`setup --config-only`、`versions set|track`、`update check`、macOS側OpenCodeの同一版への更新、`update apply`の順に行う。`project init`はsetup未完了ならProject stateを作らず拒否する。
 - `versions set|track`は宣言だけを変更し、VM、Project policy、active lockを変更しない。`update check`もcandidate作成までとし、`update apply`だけが停止済みProjectを新しいexact lockへ切り替える。channel追跡を選んでもsession開始時の自動更新は行わない。
 - `sunaba project init`はpathを省略した場合にcurrent directoryを登録し、相対pathも受け付ける。入力pathはsymlinkを解決したcanonical absolute pathへ変換してidentityを固定する。新規ProjectのModel認証はOAuthを既定とし、API keyを使う場合だけ`--model-auth api-key`を指定する。credentialの登録有無から認証方式を推測せず、既存Projectの認証方式は変更しない。
+- `project init`後およびhost Project変更後に新しいVMを作る前は、`snapshot preview`で対象を確認し、表示されたexact digestを`snapshot approve`へ渡す。digest不一致、除外policy変更、preview後のProject変更ではVMを作らない。
 - `sunaba project list`はhost-only stateの直接の子だけをboundedに列挙し、Project policy、owner-only Supervisor locator、sunaba所有labelが完全一致するVMから状態を判定する。一覧取得はpolicy migration、stale locator回収、orphan cleanup、VM lifecycle操作を行わない。`--active`は到達可能なSupervisorまたはrunning状態のowned VMがあるProjectだけを表示し、VMがpause中でもSupervisorがactiveなら除外しない。
 - 公開Project操作の`config`、`model`、`up`、`agent`、`git`、`web`、`shell`、`status`、`changes`、`approvals`、`recreate`、`down`、`destroy`は、`--dir <path>`または`--project-id <id>`で対象を選択できる。両方の同時指定を拒否し、どちらも未指定ならcurrent directoryを使う。Project IDは`project list`が表示した12桁の小文字16進IDとの完全一致だけを受け付け、prefix、部分一致、aliasを使わない。通常操作のID指定は、owner-only stateとpolicyをread-onlyで検証し、policyのProject IDが一致し、保存されたcanonical Project rootが現存する場合だけそのrootへ解決する。`project init`、`project list`、利用者共通の`credentials`、内部ホスト操作の`firewall`と`_supervisor`はこのselectorの対象外とする。
 - `down`と`destroy`のID指定は、元Project rootやpolicyを失った隔離stateを安全に回収する復旧経路とする。policy内のProject pathを対象解決の根拠にせず、host-only state直下にあるcurrent-user所有、mode `0700`、非symlinkの同名directoryだけを対象とし、到達可能なSupervisorがあればそのProject IDとの一致も要求する。`down`は隔離stateを保持し、`destroy`だけが隔離stateとhost-only Project設定を削除する。host Project fileは削除せず、`--yes`と、pendingまたは未export変更に対する`--discard-pending`の要件はpath指定時と同じとする。
