@@ -310,6 +310,8 @@ Project VM作成時にはProject IDと別のVM IDを発行し、container名、r
 
 OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能である。したがって秘密としてではなく、範囲と寿命を限定したcapabilityとして扱う。
 
+同じVMで次のAgent Sessionを開始するときは、保存済みのcurrent policyをhost-only stateから再読込する。Model/Git/Web、session TTL/idle、quota、blocklist等のSession authorityは新しいSessionへだけ反映し、実行中Sessionのhandler、token、allowlist、quota、期限を差し替えない。mode、dependency/image、resource、Snapshot/export/Protected Path等のVM-bound policyがVM作成時から変わっていればresumeをfail closedで拒否し、export後のclean recreationを案内する。
+
 起動待ちを抑えるため、固定Host TUIのdigest/version検証はVM再開と並列に実行してよい。ただし検証済み実行ファイルのidentityをTUI起動直前に再確認し、検証後の置換や変更を拒否する。Local Attach Relay経由のhealth確認は短いbounded backoffで行い、複数秒固定のpoll間隔を設けない。VM再開時の短命入力はmode `0700`の単一directoryへまとめて1回のcopyで復元し、guest service起動とresource probeは同じbounded exec transactionで行ってよい。並列化、copy/exec集約、poll短縮を理由に、VM identity、network、resource limit、Host TUI digest/version、server health/versionの検証を省略しない。
 
 ### 8.3 継続利用
@@ -469,7 +471,7 @@ canonical manifestは、正規化済み相対path、file type、mode、size、co
 7. 利用者または後続の検査処理へ、制御文字をescapeしたChange Setを提示する。
 8. 承認されたChange Setだけをホスト作業ツリーへ適用する。
 
-pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みbaseline Snapshot、検証済みMerged View、両manifest、Change Setを自己完結した組として保存する。保存した両SnapshotとChange Setのdigestを再検証できた場合だけpendingを確定し、容量不足や保存失敗ではAgent VMを破棄しない。これによりexport後にhost worktreeが変化しても変更前後の内容を再現可能にする。ただしhost baselineが変化したpendingのapplyは9.5のとおり拒否する。
+pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みbaseline Snapshot、検証済みMerged View、両manifest、Change Set、作成時の正規化済みSnapshot/export policyとそのdigestを自己完結した組として保存する。保存した両Snapshot、policy、Change Setのdigestを再検証できた場合だけpendingを確定し、容量不足や保存失敗ではAgent VMを破棄しない。これによりexport後にhost worktreeや無関係なcurrent Project policyが変化しても、作成時のpolicyで変更前後の内容をreview/applyできる。ただしhost baselineが変化したpendingのapplyは9.5のとおり拒否する。
 
 内容確認はhost側の`changes review`で行う。reviewはread-onlyであり、保存済みbaselineとMerged Viewをfd-relativeかつsymlink非追跡で再検証し、Change Set digestへ対応する追加、変更、削除、rename、type、mode、実行属性、symlink target、text差分を表示する。差分生成と表示ではProjectのGit設定、外部`diff`、pager、editor、syntax highlighter、MIME判定、preview helper、scriptを起動しない。text判定、1 file、総入力、行長、行数、diff出力へhost固定の上限を設け、binary、invalid UTF-8、巨大file等の内容を表示できない場合はsize、SHA-256、modeと未表示理由を明示する。path、symlink target、diff本文を含むすべてのuntrusted表示はterminal sanitizerを通す。
 
@@ -918,7 +920,13 @@ Phase 0のprobeで既存許可範囲にない操作が必要になった場合�
 
 Project固有のWeb allowlist追加分は同じhost-only directoryの固定名`web-origins.txt`で管理する。組み込みpresetの内容をこのfileへ複製しない。空行と`#`で始まるcommentを除き、各行は`http://host`または`https://host`と、任意の第2token `include-subdomains`だけを受け付ける。path、query、fragment、userinfo、非標準port、IP literal、重複rule、未知optionを1件でも含む場合はfile全体を拒否する。sizeは64 KiB、Project固有ruleは1024件、preset展開後の実効ruleも1024件を上限とする。Web Gateway無効時もpreset選択とProject固有追加分はinactiveな宣言として保持できる。
 
-設定変更は`config validate`と`config diff`で検査し、active/paused Agent Session、pending Change Setがない状態で`config apply`により実効policyへ明示適用する。未適用または不正な設定がある場合、`up`、`agent`、`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
+設定変更は`config validate`と`config diff`で検査し、`config apply`により実効policyへ明示適用する。CLIは差分を次の適用classへ分類し、対象fieldと必要操作を表示する。
+
+- **即時反映**: audit retention等のhost-only運用policy。保存transaction完了後に直ちに実行する
+- **次Agent Sessionから反映**: Model allowlist/auth/quota、Git/Web Gateway、session TTL/idle、blocklist等。active Sessionのauthorityは不変とし、pause後の新しいSession ID/token/handler発行時にcurrent policyを再読込する。paused VMやpending Change Setがあっても安全に適用できる
+- **VM再作成が必要**: mode、dependency/image、resource、Snapshot除外、export上限、Protected Path等。既存VMへ暗黙反映せず、VMが存在する間はapplyを拒否して`changes export`と`recreate`を案内する
+
+host-only設定writerはProject VMが保持する長寿命Project lockとは別のProject設定lockで直列化し、宣言設定と実効policyをcrash-safe transactionで更新する。未適用または不正な設定がある場合、`up`、`agent`、`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
 
 `config edit`は同じhost-only宣言設定とcompile経路に対する対話frontendとする。候補は最終確認までmemoryだけに保持し、確定時に上記apply条件を再検証して宣言設定と実効policyを同期更新する。別schema、VM内設定、credential入力、生成fieldの上書き経路を作らない。
 
@@ -1165,7 +1173,7 @@ sunaba project list [--active]   登録ProjectとSupervisor・VM状態をread-on
 sunaba config path               host-only Project設定fileのpath表示
 sunaba config edit               host上の対話ウィザードで宣言設定を編集・検証・適用
 sunaba config validate/diff      declarative設定の厳格検証と実効policyとの差分表示
-sunaba config apply              停止状態で設定を実効Project policyへcompile
+sunaba config apply              差分を即時・次Session・要再作成へ分類して実効Project policyへcompile
 sunaba config show [--effective] declarative設定または内部の実効policyを表示
 sunaba up [--mode secure|dev]    secure VMを作成してpause、devはforeground session用artifactだけ準備
 sunaba agent                     server、relay、Host TUIを起動してAgent Session開始
@@ -1200,7 +1208,7 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 - Model Gatewayの存在を会話やツール選択で意識する必要はない。
 - `sunaba config edit`はHost CLIだけで動くboundedな行入力式ウィザードとし、VM、OpenCode server、Host TUIへ設定入力を委ねない。既存のhost-only宣言設定を候補としてmemory上で編集し、最終確認まではfileや実効policyを変更しない。cancel、EOF、入力上限超過では変更を残さない。
 - 対話設定も手編集と同じ厳格validatorとcompile経路を使い、dependency、credential、capability、blocklist binding、push承認必須、Protected Pathを入力項目にしない。Projectのlocal Git configはinclude、system/global config、promptを無効にしたboundedなread-only probeだけで候補を得て、検証済み固定HTTPS remoteを人間が明示選択した場合だけ登録する。dev modeとWeb Gatewayの残余リスクを選択時に表示し、固定catalog外model、credential付きGit URL、曖昧なWeb origin、上限外quotaを保存前に拒否する。
-- 対話設定の適用は既存の`config apply`と同じ停止状態、owned VM、pending Change Set、blocklist条件を満たす場合だけ行う。対話中に宣言設定または実効policyが変化した場合は競合として拒否し、別processの変更を上書きしない。
+- 対話設定の適用は既存の`config apply`と同じ三分類、owned VM、blocklist条件を使う。次Session/即時classはpaused VMやpending Change Setを保持したまま適用でき、VM再作成classだけは既存VMがある間拒否する。対話中に宣言設定または実効policyが変化した場合は競合として拒否し、別processの変更を上書きしない。
 - secureで一般Webが未提供なら、コマンドが明確なnetwork policy errorで失敗する。
 - devへ切り替える場合は、情報流出防止を保証しない旨を明示する。
 - Git Gateway実装後も通常のGitコマンドを使う。push requestはhost側のpending approvalとなり、OpenCode TUIと分離したTrusted Approval UIで確認する。

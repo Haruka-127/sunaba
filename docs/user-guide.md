@@ -254,7 +254,9 @@ sunaba config diff --dir /path/to/project
 sunaba config apply --dir /path/to/project
 ```
 
-設定変更は、activeまたはpaused VMとpending Change Setがないときだけ適用できます。先に`changes export`、`changes review`、`changes apply`、`recreate --discard-pending`などで現在の状態を処理してください。未適用または不正な設定がある間、`up`、`agent`、`shell`はfail closedで拒否されます。
+`config diff`と`config apply`は変更を適用時点ごとに表示します。audit retentionは即時、Model/Git/Web、quota、session TTL/idle、blocklistは次のAgent Sessionから有効です。active Sessionのauthorityは変わらず、pause後の新しいSession ID、token、handlerへだけ反映されます。この2種類はpaused VMやpending Change Setを保持したまま変更できます。
+
+mode、resource、dependency/image、Snapshot除外、export上限、Protected PathはVM再作成が必要です。既存VMがある場合はapplyを拒否するため、先に`changes export`し、必要に応じてpendingをreview/applyしてから`recreate`してください。pending Change Setは作成時のexport policyを自己完結して保持するため、後続の無関係な設定変更後もreview/applyできます。未適用または不正な設定がある間、`up`、`agent`、`shell`はfail closedで拒否されます。
 
 `project.json`には利用者が選ぶmode、resource、session、Model、Git、Web、Snapshot除外、export、auditの設定だけを記述します。dependency digest、credential、capability、push承認方針、Protected Pathなど、sunabaが強制する値は変更できません。内部の実効policyは手作業で編集しないでください。
 
@@ -283,7 +285,7 @@ sunaba model set \
   --dir /path/to/project
 ```
 
-既存Projectの認証方式を変更するには、VMとpending Change Setを処理したあとで次を実行します。
+既存Projectの認証方式は次のコマンドで変更できます。実行中Sessionは変更されず、pause後に発行する次のSessionから有効です。
 
 ```sh
 sunaba model auth oauth --dir /path/to/project
@@ -359,7 +361,7 @@ apply後はホスト上で通常どおりdiff、test、code reviewを行い、�
 
 ## Git Gateway
 
-Git Gatewayを使う場合は、VMとpending Change Setがない状態で、credentialを含まない固定HTTPS `.git` URLを登録します。SSH transportとGit LFS endpointは対象外です。
+Git Gatewayを使う場合は、credentialを含まない固定HTTPS `.git` URLを登録します。設定は次のAgent Sessionから有効で、実行中Sessionのremoteやcredential境界は変更しません。SSH transportとGit LFS endpointは対象外です。
 
 ```sh
 sunaba git remote add \
@@ -500,7 +502,7 @@ sunaba credentials openai api-key status
 
 - `credential is unavailable`: Projectの認証方式に合わせて`oauth login`または`api-key set`をやり直す
 - `credential helper`: hostのGit credential helperが登録済みHTTPS URLを非対話で解決できるか確認する
-- `cannot change ... active`: 先に`changes export`または`recreate`でVMを処理する
+- `require VM recreation`: mode、resource、Snapshot/export等のVM-bound変更です。先に`changes export`して`recreate`する
 - pending Change Setがある: `changes apply`で反映するか、破棄を明示して`recreate`または`destroy`する
 - `capability expired`: 現Sessionをfail closedでpauseする。次の`agent`または`shell`で同じVMへ新しいSessionを開始する
 - baseline競合: host側の変更を整理し、新しいSnapshotから作業をやり直す

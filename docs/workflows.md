@@ -212,7 +212,20 @@ sunaba up --dir "$PROJECT"
 
 ## Project設定を変更する
 
-設定はactiveまたはpaused VM、pending Change Setがある間は変更できません。まず現在の作業を処理します。
+まず差分と適用時点を確認します。
+
+```sh
+sunaba config validate --dir "$PROJECT"
+sunaba config diff --dir "$PROJECT"
+```
+
+audit retentionは即時、Model/Git/Web、quota、session TTL/idle、blocklistは次のAgent Sessionから反映されます。active Sessionのauthorityは変更されず、pause後に新しい資格情報を発行するときにcurrent policyを読み直します。この種類はpaused VMやpending Change Setを保持したまま適用できます。
+
+```sh
+sunaba config apply --dir "$PROJECT"
+```
+
+mode、resource、dependency/image、Snapshot除外、export上限等が`recreate-required`と表示された場合だけ、既存VMを先に処理します。
 
 成果物を残す場合:
 
@@ -228,13 +241,13 @@ sunaba changes apply --dir "$PROJECT"
 sunaba recreate --dir "$PROJECT" --discard-pending
 ```
 
-状態が空になったら設定を変更します。
+VMを処理したら設定を変更・適用します。
 
 ```sh
 sunaba config edit --dir "$PROJECT"
 ```
 
-設定fileを直接編集した場合は、検証と差分確認をしてから適用します。
+設定fileを直接編集した場合も、同じ検証と三分類を確認してから適用します。
 
 ```sh
 sunaba config validate --dir "$PROJECT"
@@ -242,7 +255,7 @@ sunaba config diff --dir "$PROJECT"
 sunaba config apply --dir "$PROJECT"
 ```
 
-適用後に新しいVMを作ります。
+`recreate-required`の変更を適用した後は、新しいVMを作ります。
 
 ```sh
 sunaba up --dir "$PROJECT"
@@ -250,7 +263,7 @@ sunaba up --dir "$PROJECT"
 
 ## secure modeでWebを使う
 
-依存導入、Web検索、ドキュメント取得などが必要な場合は、許可するoriginをhost側で決めてWeb Gatewayを有効にします。既存VMとpending Change Setは先に処理してください。
+依存導入、Web検索、ドキュメント取得などが必要な場合は、許可するoriginをhost側で決めてWeb Gatewayを有効にします。設定はactive Sessionを変えず、次のAgent Sessionから有効になります。
 
 一般的な開発用originの組み込みpresetにProject固有originを追加する場合:
 
@@ -290,7 +303,7 @@ sunaba web refresh --dir "$PROJECT"
 
 ### 1. hostでremoteを登録する
 
-VMとpending Change Setがない状態で、credentialを含まない固定HTTPS `.git` URLを登録します。
+credentialを含まない固定HTTPS `.git` URLを登録します。active Sessionは変更されず、次のAgent Sessionから有効になります。
 
 ```sh
 sunaba git remote add \
