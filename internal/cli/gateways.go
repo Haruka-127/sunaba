@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sunaba/internal/audit"
@@ -45,6 +46,37 @@ type configuredGitRemote struct {
 
 type multiPushBroker struct {
 	brokers []*gitgateway.HookBroker
+}
+
+type rotatingPushBroker struct {
+	mu      sync.RWMutex
+	current pushApprovalBroker
+}
+
+func (b *rotatingPushBroker) Set(current pushApprovalBroker) {
+	b.mu.Lock()
+	b.current = current
+	b.mu.Unlock()
+}
+
+func (b *rotatingPushBroker) Pending() []gitgateway.PushRequest {
+	b.mu.RLock()
+	current := b.current
+	b.mu.RUnlock()
+	if current == nil {
+		return nil
+	}
+	return current.Pending()
+}
+
+func (b *rotatingPushBroker) Confirm(nonce string, binding gitgateway.PushBinding) error {
+	b.mu.RLock()
+	current := b.current
+	b.mu.RUnlock()
+	if current == nil {
+		return fmt.Errorf("Git push approval is not pending")
+	}
+	return current.Confirm(nonce, binding)
 }
 
 func (b *multiPushBroker) Pending() []gitgateway.PushRequest {
@@ -229,6 +261,11 @@ func (a *app) configureGitRemoteGateway(ctx context.Context, projectPolicy polic
 		_ = closeBroker()
 		return configuredGitRemote{}, err
 	}
+	closeGateway := func() error {
+		readGateway.Revoke()
+		receiveGateway.Revoke()
+		return closeBroker()
+	}
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if strings.Contains(request.URL.RawQuery, "git-receive-pack") || strings.HasSuffix(request.URL.Path, "/git-receive-pack") {
 			receiveGateway.ServeHTTP(response, request)
@@ -238,7 +275,7 @@ func (a *app) configureGitRemoteGateway(ctx context.Context, projectPolicy polic
 	})
 	return configuredGitRemote{
 		handler: handler, remote: session.GitRemote{Name: remote.Name, Token: gitToken},
-		close: closeBroker, broker: broker,
+		close: closeGateway, broker: broker,
 	}, nil
 }
 

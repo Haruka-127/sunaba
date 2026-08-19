@@ -410,10 +410,9 @@ func TestRecoveryByProjectIDRejectsMismatchedSupervisorIdentity(t *testing.T) {
 	}
 	runtimeBase := testutil.PrivateTempDir(t, "sunaba-destroy-identity-")
 	controlled := &controlledSession{
-		active: &fakeSessionControlTarget{}, projectID: "different-project", sessionID: "session",
-		container: "sunaba-different-project-session", runtimeRoot: filepath.Join(runtimeBase, "sunaba-session-session"),
-		workspacePath: "/workspace/sunaba-session", attachURL: "http://127.0.0.1:12345", projectState: projectState,
-		serverPassword: strings.Repeat("s", 32), expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute,
+		active: &fakeSessionControlTarget{}, projectID: "different-project", vmID: "vm",
+		container: "sunaba-different-project-vm", runtimeRoot: filepath.Join(runtimeBase, "sunaba-vm-vm"),
+		workspacePath: "/workspace/sunaba-vm", projectState: projectState, idleTimeout: 15 * time.Minute,
 		lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
 	}
 	control, err := startApprovalControl(projectState, runtimeBase, nil, controlled)
@@ -467,14 +466,13 @@ func TestProjectListFindsPausedSupervisorAndOwnedForegroundVM(t *testing.T) {
 	}
 	secureID := state.ProjectID(secureProject)
 	devID := state.ProjectID(devProject)
-	sessionID := "s" + strings.Repeat("1", 24)
+	vmID := "v" + strings.Repeat("1", 24)
 	runtimeBase := testutil.PrivateTempDir(t, "sunaba-project-list-")
 	controlled := &controlledSession{
-		active: &fakeSessionControlTarget{}, projectID: secureID, sessionID: sessionID,
-		container:   "sunaba-" + secureID + "-" + sessionID,
-		runtimeRoot: filepath.Join(runtimeBase, "sunaba-session-"+sessionID), workspacePath: "/workspace/sunaba-session",
-		attachURL: "http://127.0.0.1:12345", projectState: filepath.Join(store.Root, "projects", secureID), serverPassword: strings.Repeat("s", 32),
-		expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
+		active: &fakeSessionControlTarget{}, projectID: secureID, vmID: vmID,
+		container:   "sunaba-" + secureID + "-" + vmID,
+		runtimeRoot: filepath.Join(runtimeBase, "sunaba-vm-"+vmID), workspacePath: "/workspace/sunaba-vm",
+		projectState: filepath.Join(store.Root, "projects", secureID), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
 	}
 	control, err := startApprovalControl(controlled.projectState, runtimeBase, nil, controlled)
 	if err != nil {
@@ -483,7 +481,7 @@ func TestProjectListFindsPausedSupervisorAndOwnedForegroundVM(t *testing.T) {
 	defer control.Close()
 	a.runtime = &projectListRuntime{items: []runtime.Info{{
 		Name: "sunaba-" + devID + "-sdev", State: runtime.StateRunning,
-		Labels: map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": devID, "dev.sunaba.session": "sdev", "dev.sunaba.mode": "dev"},
+		Labels: map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": devID, "dev.sunaba.vm": "sdev", "dev.sunaba.mode": "dev"},
 	}, {
 		Name: "sunaba-foreign-s1", State: runtime.StateRunning,
 		Labels: map[string]string{"dev.sunaba.owner": "someone-else", "dev.sunaba.project": devID, "dev.sunaba.session": "s1"},
@@ -846,25 +844,30 @@ type fakeSessionControlTarget struct {
 	output    string
 }
 
-func (f *fakeSessionControlTarget) Pause(context.Context) error  { f.paused++; return nil }
-func (f *fakeSessionControlTarget) Resume(context.Context) error { f.resumed++; return nil }
+func (f *fakeSessionControlTarget) Pause(context.Context) error { f.paused++; return nil }
+func (f *fakeSessionControlTarget) ResumeWith(context.Context, session.Activation) error {
+	f.resumed++
+	return nil
+}
 func (f *fakeSessionControlTarget) StopAndExport(context.Context) (session.ExportResult, error) {
 	f.exported++
 	return session.ExportResult{}, nil
 }
 
-func TestSupervisorExpiryRejectsResumeAndShell(t *testing.T) {
+func TestSupervisorExpiryAllowsFreshSessionButRejectsExpiredShell(t *testing.T) {
 	target := &fakeSessionControlTarget{}
+	fresh := managedActivation{activation: session.Activation{SessionID: "fresh-session", ServerPassword: strings.Repeat("n", 32)}, expiresAt: time.Now().Add(time.Hour)}
 	controlled := &controlledSession{
-		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
+		active: target, projectID: "project", vmID: "vm", sessionID: "session", container: "sunaba-project-vm",
 		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-session-session", workspacePath: "/workspace/sunaba-session",
 		attachURL: "http://127.0.0.1:12345", projectState: "/private/tmp/project", serverPassword: strings.Repeat("s", 32),
 		expiresAt: time.Now().Add(-time.Second), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
+		activate: func(context.Context) (managedActivation, error) { return fresh, nil },
 	}
-	if err := controlled.resume(context.Background()); err == nil || target.resumed != 0 {
-		t.Fatalf("expired resume error=%v resumed=%d", err, target.resumed)
+	if err := controlled.resume(context.Background()); err != nil || target.resumed != 1 || controlled.sessionID != "fresh-session" {
+		t.Fatalf("fresh resume error=%v resumed=%d session=%q", err, target.resumed, controlled.sessionID)
 	}
-	controlled.state = "running"
+	controlled.expiresAt = time.Now().Add(-time.Second)
 	if _, err := controlled.shell(context.Background(), "true"); err == nil || len(target.commands) != 0 {
 		t.Fatalf("expired shell error=%v commands=%v", err, target.commands)
 	}
@@ -1012,10 +1015,13 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 	runtimeBase := testutil.PrivateTempDir(t, "sunaba-supervisor-test-")
 	target := &fakeSessionControlTarget{output: "safe\n\x1b]52;c;evil\a\u202Ename\n"}
 	controlled := &controlledSession{
-		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
-		runtimeRoot: filepath.Join(runtimeBase, "sunaba-session-session"), workspacePath: "/workspace/sunaba-session",
+		active: target, projectID: "project", vmID: "vm", sessionID: "session", container: "sunaba-project-vm",
+		runtimeRoot: filepath.Join(runtimeBase, "sunaba-vm-vm"), workspacePath: "/workspace/sunaba-vm",
 		attachURL: "http://127.0.0.1:12345", projectState: projectState, serverPassword: strings.Repeat("s", 32),
 		expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "running", exit: make(chan struct{}),
+		activate: func(context.Context) (managedActivation, error) {
+			return managedActivation{activation: session.Activation{SessionID: "new-session", ServerPassword: strings.Repeat("n", 32)}, expiresAt: time.Now().Add(time.Hour)}, nil
+		},
 	}
 	control, err := startApprovalControl(projectState, runtimeBase, nil, controlled)
 	if err != nil {
@@ -1032,7 +1038,7 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 		t.Fatalf("Git-disabled supervisor approvals count=%d error=%v", count, err)
 	}
 	info, err := client.info(context.Background())
-	if err != nil || info.State != "running" || info.Container != "sunaba-project-session" {
+	if err != nil || info.State != "running" || info.Container != "sunaba-project-vm" {
 		t.Fatalf("info=%+v error=%v", info, err)
 	}
 	if info.IdleSeconds != 900 || info.IdleDeadline.IsZero() {
@@ -1046,6 +1052,10 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 	}
 	if err := client.operation(context.Background(), "resume"); err != nil {
 		t.Fatal(err)
+	}
+	rotated, err := client.info(context.Background())
+	if err != nil || rotated.VMID != "vm" || rotated.Container != "sunaba-project-vm" || rotated.SessionID != "new-session" || rotated.ServerPassword == strings.Repeat("s", 32) {
+		t.Fatalf("rotated session info=%+v error=%v", rotated, err)
 	}
 	output, err := client.shell(context.Background(), "printf test")
 	if err != nil || !strings.Contains(output, "safe\n") || strings.ContainsAny(output, "\x1b\a\u202E") || !strings.Contains(output, "<U+001B>") {

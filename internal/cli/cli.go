@@ -246,10 +246,17 @@ func (a *app) agent(ctx context.Context, dir string) (returnErr error) {
 	if info.ProjectID != projectPolicy.ProjectID {
 		return fmt.Errorf("active supervisor Project identity does not match policy")
 	}
-	if !time.Now().Before(info.ExpiresAt) {
+	if info.State == "running" && !time.Now().Before(info.ExpiresAt) {
 		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		return errors.Join(fmt.Errorf("Agent Session capability expired; export or recreate the stopped VM"), client.operation(pauseContext, "pause"))
+		err = client.operation(pauseContext, "pause")
+		cancel()
+		if err != nil {
+			return fmt.Errorf("revoke expired Agent Session: %w", err)
+		}
+		info, err = client.info(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	managedOpenCode := a.prepareManagedOpenCodeAsync(ctx)
 	if info.State == "paused" {
@@ -1032,6 +1039,14 @@ func newSessionID() (string, error) {
 		return "", err
 	}
 	return "s" + hex.EncodeToString(raw), nil
+}
+
+func newVMID() (string, error) {
+	raw := make([]byte, 12)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return "v" + hex.EncodeToString(raw), nil
 }
 
 func makeRuntimeBase() (string, error) {

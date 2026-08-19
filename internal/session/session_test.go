@@ -187,16 +187,21 @@ func TestResumeKeepsAttachRelayAliveAfterOperationContextEnds(t *testing.T) {
 func TestResumeWithRotatesSessionAuthorityAfterExpiryAndRejectsOldToken(t *testing.T) {
 	cfg, fake := sessionFixture(t)
 	oldSessionID, oldToken := cfg.SessionID, cfg.ModelToken
-	cfg.LeaseTTL = 20 * time.Millisecond
+	closed := 0
+	cfg.LeaseTTL = 250 * time.Millisecond
 	cfg.ModelGateway = tokenHandler(oldToken)
+	cfg.ModelGatewayClose = func() error { closed++; return nil }
 	s, err := Start(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	container := s.Container
-	time.Sleep(25 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	if err := s.Pause(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if closed != 1 {
+		t.Fatalf("old Model Gateway authority was not revoked: closes=%d", closed)
 	}
 	activation := rotatedActivation(cfg, "rotated1")
 	activation.LeaseTTL = time.Minute
@@ -234,6 +239,45 @@ func TestResumeWithRotatesSessionAuthorityAfterExpiryAndRejectsOldToken(t *testi
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("new token status=%d", response.StatusCode)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResumeWithFailureRevokesPartialActivationAndAllowsFreshRetry(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(s.Root, "model-gateway.sock")
+	if err := os.WriteFile(blocked, []byte("not a socket"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	failed := rotatedActivation(cfg, "failed1")
+	failedClosed := 0
+	failed.ModelGatewayClose = func() error { failedClosed++; return nil }
+	if err := s.ResumeWith(context.Background(), failed); err == nil {
+		t.Fatal("unsafe Gateway path did not fail activation")
+	}
+	registry := &lease.Registry{Root: filepath.Join(cfg.Store.Root, "leases")}
+	record, err := registry.Load(failed.SessionID)
+	if err != nil || record.State != lease.Revoked || failedClosed != 1 || fake.state != runtime.StateStopped {
+		t.Fatalf("failed activation lease=%+v closes=%d VM=%s error=%v", record, failedClosed, fake.state, err)
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	retry := rotatedActivation(cfg, "retry01")
+	if err := s.ResumeWith(context.Background(), retry); err != nil {
+		t.Fatalf("fresh activation retry failed: %v", err)
+	}
+	if s.SessionID != retry.SessionID {
+		t.Fatalf("retry Session ID=%q", s.SessionID)
 	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
@@ -666,8 +710,9 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		ProjectRoot: project, RuntimeBase: runtimeBase, VMID: "vmphase1test", SessionID: "phase1test", Image: dependency.MustPinned().AgentImage.Tag,
 		CPUs: 2, Memory: "2G", GuestRelayBinary: relay, ProviderConfig: []byte(`{"provider":{}}`),
 		DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
-		ModelGateway: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
-		ModelToken:   strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
+		ModelGateway:      http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
+		ModelGatewayClose: func() error { return nil },
+		ModelToken:        strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
 		LeaseTTL: time.Minute, Audit: auditRecorder,
 		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 		OnEvent: func(Event) {},

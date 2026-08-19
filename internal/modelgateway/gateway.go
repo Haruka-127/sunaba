@@ -128,6 +128,13 @@ type Gateway struct {
 	auditFailed atomic.Bool
 }
 
+// Revoke permanently closes this Agent Session capability.
+func (g *Gateway) Revoke() {
+	if g != nil && g.gate != nil {
+		g.gate.Revoke()
+	}
+}
+
 func New(config Config) (*Gateway, error) {
 	if config.AuthMode == "" {
 		config.AuthMode = modelcatalog.AuthAPIKey

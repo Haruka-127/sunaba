@@ -26,14 +26,20 @@ import (
 )
 
 type managedSession struct {
-	active         *session.Session
-	projectPolicy  policy.ProjectPolicy
-	projectState   string
-	runtimeBase    string
-	serverPassword string
-	expiresAt      time.Time
-	gitBroker      pushApprovalBroker
-	operationLock  *state.OperationLock
+	active            *session.Session
+	projectPolicy     policy.ProjectPolicy
+	projectState      string
+	runtimeBase       string
+	initialActivation managedActivation
+	activationFactory func(context.Context) (managedActivation, error)
+	gitBroker         *rotatingPushBroker
+	operationLock     *state.OperationLock
+}
+
+type managedActivation struct {
+	activation session.Activation
+	expiresAt  time.Time
+	gitBroker  pushApprovalBroker
 }
 
 func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (*managedSession, error) {
@@ -86,61 +92,7 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if len(cleanupResult.Refused) > 0 {
 		fmt.Fprintf(a.errors, "WARNING: cleanup refused resources without matching current ownership/lease: %s\n", strings.Join(cleanupResult.Refused, ", "))
 	}
-	upstreamBaseURL := "https://api.openai.com"
-	upstreamKey := ""
-	var oauthTokens modelgateway.OAuthTokenSource
-	if projectPolicy.Model.AuthMode == modelcatalog.AuthOAuth {
-		manager := openauth.NewManager()
-		if _, err := manager.AccessToken(ctx); err != nil {
-			return nil, err
-		}
-		upstreamBaseURL = "https://chatgpt.com/backend-api/codex"
-		oauthTokens = manager
-	} else {
-		var err error
-		upstreamKey, err = secretstore.LoadOpenAIKey(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-	sessionID, err := newSessionID()
-	if err != nil {
-		return nil, err
-	}
-	vmID := "sunaba-" + projectPolicy.ProjectID + "-" + sessionID
-	modelToken, err := session.NewSecret()
-	if err != nil {
-		return nil, err
-	}
-	serverPassword, err := session.NewSecret()
-	if err != nil {
-		return nil, err
-	}
-	expiresAt := time.Now().Add(time.Duration(projectPolicy.Session.TTLSeconds) * time.Second)
-	modelID := projectPolicy.Model.AllowedModels[0]
-	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, vmID, sessionID, projectPolicy.Model.AllowedModels, expiresAt)
-	if err != nil {
-		return nil, err
-	}
-	capability.MaxRequests = projectPolicy.Model.MaxRequests
-	capability.MaxConcurrent = projectPolicy.Model.MaxConcurrent
-	capability.MaxRequestBytes = projectPolicy.Model.MaxRequestBytes
-	capability.MaxResponseBytes = projectPolicy.Model.MaxResponseBytes
-	gateway, err := modelgateway.New(modelgateway.Config{
-		UpstreamBaseURL: upstreamBaseURL, UpstreamAPIKey: upstreamKey, AuthMode: projectPolicy.Model.AuthMode, OAuthTokens: oauthTokens, Capability: capability,
-		Audit: func(event modelgateway.AuditEvent) error {
-			return recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
-				"model": event.Model, "status": fmt.Sprint(event.Status), "request_bytes": fmt.Sprint(event.RequestBytes), "response_bytes": fmt.Sprint(event.ResponseBytes), "reason": event.Reason,
-			}})
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
-		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: projectPolicy.Model.AllowedModels,
-		DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", AuthMode: projectPolicy.Model.AuthMode,
-	})
+	vmID, err := newVMID()
 	if err != nil {
 		return nil, err
 	}
@@ -161,35 +113,38 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if err := validateGuestRelay(guestRelay); err != nil {
 		return nil, err
 	}
-	gateways, err := a.configureGateways(ctx, projectPolicy, projectState, runtimeBase, vmID, sessionID, expiresAt, recorder)
+	activation, err := a.newManagedActivation(ctx, projectPolicy, projectState, runtimeBase, vmID, recorder)
 	if err != nil {
 		return nil, err
 	}
-	gatewaysHandedOff := false
+	activationHandedOff := false
 	defer func() {
-		if !gatewaysHandedOff {
-			if gateways.webClose != nil {
-				_ = gateways.webClose()
+		if !activationHandedOff {
+			if activation.activation.ModelGatewayClose != nil {
+				_ = activation.activation.ModelGatewayClose()
 			}
-			if gateways.gitClose != nil {
-				_ = gateways.gitClose()
+			if activation.activation.WebGatewayClose != nil {
+				_ = activation.activation.WebGatewayClose()
+			}
+			if activation.activation.GitGatewayClose != nil {
+				_ = activation.activation.GitGatewayClose()
 			}
 		}
 	}()
 	config := session.Config{
 		Store: a.store, Runtime: a.runtime, ProjectRoot: projectPolicy.ProjectRoot, RuntimeBase: runtimeBase,
-		SessionID: sessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
+		VMID: vmID, SessionID: activation.activation.SessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
 		CPUs: projectPolicy.Resources.CPUs, Memory: projectPolicy.Resources.Memory, DiskBytes: projectPolicy.Resources.DiskBytes,
 		ProcessMax: projectPolicy.Resources.ProcessMax, FileSizeMax: projectPolicy.Resources.FileSizeMax, OpenFileMax: projectPolicy.Resources.OpenFileMax,
-		GuestRelayBinary: guestRelay, ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken,
-		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
-		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
-		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second, Audit: recorder,
+		GuestRelayBinary: guestRelay, ProviderConfig: activation.activation.ProviderConfig, ModelGateway: activation.activation.ModelGateway, ModelGatewayClose: activation.activation.ModelGatewayClose, ModelToken: activation.activation.ModelToken,
+		GitGateway: activation.activation.GitGateway, GitRemotes: activation.activation.GitRemotes, GitGatewayClose: activation.activation.GitGatewayClose,
+		WebGateway: activation.activation.WebGateway, WebToken: activation.activation.WebToken, WebGatewayClose: activation.activation.WebGatewayClose,
+		ServerPassword: activation.activation.ServerPassword, LeaseTTL: activation.activation.LeaseTTL, Audit: recorder,
 		SnapshotPolicy: exportPolicy.Snapshot, ApprovedSnapshot: approvedManifest, ExportPolicy: exportPolicy.Export, ExportPolicyDigest: exportPolicy.Digest,
 	}
 	var devBoundary *devnetwork.Boundary
 	if projectPolicy.Mode == "dev" {
-		devBoundary, err = devnetwork.Activate(ctx, a.store.Root, projectPolicy.ProjectID, sessionID)
+		devBoundary, err = devnetwork.Activate(ctx, a.store.Root, projectPolicy.ProjectID, vmID)
 		if err != nil {
 			return nil, err
 		}
@@ -205,13 +160,88 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		}
 		return nil, err
 	}
-	gatewaysHandedOff = true
+	activationHandedOff = true
 	cleanupRuntime = false
 	handedOff = true
+	broker := &rotatingPushBroker{}
+	broker.Set(activation.gitBroker)
 	return &managedSession{
 		active: active, projectPolicy: projectPolicy, projectState: projectState, runtimeBase: runtimeBase,
-		serverPassword: serverPassword, expiresAt: expiresAt, gitBroker: gateways.gitBroker, operationLock: operationLock,
+		initialActivation: activation, gitBroker: broker, operationLock: operationLock,
+		activationFactory: func(factoryContext context.Context) (managedActivation, error) {
+			return a.newManagedActivation(factoryContext, projectPolicy, projectState, runtimeBase, vmID, recorder)
+		},
 	}, nil
+}
+
+func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState, runtimeBase, vmID string, recorder *audit.Recorder) (managedActivation, error) {
+	upstreamBaseURL := "https://api.openai.com"
+	upstreamKey := ""
+	var oauthTokens modelgateway.OAuthTokenSource
+	if projectPolicy.Model.AuthMode == modelcatalog.AuthOAuth {
+		manager := openauth.NewManager()
+		if _, err := manager.AccessToken(ctx); err != nil {
+			return managedActivation{}, err
+		}
+		upstreamBaseURL = "https://chatgpt.com/backend-api/codex"
+		oauthTokens = manager
+	} else {
+		var err error
+		upstreamKey, err = secretstore.LoadOpenAIKey(ctx)
+		if err != nil {
+			return managedActivation{}, err
+		}
+	}
+	sessionID, err := newSessionID()
+	if err != nil {
+		return managedActivation{}, err
+	}
+	modelToken, err := session.NewSecret()
+	if err != nil {
+		return managedActivation{}, err
+	}
+	serverPassword, err := session.NewSecret()
+	if err != nil {
+		return managedActivation{}, err
+	}
+	expiresAt := time.Now().Add(time.Duration(projectPolicy.Session.TTLSeconds) * time.Second)
+	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, "sunaba-"+projectPolicy.ProjectID+"-"+vmID, sessionID, projectPolicy.Model.AllowedModels, expiresAt)
+	if err != nil {
+		return managedActivation{}, err
+	}
+	capability.MaxRequests = projectPolicy.Model.MaxRequests
+	capability.MaxConcurrent = projectPolicy.Model.MaxConcurrent
+	capability.MaxRequestBytes = projectPolicy.Model.MaxRequestBytes
+	capability.MaxResponseBytes = projectPolicy.Model.MaxResponseBytes
+	gateway, err := modelgateway.New(modelgateway.Config{
+		UpstreamBaseURL: upstreamBaseURL, UpstreamAPIKey: upstreamKey, AuthMode: projectPolicy.Model.AuthMode, OAuthTokens: oauthTokens, Capability: capability,
+		Audit: func(event modelgateway.AuditEvent) error {
+			return recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
+				"model": event.Model, "status": fmt.Sprint(event.Status), "request_bytes": fmt.Sprint(event.RequestBytes), "response_bytes": fmt.Sprint(event.ResponseBytes), "reason": event.Reason,
+			}})
+		},
+	})
+	if err != nil {
+		return managedActivation{}, err
+	}
+	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: projectPolicy.Model.AllowedModels,
+		DefaultModel: projectPolicy.Model.AllowedModels[0], TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", AuthMode: projectPolicy.Model.AuthMode,
+	})
+	if err != nil {
+		return managedActivation{}, err
+	}
+	vmName := "sunaba-" + projectPolicy.ProjectID + "-" + vmID
+	gateways, err := a.configureGateways(ctx, projectPolicy, projectState, runtimeBase, vmName, sessionID, expiresAt, recorder)
+	if err != nil {
+		return managedActivation{}, err
+	}
+	return managedActivation{activation: session.Activation{
+		SessionID: sessionID, ProviderConfig: provider, ModelGateway: gateway, ModelGatewayClose: func() error { gateway.Revoke(); return nil }, ModelToken: modelToken,
+		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
+		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
+		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second,
+	}, expiresAt: expiresAt, gitBroker: gateways.gitBroker}, nil
 }
 
 func pruneProjectAudit(recorder *audit.Recorder, projectPolicy policy.ProjectPolicy, now time.Time) error {
@@ -268,7 +298,7 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
 	idleTimeout := time.Duration(managed.projectPolicy.Session.IdleSeconds) * time.Second
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, idleTimeout)
+	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -277,9 +307,8 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, control.Close()) }()
-	expiry := time.NewTimer(time.Until(managed.expiresAt))
+	expiry := time.NewTimer(controlled.expiryDelay(time.Now()))
 	defer expiry.Stop()
-	expiryChannel := expiry.C
 	idleTimer := time.NewTimer(controlled.idleDelay(time.Now()))
 	defer idleTimer.Stop()
 	resetIdle := func(delay time.Duration) {
@@ -291,6 +320,15 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		}
 		idleTimer.Reset(delay)
 	}
+	resetExpiry := func(delay time.Duration) {
+		if !expiry.Stop() {
+			select {
+			case <-expiry.C:
+			default:
+			}
+		}
+		expiry.Reset(delay)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -298,16 +336,17 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		case <-controlled.exit:
 			destroyed = true
 			return nil
-		case <-expiryChannel:
+		case <-expiry.C:
 			pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			pauseErr := controlled.pause(pauseContext)
 			cancel()
 			if pauseErr != nil {
 				return fmt.Errorf("pause expired Agent Session: %w", pauseErr)
 			}
-			expiryChannel = nil
+			resetExpiry(controlled.expiryDelay(time.Now()))
 		case <-controlled.activity:
 			resetIdle(controlled.idleDelay(time.Now()))
+			resetExpiry(controlled.expiryDelay(time.Now()))
 		case now := <-idleTimer.C:
 			if controlled.idleExpired(now) {
 				pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -344,7 +383,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 		}
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second)
+	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -360,7 +399,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 	tui, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
 		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
 		SessionRoot: managed.active.Root, ServerURL: managed.active.AttachURL,
-		GuestWorkspace: managed.active.WorkspacePath, Password: managed.serverPassword,
+		GuestWorkspace: managed.active.WorkspacePath, Password: managed.initialActivation.activation.ServerPassword,
 		ExpectedExecutableSHA256: activeLock.Manifest.OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
 	if err != nil {
@@ -398,7 +437,7 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 		}
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second)
+	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}

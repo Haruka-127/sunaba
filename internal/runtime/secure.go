@@ -104,6 +104,9 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	if !secureIdentityPattern.MatchString(spec.Name) || len(spec.Name) < len("sunaba-") || spec.Name[:len("sunaba-")] != "sunaba-" {
 		return fmt.Errorf("secure container name must be a safe sunaba-* identity")
 	}
+	if spec.Name != "sunaba-"+canonical.ProjectID+"-"+canonical.VMID {
+		return fmt.Errorf("secure container name must match the Project VM identity")
+	}
 	if spec.Image != canonical.Image || spec.CPUs != canonical.CPUs || spec.Memory != canonical.Memory {
 		return fmt.Errorf("secure image and resource limits must match host policy")
 	}

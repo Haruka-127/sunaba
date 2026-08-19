@@ -15,6 +15,9 @@ func TestValidateSecureSessionSpec(t *testing.T) {
 	if err := ValidateSecureSessionSpec(spec, policy); err != nil {
 		t.Fatal(err)
 	}
+	if _, exists := spec.Labels["dev.sunaba.session"]; exists {
+		t.Fatal("immutable Project VM labels retained a transient Agent Session ID")
+	}
 }
 
 func TestValidateDevSessionSpecUsesExactDedicatedNetwork(t *testing.T) {
@@ -161,7 +164,7 @@ func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 		t.Fatal(err)
 	}
 	spec := ContainerSpec{
-		Name: "sunaba-test", Image: policy.Image, CPUs: 1, Memory: "2G",
+		Name: "sunaba-project-testvm", Image: policy.Image, CPUs: 1, Memory: "2G",
 		Ulimits:  map[string]RLimit{"nproc": {Soft: 64, Hard: 64}, "fsize": {Soft: 128 << 20, Hard: 128 << 20}, "nofile": {Soft: 1024, Hard: 1024}},
 		Networks: []string{"none"}, NoDNS: true, Init: true, CapAdd: []string{"SYS_ADMIN"},
 		Entrypoint: "/bin/bash", Args: []string{"-lc", "exec tail -f /dev/null"},

@@ -39,7 +39,7 @@ func TestPhase2ActualOrphanCleanup(t *testing.T) {
 	defer cleanupContainer(t, context.Background(), rt, name, runID)
 	labels := map[string]string{
 		"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID,
-		"dev.sunaba.session": sessionID, "dev.sunaba.mode": "secure", "dev.sunaba.run-id": runID,
+		"dev.sunaba.vm": sessionID, "dev.sunaba.mode": "secure", "dev.sunaba.run-id": runID,
 	}
 	if err := rt.Create(ctx, sunabaruntime.ContainerSpec{
 		Name: name, Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "1G",

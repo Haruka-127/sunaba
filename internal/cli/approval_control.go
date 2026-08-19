@@ -51,6 +51,7 @@ type pushConfirmRequest struct {
 type supervisorInfo struct {
 	Version        int       `json:"version"`
 	ProjectID      string    `json:"project_id"`
+	VMID           string    `json:"vm_id"`
 	SessionID      string    `json:"session_id"`
 	Container      string    `json:"container"`
 	RuntimeRoot    string    `json:"runtime_root"`
@@ -73,7 +74,7 @@ type shellResponse struct {
 
 type sessionControlTarget interface {
 	Pause(context.Context) error
-	Resume(context.Context) error
+	ResumeWith(context.Context, session.Activation) error
 	StopAndExport(context.Context) (session.ExportResult, error)
 	Destroy(context.Context) error
 	ExecOutput(context.Context, []string) (string, error)
@@ -83,6 +84,7 @@ type controlledSession struct {
 	active         sessionControlTarget
 	persistent     *session.Session
 	projectID      string
+	vmID           string
 	sessionID      string
 	container      string
 	runtimeRoot    string
@@ -99,29 +101,36 @@ type controlledSession struct {
 	state          string
 	exit           chan struct{}
 	exitOnce       sync.Once
+	activate       func(context.Context) (managedActivation, error)
+	gitBroker      *rotatingPushBroker
 }
 
-func newControlledSession(active *session.Session, projectState, serverPassword string, expiresAt time.Time, idleTimeout time.Duration) (*controlledSession, error) {
-	if active == nil || projectState == "" || len(serverPassword) < 32 || expiresAt.IsZero() || idleTimeout < time.Second {
+func newControlledSession(active *session.Session, projectState string, initial managedActivation, idleTimeout time.Duration, activate func(context.Context) (managedActivation, error), broker *rotatingPushBroker) (*controlledSession, error) {
+	if active == nil || projectState == "" || len(initial.activation.ServerPassword) < 32 || initial.expiresAt.IsZero() || idleTimeout < time.Second || activate == nil || broker == nil {
 		return nil, fmt.Errorf("supervisor session control is incomplete")
 	}
 	now := time.Now
 	return &controlledSession{
-		active: active, persistent: active, projectID: active.ProjectID, sessionID: active.SessionID, container: active.Container,
+		active: active, persistent: active, projectID: active.ProjectID, vmID: active.VMID, sessionID: active.SessionID, container: active.Container,
 		runtimeRoot: active.Root, workspacePath: active.WorkspacePath, attachURL: active.AttachURL,
-		projectState: projectState, serverPassword: serverPassword, expiresAt: expiresAt,
+		projectState: projectState, serverPassword: initial.activation.ServerPassword, expiresAt: initial.expiresAt,
 		idleTimeout: idleTimeout, lastActivity: now(), now: now, activity: make(chan struct{}, 1), state: "running", exit: make(chan struct{}),
+		activate: activate, gitBroker: broker,
 	}, nil
 }
 
 func (s *controlledSession) info() supervisorInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return supervisorInfo{
-		Version: 1, ProjectID: s.projectID, SessionID: s.sessionID, Container: s.container,
+	info := supervisorInfo{
+		Version: 2, ProjectID: s.projectID, VMID: s.vmID, SessionID: s.sessionID, Container: s.container,
 		RuntimeRoot: s.runtimeRoot, WorkspacePath: s.workspacePath, AttachURL: s.attachURL, ServerPassword: s.serverPassword,
 		State: s.state, ExpiresAt: s.expiresAt, IdleSeconds: int64(s.idleTimeout / time.Second), IdleDeadline: s.lastActivity.Add(s.idleTimeout),
 	}
+	if s.state != "running" {
+		info.SessionID, info.AttachURL, info.ServerPassword, info.ExpiresAt = "", "", "", time.Time{}
+	}
+	return info
 }
 
 func (s *controlledSession) pause(ctx context.Context) error {
@@ -138,27 +147,42 @@ func (s *controlledSession) pause(ctx context.Context) error {
 		return err
 	}
 	s.state = "paused"
+	s.sessionID, s.serverPassword = "", ""
+	s.expiresAt = time.Time{}
+	if s.gitBroker != nil {
+		s.gitBroker.Set(nil)
+	}
 	return nil
 }
 
 func (s *controlledSession) resume(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.currentTime().Before(s.expiresAt) {
-		return fmt.Errorf("Agent Session capability expired; export or recreate the stopped VM")
-	}
 	if s.state == "running" {
 		return nil
 	}
 	if s.state != "paused" {
 		return fmt.Errorf("supervisor session is not resumable")
 	}
-	if err := s.active.Resume(ctx); err != nil {
+	if s.activate == nil {
+		return fmt.Errorf("Agent Session activation factory is unavailable")
+	}
+	activation, err := s.activate(ctx)
+	if err != nil {
+		return err
+	}
+	if err := s.active.ResumeWith(ctx, activation.activation); err != nil {
 		s.state = "failed"
 		return err
 	}
 	if s.persistent != nil {
 		s.attachURL = s.persistent.AttachURL
+	}
+	s.sessionID = activation.activation.SessionID
+	s.serverPassword = activation.activation.ServerPassword
+	s.expiresAt = activation.expiresAt
+	if s.gitBroker != nil {
+		s.gitBroker.Set(activation.gitBroker)
 	}
 	s.touchLocked(s.currentTime())
 	s.state = "running"
@@ -186,6 +210,19 @@ func (s *controlledSession) idleDelay(now time.Time) time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delay := s.lastActivity.Add(s.idleTimeout).Sub(now)
+	if delay <= 0 {
+		return time.Nanosecond
+	}
+	return delay
+}
+
+func (s *controlledSession) expiryDelay(now time.Time) time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != "running" || s.expiresAt.IsZero() {
+		return 24 * time.Hour
+	}
+	delay := s.expiresAt.Sub(now)
 	if delay <= 0 {
 		return time.Nanosecond
 	}

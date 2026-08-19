@@ -75,6 +75,7 @@ type Config struct {
 	GuestRelayBinary   string
 	ProviderConfig     []byte
 	ModelGateway       http.Handler
+	ModelGatewayClose  func() error
 	ModelToken         string
 	GitGateway         http.Handler
 	GitRemotes         []GitRemote
@@ -96,18 +97,19 @@ type Config struct {
 // A Project VM may outlive many Activations, but a revoked Activation is never
 // resumed.
 type Activation struct {
-	SessionID       string
-	ProviderConfig  []byte
-	ModelGateway    http.Handler
-	ModelToken      string
-	GitGateway      http.Handler
-	GitRemotes      []GitRemote
-	GitGatewayClose func() error
-	WebGateway      http.Handler
-	WebToken        string
-	WebGatewayClose func() error
-	ServerPassword  string
-	LeaseTTL        time.Duration
+	SessionID         string
+	ProviderConfig    []byte
+	ModelGateway      http.Handler
+	ModelGatewayClose func() error
+	ModelToken        string
+	GitGateway        http.Handler
+	GitRemotes        []GitRemote
+	GitGatewayClose   func() error
+	WebGateway        http.Handler
+	WebToken          string
+	WebGatewayClose   func() error
+	ServerPassword    string
+	LeaseTTL          time.Duration
 }
 
 type Session struct {
@@ -142,6 +144,7 @@ type Session struct {
 	vmCreated        bool
 	paused           bool
 	closeOnce        sync.Once
+	modelCloseOnce   sync.Once
 	gitCloseOnce     sync.Once
 	webCloseOnce     sync.Once
 	devCloseOnce     sync.Once
@@ -332,7 +335,7 @@ func validateConfig(cfg Config) error {
 	if cfg.DiskBytes < 64<<20 || cfg.DiskBytes > 8<<30 || cfg.ProcessMax < 16 || cfg.ProcessMax > 4096 || cfg.FileSizeMax != cfg.DiskBytes || cfg.OpenFileMax < 256 || cfg.OpenFileMax > 1<<20 {
 		return fmt.Errorf("secure session disk, process, file size, and open-file limits are invalid")
 	}
-	if !filepath.IsAbs(cfg.GuestRelayBinary) || len(cfg.ProviderConfig) == 0 || !json.Valid(cfg.ProviderConfig) || cfg.ModelGateway == nil {
+	if !filepath.IsAbs(cfg.GuestRelayBinary) || len(cfg.ProviderConfig) == 0 || !json.Valid(cfg.ProviderConfig) || cfg.ModelGateway == nil || cfg.ModelGatewayClose == nil {
 		return fmt.Errorf("secure session requires the guest relay, provider config, and Model Gateway")
 	}
 	info, err := os.Lstat(cfg.GuestRelayBinary)
@@ -365,7 +368,7 @@ func validateConfig(cfg Config) error {
 
 func activationFromConfig(cfg Config) Activation {
 	return Activation{
-		SessionID: cfg.SessionID, ProviderConfig: cfg.ProviderConfig, ModelGateway: cfg.ModelGateway,
+		SessionID: cfg.SessionID, ProviderConfig: cfg.ProviderConfig, ModelGateway: cfg.ModelGateway, ModelGatewayClose: cfg.ModelGatewayClose,
 		ModelToken: cfg.ModelToken, GitGateway: cfg.GitGateway, GitRemotes: cfg.GitRemotes,
 		GitGatewayClose: cfg.GitGatewayClose, WebGateway: cfg.WebGateway, WebToken: cfg.WebToken,
 		WebGatewayClose: cfg.WebGatewayClose, ServerPassword: cfg.ServerPassword, LeaseTTL: cfg.LeaseTTL,
@@ -373,7 +376,7 @@ func activationFromConfig(cfg Config) Activation {
 }
 
 func validateActivation(activation Activation) error {
-	if !sessionIDPattern.MatchString(activation.SessionID) || len(activation.ProviderConfig) == 0 || !json.Valid(activation.ProviderConfig) || activation.ModelGateway == nil {
+	if !sessionIDPattern.MatchString(activation.SessionID) || len(activation.ProviderConfig) == 0 || !json.Valid(activation.ProviderConfig) || activation.ModelGateway == nil || activation.ModelGatewayClose == nil {
 		return fmt.Errorf("Agent Session activation identity and Model Gateway are required")
 	}
 	if !secretPattern.MatchString(activation.ModelToken) || !secretPattern.MatchString(activation.ServerPassword) || activation.ModelToken == activation.ServerPassword {
@@ -549,11 +552,11 @@ func (s *Session) ResumeWith(ctx context.Context, activation Activation) (err er
 	s.SessionID = activation.SessionID
 	s.cfg.SessionID = activation.SessionID
 	s.cfg.ProviderConfig = append([]byte(nil), activation.ProviderConfig...)
-	s.cfg.ModelGateway, s.cfg.ModelToken = activation.ModelGateway, activation.ModelToken
+	s.cfg.ModelGateway, s.cfg.ModelGatewayClose, s.cfg.ModelToken = activation.ModelGateway, activation.ModelGatewayClose, activation.ModelToken
 	s.cfg.GitGateway, s.cfg.GitRemotes, s.cfg.GitGatewayClose = activation.GitGateway, append([]GitRemote(nil), activation.GitRemotes...), activation.GitGatewayClose
 	s.cfg.WebGateway, s.cfg.WebToken, s.cfg.WebGatewayClose = activation.WebGateway, activation.WebToken, activation.WebGatewayClose
 	s.cfg.ServerPassword, s.cfg.LeaseTTL = activation.ServerPassword, activation.LeaseTTL
-	s.gitCloseOnce, s.webCloseOnce = sync.Once{}, sync.Once{}
+	s.modelCloseOnce, s.gitCloseOnce, s.webCloseOnce = sync.Once{}, sync.Once{}, sync.Once{}
 	s.gatewayActive.Store(false)
 	leaseActivated := false
 	defer func() {
@@ -1184,6 +1187,9 @@ func (s *Session) stopChannels(ctx context.Context) error {
 		s.gitCloseOnce.Do(func() { stopErr = errors.Join(stopErr, s.cfg.GitGatewayClose()) })
 	}
 	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.gatewayServer, &s.gatewayDone, "model_gateway.stopped"))
+	if s.cfg.ModelGatewayClose != nil {
+		s.modelCloseOnce.Do(func() { stopErr = errors.Join(stopErr, s.cfg.ModelGatewayClose()) })
+	}
 	return stopErr
 }
 
