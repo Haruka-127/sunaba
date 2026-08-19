@@ -51,6 +51,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 		t.Fatal("OpenCode server was not started as VM root")
 	}
 	shellWrapper := fake.copies["/run/sunaba/shell-wrapper"]
+	execWrapper := fake.copies["/run/sunaba/exec-wrapper"]
 	for _, expected := range []string{"/run/sunaba/session.env", "cd " + s.WorkspacePath, "GIT_DIR=/var/lib/sunaba/repository", `/bin/bash -lc "$1"`} {
 		if !strings.Contains(string(shellWrapper), expected) {
 			t.Fatalf("guest shell wrapper missing %q: %s", expected, shellWrapper)
@@ -59,6 +60,11 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if strings.Contains(string(shellWrapper), cfg.ModelToken) || strings.Contains(string(shellWrapper), cfg.ServerPassword) {
 		t.Fatal("guest shell wrapper contained a concrete capability")
 	}
+	for _, expected := range []string{"/run/sunaba/session.env", "relative=$1", `exec env`, `"$@"`} {
+		if !strings.Contains(string(execWrapper), expected) {
+			t.Fatalf("guest exec wrapper missing %q: %s", expected, execWrapper)
+		}
+	}
 	wrapper := filepath.Join(t.TempDir(), "shell-wrapper")
 	if err := os.WriteFile(wrapper, shellWrapper, 0500); err != nil {
 		t.Fatal(err)
@@ -66,7 +72,14 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if output, err := exec.Command("/bin/bash", "-n", wrapper).CombinedOutput(); err != nil {
 		t.Fatalf("guest shell wrapper syntax: %v: %s", err, output)
 	}
-	for _, name := range []string{"session.env", "opencode.json", "shell-wrapper", "session-input-bundle"} {
+	execWrapperPath := filepath.Join(t.TempDir(), "exec-wrapper")
+	if err := os.WriteFile(execWrapperPath, execWrapper, 0500); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("/bin/bash", "-n", execWrapperPath).CombinedOutput(); err != nil {
+		t.Fatalf("guest exec wrapper syntax: %v: %s", err, output)
+	}
+	for _, name := range []string{"session.env", "opencode.json", "shell-wrapper", "exec-wrapper", "session-input-bundle"} {
 		if _, err := os.Lstat(filepath.Join(s.Root, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("copied host session input %s remained: %v", name, err)
 		}
@@ -133,9 +146,9 @@ func assertGuestRuntimeInputPermissions(t *testing.T, command string) {
 		"chmod 0710 /run/sunaba",
 		"chown 0:0 /run/sunaba/guest-relay",
 		"chmod 0700 /run/sunaba/guest-relay",
-		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper",
+		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper /run/sunaba/exec-wrapper",
 		"chmod 0400 /run/sunaba/session.env /run/sunaba/opencode.json",
-		"chmod 0500 /run/sunaba/shell-wrapper",
+		"chmod 0500 /run/sunaba/shell-wrapper /run/sunaba/exec-wrapper",
 	} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("guest session input permissions missing %q: %s", expected, command)

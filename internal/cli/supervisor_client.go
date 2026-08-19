@@ -82,6 +82,9 @@ func (c *supervisorClient) info(ctx context.Context) (supervisorInfo, error) {
 	if info.State == "running" && (info.SessionID == "" || info.AttachURL == "" || len(info.ServerPassword) < 32 || info.ExpiresAt.IsZero()) {
 		return supervisorInfo{}, fmt.Errorf("active supervisor returned incomplete Agent Session authority")
 	}
+	if info.ModelUsed < 0 || info.ModelLimit < 0 || info.ModelUsed > info.ModelLimit {
+		return supervisorInfo{}, fmt.Errorf("active supervisor returned invalid model quota usage")
+	}
 	if info.State == "paused" && (info.SessionID != "" || info.AttachURL != "" || info.ServerPassword != "" || !info.ExpiresAt.IsZero()) {
 		return supervisorInfo{}, fmt.Errorf("paused Project VM exposed revoked Agent Session authority")
 	}
@@ -118,6 +121,25 @@ func (c *supervisorClient) shell(ctx context.Context, command string) (string, e
 		return "", fmt.Errorf("active supervisor returned invalid shell output")
 	}
 	return trustedui.SanitizeTerminal(shell.Output), nil
+}
+
+func (c *supervisorClient) exec(ctx context.Context, directory string, arguments []string) (execResponse, error) {
+	encoded, err := json.Marshal(execRequest{Directory: directory, Arguments: arguments})
+	if err != nil {
+		return execResponse{}, err
+	}
+	response, err := c.request(ctx, http.MethodPost, "/v1/session/exec", bytes.NewReader(encoded))
+	if err != nil {
+		return execResponse{}, err
+	}
+	defer response.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 3<<20))
+	decoder.DisallowUnknownFields()
+	var result execResponse
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.ExitCode < -1 || len(result.Stdout) > 2<<20 || len(result.Stderr) > 2<<20 {
+		return execResponse{}, fmt.Errorf("active supervisor returned invalid exec result")
+	}
+	return result, nil
 }
 
 func (c *supervisorClient) request(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {

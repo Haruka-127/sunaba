@@ -70,6 +70,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		{"git", "remote", "--help"},
 		{"changes", "--help"},
 		{"up", "--help"},
+		{"exec", "--help"},
 		{"destroy", "--help"},
 	} {
 		if err := a.run(context.Background(), args); err != nil {
@@ -77,7 +78,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		}
 	}
 	text := output.String()
-	for _, expected := range []string{"setup", "--config-only", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "remote", "add", "web", "approvals", "changes", "export", "review", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
+	for _, expected := range []string{"setup", "--config-only", "doctor", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "shell", "exec", "--cwd", "remote", "add", "web", "approvals", "changes", "export", "review", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -243,7 +244,7 @@ func TestEveryPublicProjectCommandExposesProjectIDSelector(t *testing.T) {
 		{"config", "path"}, {"config", "edit"}, {"config", "validate"}, {"config", "diff"}, {"config", "apply"}, {"config", "show"},
 		{"model", "auth", "api-key"}, {"model", "auth", "oauth"}, {"model", "set"}, {"model", "list"},
 		{"up"}, {"agent"}, {"git", "remote", "add"}, {"git", "remote", "remove"}, {"git", "remote", "list"}, {"git", "disable"},
-		{"web", "enable"}, {"web", "refresh"}, {"web", "disable"}, {"shell"}, {"status"},
+		{"web", "enable"}, {"web", "refresh"}, {"web", "disable"}, {"shell"}, {"exec"}, {"doctor"}, {"status"},
 		{"changes", "export"}, {"changes", "review"}, {"changes", "apply"}, {"approvals"}, {"recreate"}, {"down"}, {"destroy"},
 	}
 	for _, command := range commands {
@@ -876,6 +877,27 @@ func TestSupervisorExpiryAllowsFreshSessionButRejectsExpiredShell(t *testing.T) 
 	}
 }
 
+func TestSupervisorExecUsesExactArgvAndStructuredSanitizedOutput(t *testing.T) {
+	target := &fakeSessionControlTarget{output: "safe\n\x1b]52;c;bad\a"}
+	controlled := &controlledSession{
+		active: target, expiresAt: time.Now().Add(time.Minute), state: "running", lastActivity: time.Now(),
+	}
+	result, err := controlled.exec(context.Background(), "sub/dir", []string{"printf", "%s", "$(host-command)"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"runuser", "-u", "sunaba-agent", "--", "/run/sunaba/exec-wrapper", "sub/dir", "printf", "%s", "$(host-command)"}
+	if len(target.commands) != 1 || strings.Join(target.commands[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("guest argv=%v want=%v", target.commands, want)
+	}
+	if strings.ContainsRune(result.Stdout, '\x1b') || !strings.Contains(result.Stdout, "<U+001B>") || result.ExitCode != 0 {
+		t.Fatalf("structured result=%+v", result)
+	}
+	if _, err := controlled.exec(context.Background(), "../escape", []string{"true"}); err == nil || len(target.commands) != 1 {
+		t.Fatal("unsafe guest working directory reached runtime")
+	}
+}
+
 func TestSupervisorHeartbeatExtendsIdleDeadline(t *testing.T) {
 	clock := time.Unix(1_700_000_000, 0)
 	controlled := &controlledSession{
@@ -1059,12 +1081,22 @@ func (f *fakeSessionControlTarget) ExecOutput(_ context.Context, command []strin
 	return f.output, nil
 }
 
+func (f *fakeSessionControlTarget) ExecCapture(_ context.Context, command []string, _, _ int64) (runtime.ExecResult, error) {
+	f.commands = append(f.commands, append([]string(nil), command...))
+	return runtime.ExecResult{Stdout: f.output, ExitCode: 0}, nil
+}
+
 func (b *fakePushBroker) Pending() []gitgateway.PushRequest {
 	return append([]gitgateway.PushRequest(nil), b.pending...)
 }
 
 func (b *fakePushBroker) Confirm(nonce string, _ gitgateway.PushBinding) error {
 	b.confirmed = append(b.confirmed, nonce)
+	return nil
+}
+
+func (b *fakePushBroker) Reject(nonce string, _ gitgateway.PushBinding) error {
+	b.confirmed = append(b.confirmed, "rejected:"+nonce)
 	return nil
 }
 
@@ -1102,13 +1134,18 @@ func TestApprovalsUseSeparatePrivateHostControlChannel(t *testing.T) {
 	}
 	defer control.Close()
 	var output bytes.Buffer
-	a := &app{input: strings.NewReader(request.Nonce + "\n"), output: &output, errors: &output}
+	a := &app{input: strings.NewReader("approve 1\n"), output: &output, errors: &output}
 	approved, err := a.approveActivePushes(context.Background(), root)
 	if err != nil || approved != 1 || len(broker.confirmed) != 1 || broker.confirmed[0] != request.Nonce {
 		t.Fatalf("approved=%d confirmed=%v error=%v output=%s", approved, broker.confirmed, err, output.String())
 	}
 	if info, err := os.Lstat(filepath.Join(runtimeBase, approvalControlSocket)); err != nil || info.Mode().Perm() != 0600 || info.Mode()&os.ModeSocket == 0 {
 		t.Fatalf("control socket info=%v error=%v", info, err)
+	}
+	broker.pending = []gitgateway.PushRequest{request}
+	a.input = strings.NewReader("reject " + request.Digest[:12] + "\n")
+	if processed, err := a.approveActivePushes(context.Background(), root); err != nil || processed != -1 || broker.confirmed[len(broker.confirmed)-1] != "rejected:"+request.Nonce {
+		t.Fatalf("reject processed=%d confirmed=%v error=%v", processed, broker.confirmed, err)
 	}
 }
 
@@ -1128,8 +1165,9 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 		attachURL: "http://127.0.0.1:12345", projectState: projectState, serverPassword: strings.Repeat("s", 32),
 		expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "running", exit: make(chan struct{}),
 		activate: func(context.Context) (managedActivation, error) {
-			return managedActivation{activation: session.Activation{SessionID: "new-session", ServerPassword: strings.Repeat("n", 32)}, expiresAt: time.Now().Add(time.Hour)}, nil
+			return managedActivation{activation: session.Activation{SessionID: "new-session", ServerPassword: strings.Repeat("n", 32)}, expiresAt: time.Now().Add(time.Hour), modelUsage: func() (int64, int64) { return 2, 9 }}, nil
 		},
+		modelUsage: func() (int64, int64) { return 3, 10 },
 	}
 	control, err := startApprovalControl(projectState, runtimeBase, nil, controlled)
 	if err != nil {
@@ -1149,7 +1187,7 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 	if err != nil || info.State != "running" || info.Container != "sunaba-project-vm" {
 		t.Fatalf("info=%+v error=%v", info, err)
 	}
-	if info.IdleSeconds != 900 || info.IdleDeadline.IsZero() {
+	if info.IdleSeconds != 900 || info.IdleDeadline.IsZero() || info.ModelUsed != 3 || info.ModelLimit != 10 {
 		t.Fatalf("idle policy missing from supervisor info: %+v", info)
 	}
 	if err := client.operation(context.Background(), "heartbeat"); err != nil {
@@ -1159,14 +1197,14 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	paused, err := client.info(context.Background())
-	if err != nil || paused.State != "paused" || paused.SessionID != "" || paused.AttachURL != "" || paused.ServerPassword != "" || !paused.ExpiresAt.IsZero() {
+	if err != nil || paused.State != "paused" || paused.SessionID != "" || paused.AttachURL != "" || paused.ServerPassword != "" || !paused.ExpiresAt.IsZero() || paused.ModelUsed != 0 || paused.ModelLimit != 0 {
 		t.Fatalf("paused Supervisor exposed revoked authority: info=%+v error=%v", paused, err)
 	}
 	if err := client.operation(context.Background(), "resume"); err != nil {
 		t.Fatal(err)
 	}
 	rotated, err := client.info(context.Background())
-	if err != nil || rotated.VMID != "vm" || rotated.Container != "sunaba-project-vm" || rotated.SessionID != "new-session" || rotated.ServerPassword == strings.Repeat("s", 32) {
+	if err != nil || rotated.VMID != "vm" || rotated.Container != "sunaba-project-vm" || rotated.SessionID != "new-session" || rotated.ServerPassword == strings.Repeat("s", 32) || rotated.ModelUsed != 2 || rotated.ModelLimit != 9 {
 		t.Fatalf("rotated session info=%+v error=%v", rotated, err)
 	}
 	output, err := client.shell(context.Background(), "printf test")

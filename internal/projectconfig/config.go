@@ -218,6 +218,51 @@ func (s *Store) Load(projectID string) (Config, []webgateway.OriginRule, error) 
 	return config, rules, nil
 }
 
+// LoadReadOnly validates the two Project configuration files without
+// recovering or writing a pending transaction.
+func (s *Store) LoadReadOnly(projectID string) (Config, []webgateway.OriginRule, error) {
+	paths, err := s.ProjectPaths(projectID)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	for _, directory := range []string{s.Root, filepath.Join(s.Root, "projects"), paths.Directory} {
+		if err := checkPrivateDirectory(directory); err != nil {
+			return Config{}, nil, err
+		}
+	}
+	data, err := readPrivateFile(paths.Project, maxConfigBytes)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	var config Config
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		return Config{}, nil, fmt.Errorf("decode Project configuration: %w", err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return Config{}, nil, fmt.Errorf("Project configuration contains trailing data")
+	}
+	if config.SchemaVersion == 1 || config.SchemaVersion == 2 {
+		config.SchemaVersion = CurrentSchemaVersion
+	}
+	rulesData, err := readPrivateFile(paths.WebOrigins, maxOriginsBytes)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	rules, err := ParseOrigins(rulesData)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	if state.ProjectID(config.ProjectRoot) != projectID {
+		return Config{}, nil, fmt.Errorf("Project configuration identity does not match its directory")
+	}
+	if err := Validate(config, rules); err != nil {
+		return Config{}, nil, err
+	}
+	return config, rules, nil
+}
+
 func configTransactionJournal(paths Paths) string {
 	return filepath.Join(paths.Directory, ".config-transaction.json")
 }

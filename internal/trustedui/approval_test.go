@@ -48,33 +48,23 @@ func TestSanitizeTerminalPreservesLinesAndEscapesHostActions(t *testing.T) {
 	}
 }
 
-func TestConfirmPushDisplaysObjectForceAndDeleteBinding(t *testing.T) {
+func TestSelectPushBindsNumberOrIDWithoutNonceInput(t *testing.T) {
 	request := gitgateway.PushRequest{
-		Nonce: strings.Repeat("n", 43), Digest: "",
-		ExpiresAt: time.Now().Add(time.Minute),
-		Binding: gitgateway.PushBinding{
-			ProjectID: "project", Repository: "repository", RemoteName: "origin", RemoteURL: "https://example.com/repository.git",
-			Updates: []gitgateway.RefUpdate{
-				{Ref: "refs/heads/main", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40), Force: true},
-				{Ref: "refs/heads/obsolete", Old: strings.Repeat("c", 40), New: strings.Repeat("0", 40), Delete: true},
-			},
-		},
+		Nonce: strings.Repeat("n", 43), ExpiresAt: time.Now().Add(time.Minute),
+		Binding: gitgateway.PushBinding{ProjectID: "project", Repository: "repository", RemoteName: "origin", RemoteURL: "https://example.com/repository.git", Updates: []gitgateway.RefUpdate{{Ref: "refs/heads/main", Old: strings.Repeat("a", 40), New: strings.Repeat("b", 40)}}},
 	}
 	request.Digest = pushRequestDigest(t, request)
 	var output bytes.Buffer
-	if err := ConfirmPush(strings.NewReader(request.Nonce+"\n"), &output, request); err != nil {
-		t.Fatal(err)
+	index, decision, err := SelectPush(strings.NewReader("approve 1\n"), &output, []gitgateway.PushRequest{request})
+	if err != nil || index != 0 || decision != "approve" {
+		t.Fatalf("selection index=%d decision=%q error=%v", index, decision, err)
 	}
-	text := output.String()
-	for _, required := range []string{"Operation: Git push", request.Binding.RemoteURL, request.Digest, "refs/heads/main", "Force: true", "refs/heads/obsolete", "Delete: true", "Approved by host input"} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("Trusted Git UI missing %q: %q", required, text)
-		}
+	if strings.Contains(output.String(), request.Nonce) || !strings.Contains(output.String(), request.Digest[:12]) {
+		t.Fatalf("selection output exposed nonce or omitted ID: %s", output.String())
 	}
-	changed := request
-	changed.Digest = strings.Repeat("f", 64)
-	if err := ConfirmPush(strings.NewReader(changed.Nonce+"\n"), ioDiscard{}, changed); err == nil {
-		t.Fatal("Trusted Git UI accepted mismatched digest")
+	index, decision, err = SelectPush(strings.NewReader("reject "+request.Digest[:12]+"\n"), ioDiscard{}, []gitgateway.PushRequest{request})
+	if err != nil || index != 0 || decision != "reject" {
+		t.Fatalf("ID selection index=%d decision=%q error=%v", index, decision, err)
 	}
 }
 

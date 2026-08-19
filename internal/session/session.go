@@ -533,6 +533,21 @@ func (s *Session) ExecOutput(ctx context.Context, command []string) (string, err
 	return s.cfg.Runtime.ExecOutput(ctx, s.Container, command)
 }
 
+// ExecCapture runs a bounded argv command in the existing VM. The production
+// runtime must support structured capture; no shell-string fallback is used.
+func (s *Session) ExecCapture(ctx context.Context, command []string, stdoutLimit, stderrLimit int64) (runtime.ExecResult, error) {
+	if !s.vmCreated || len(command) == 0 {
+		return runtime.ExecResult{}, fmt.Errorf("session VM is not available")
+	}
+	capturer, ok := s.cfg.Runtime.(interface {
+		ExecCapture(context.Context, string, []string, int64, int64) (runtime.ExecResult, error)
+	})
+	if !ok {
+		return runtime.ExecResult{}, fmt.Errorf("runtime does not support structured guest exec")
+	}
+	return capturer.ExecCapture(ctx, s.Container, command, stdoutLimit, stderrLimit)
+}
+
 func (s *Session) startGateway() error {
 	server, done, err := s.startUnixGateway("model-gateway.sock", s.cfg.ModelGateway)
 	if err != nil {
@@ -833,9 +848,9 @@ func (s *Session) guestRuntimeInputPermissionCommands() []string {
 		"chmod 0710 /run/sunaba",
 		"chown 0:0 /run/sunaba/guest-relay",
 		"chmod 0700 /run/sunaba/guest-relay",
-		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper",
+		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper /run/sunaba/exec-wrapper",
 		"chmod 0400 /run/sunaba/session.env /run/sunaba/opencode.json",
-		"chmod 0500 /run/sunaba/shell-wrapper",
+		"chmod 0500 /run/sunaba/shell-wrapper /run/sunaba/exec-wrapper",
 	}
 	if s.cfg.WebGateway != nil {
 		commands = append(commands,
@@ -864,6 +879,7 @@ func (s *Session) restoreGuestRuntimeInputs(ctx context.Context) (err error) {
 	providerPath := filepath.Join(bundlePath, "opencode.json")
 	envPath := filepath.Join(bundlePath, "session.env")
 	shellWrapperPath := filepath.Join(bundlePath, "shell-wrapper")
+	execWrapperPath := filepath.Join(bundlePath, "exec-wrapper")
 	relayPath := filepath.Join(bundlePath, "guest-relay")
 	if err := copyPrivateRegularFile(s.cfg.GuestRelayBinary, relayPath, 0700); err != nil {
 		return fmt.Errorf("stage guest relay: %w", err)
@@ -884,6 +900,9 @@ func (s *Session) restoreGuestRuntimeInputs(ctx context.Context) (err error) {
 		return err
 	}
 	if err := os.WriteFile(shellWrapperPath, []byte(s.guestShellWrapper()), 0600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(execWrapperPath, []byte(s.guestExecWrapper()), 0600); err != nil {
 		return err
 	}
 	if s.cfg.WebGateway != nil {
@@ -940,7 +959,20 @@ func (s *Session) guestShellWrapper() string {
 	if s.cfg.WebGateway != nil {
 		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
 	}
-	return "#!/bin/bash\nset -eu\nset -a\n. /run/sunaba/session.env\nset +a\ncd " + s.WorkspacePath + "\nexec env HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment + " /bin/bash -lc \"$1\"\n"
+	return "#!/bin/bash\nset -eu\nset -a\n. /run/sunaba/session.env\nset +a\ncd " + s.WorkspacePath + "\nexec env " + s.guestCommandEnvironment(gitEnvironment, webEnvironment) + " /bin/bash -lc \"$1\"\n"
+}
+
+func (s *Session) guestExecWrapper() string {
+	gitEnvironment := s.guestGitEnvironment()
+	webEnvironment := ""
+	if s.cfg.WebGateway != nil {
+		webEnvironment = " HTTP_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 HTTPS_PROXY=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 http_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 https_proxy=http://sunaba:$SUNABA_WEB_GATEWAY_TOKEN@127.0.0.1:4343 NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost APT_CONFIG=/run/sunaba/apt-proxy.conf"
+	}
+	return "#!/bin/bash\nset -eu\nset -a\n. /run/sunaba/session.env\nset +a\nrelative=$1\nshift\ncd -- " + s.WorkspacePath + "/\"$relative\"\nexec env " + s.guestCommandEnvironment(gitEnvironment, webEnvironment) + " \"$@\"\n"
+}
+
+func (s *Session) guestCommandEnvironment(gitEnvironment, webEnvironment string) string {
+	return "HOME=/run/sunaba/home XDG_CONFIG_HOME=/run/sunaba/config XDG_DATA_HOME=/run/sunaba/data GIT_DIR=/var/lib/sunaba/repository GIT_WORK_TREE=" + s.WorkspacePath + gitEnvironment + webEnvironment
 }
 
 func (s *Session) guestGitEnvironment() string {

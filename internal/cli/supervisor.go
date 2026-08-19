@@ -43,6 +43,7 @@ type managedActivation struct {
 	expiresAt   time.Time
 	idleTimeout time.Duration
 	gitBroker   pushApprovalBroker
+	modelUsage  func() (int64, int64)
 }
 
 func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (*managedSession, error) {
@@ -288,7 +289,7 @@ func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.Pro
 		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
 		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
 		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second,
-	}, expiresAt: expiresAt, idleTimeout: time.Duration(projectPolicy.Session.IdleSeconds) * time.Second, gitBroker: gateways.gitBroker}, nil
+	}, expiresAt: expiresAt, idleTimeout: time.Duration(projectPolicy.Session.IdleSeconds) * time.Second, gitBroker: gateways.gitBroker, modelUsage: gateway.Usage}, nil
 }
 
 func pruneProjectAudit(recorder *audit.Recorder, projectPolicy policy.ProjectPolicy, now time.Time) error {

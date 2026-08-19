@@ -32,6 +32,7 @@ import (
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/trustedui"
+	"sunaba/internal/webgateway"
 	"sunaba/internal/workspace"
 )
 
@@ -408,6 +409,66 @@ func (a *app) runSanitizedShell(ctx context.Context, execute func(context.Contex
 	return scanner.Err()
 }
 
+func (a *app) execGuest(ctx context.Context, dir, guestDirectory string, timeout time.Duration, arguments []string) (returnErr error) {
+	if len(arguments) == 0 {
+		return fmt.Errorf("sunaba exec requires a command after --")
+	}
+	if timeout < time.Second || timeout > 10*time.Minute {
+		return fmt.Errorf("exec timeout must be between 1s and 10m")
+	}
+	projectPolicy, _, projectState, err := a.loadPolicy(dir)
+	if err != nil {
+		return err
+	}
+	if _, err := a.requireActiveProjectDependency(projectPolicy); err != nil {
+		return err
+	}
+	if projectPolicy.Mode == "dev" {
+		return fmt.Errorf("sunaba exec currently requires secure mode; use the foreground sanitized shell for dev mode")
+	}
+	client, info, err := a.ensureSupervisor(ctx, projectPolicy.ProjectRoot, projectState)
+	if err != nil {
+		return err
+	}
+	defer client.close()
+	if info.State == "paused" {
+		if err := client.operation(ctx, "resume"); err != nil {
+			return err
+		}
+	}
+	defer func() {
+		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		returnErr = errors.Join(returnErr, client.operation(pauseContext, "pause"))
+	}()
+	commandContext, cancel := context.WithTimeout(ctx, timeout)
+	result, err := client.exec(commandContext, guestDirectory, arguments)
+	cancel()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.output, "Command: argv (%d arguments)\nWorking directory: %s\nExit code: %d\nTimed out: %t\nStdout truncated: %t\nStderr truncated: %t\n", len(arguments), trustedui.SanitizeTerminal(guestDirectory), result.ExitCode, result.TimedOut, result.StdoutTruncated, result.StderrTruncated)
+	if result.Stdout != "" {
+		fmt.Fprintf(a.output, "Stdout:\n%s", result.Stdout)
+		if !strings.HasSuffix(result.Stdout, "\n") {
+			fmt.Fprintln(a.output)
+		}
+	}
+	if result.Stderr != "" {
+		fmt.Fprintf(a.output, "Stderr:\n%s", result.Stderr)
+		if !strings.HasSuffix(result.Stderr, "\n") {
+			fmt.Fprintln(a.output)
+		}
+	}
+	if result.TimedOut {
+		return fmt.Errorf("guest command timed out")
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("guest command exited with status %d", result.ExitCode)
+	}
+	return nil
+}
+
 func (a *app) status(ctx context.Context, dir string) error {
 	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
@@ -415,7 +476,9 @@ func (a *app) status(ctx context.Context, dir string) error {
 	}
 	states := make([]string, 0)
 	sessionExpiry := "none"
+	sessionRemaining := "not active"
 	idleDeadline := "none"
+	modelUsage := "unavailable (no active Agent Session)"
 	unexported := "none"
 	listErr := error(nil)
 	if client, clientErr := openSupervisorClient(projectState); clientErr == nil {
@@ -424,6 +487,16 @@ func (a *app) status(ctx context.Context, dir string) error {
 			if info.State == "running" {
 				sessionExpiry = info.ExpiresAt.UTC().Format(time.RFC3339)
 				idleDeadline = info.IdleDeadline.UTC().Format(time.RFC3339)
+				remaining := time.Until(info.ExpiresAt)
+				if remaining < 0 {
+					remaining = 0
+				}
+				sessionRemaining = remaining.Round(time.Second).String()
+				if info.ModelLimit > 0 {
+					modelUsage = fmt.Sprintf("%d/%d requests", info.ModelUsed, info.ModelLimit)
+				} else {
+					modelUsage = "unavailable (Supervisor did not expose a quota)"
+				}
 			}
 			unexported = "possible (run 'sunaba changes export' to compute the trusted Change Set)"
 		} else if infoErr != nil {
@@ -474,7 +547,26 @@ func (a *app) status(ctx context.Context, dir string) error {
 	}
 	webState := "disabled"
 	if projectPolicy.Web.Enabled {
-		webState = fmt.Sprintf("enabled (%d origin rules, pinned blocklist %s)", len(projectPolicy.Web.Rules), projectPolicy.Web.BlocklistSHA256)
+		webState = fmt.Sprintf("enabled (%d origin rules, blocklist unavailable)", len(projectPolicy.Web.Rules))
+		manifestData, manifestErr := readOwnedPrivateFile(filepath.Join(projectState, "web", "blocklist.json"), 64<<10)
+		if manifestErr == nil {
+			if manifest, decodeErr := webgateway.ParseBlocklistManifest(manifestData); decodeErr == nil && manifest.SHA256 == projectPolicy.Web.BlocklistSHA256 {
+				state := "valid"
+				blocklistData, dataErr := readOwnedPrivateFile(filepath.Join(projectState, "web", "blocklist.hosts"), 8<<20)
+				if dataErr != nil {
+					state = "invalid/unavailable: " + dataErr.Error()
+				} else if _, loadErr := webgateway.LoadBlocklist(manifest, blocklistData, time.Now()); loadErr != nil {
+					state = "invalid or expired (Web Gateway fails closed): " + loadErr.Error()
+				}
+				webState = fmt.Sprintf("enabled (%d origin rules, blocklist %s, expires %s, %s)", len(projectPolicy.Web.Rules), manifest.SHA256, manifest.ExpiresAt.UTC().Format(time.RFC3339), state)
+			} else if decodeErr != nil {
+				webState = fmt.Sprintf("enabled (%d origin rules, invalid blocklist: %s)", len(projectPolicy.Web.Rules), decodeErr)
+			} else {
+				webState = fmt.Sprintf("enabled (%d origin rules, blocklist digest mismatch)", len(projectPolicy.Web.Rules))
+			}
+		} else {
+			webState = fmt.Sprintf("enabled (%d origin rules, blocklist unavailable: %s)", len(projectPolicy.Web.Rules), manifestErr)
+		}
 	}
 	configState := "invalid"
 	configPath := "unavailable"
@@ -499,15 +591,15 @@ func (a *app) status(ctx context.Context, dir string) error {
 	if _, err := a.requireActiveProjectDependency(projectPolicy); err != nil {
 		dependencyState = "not active: " + err.Error()
 	}
-	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nDependency lock: %s\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nDev export recovery: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
+	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nDependency lock: %s\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nSession remaining: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nDev export recovery: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota policy: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nModel quota usage: %s\nGit Gateway: %s\nWeb Gateway: %s\n",
 		projectPolicy.ProjectRoot, projectPolicy.ProjectID, projectPolicy.Mode, projectPolicy.SchemaVersion,
 		configPath, configState, dependencyState,
 		projectPolicy.Dependency.OpenCode, projectPolicy.Dependency.AppleContainer, projectPolicy.Dependency.AgentImage,
-		sessionVMs, sessionExpiry, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, recoveryState, pending,
+		sessionVMs, sessionExpiry, sessionRemaining, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, recoveryState, pending,
 		projectPolicy.Resources.CPUs, projectPolicy.Resources.Memory, projectPolicy.Resources.DiskBytes, projectPolicy.Resources.ProcessMax, projectPolicy.Resources.FileSizeMax, projectPolicy.Resources.OpenFileMax,
 		projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","),
-		projectPolicy.Model.MaxRequests, projectPolicy.Model.MaxConcurrent, projectPolicy.Model.MaxRequestBytes, projectPolicy.Model.MaxResponseBytes,
-		gitState, webState)
+		projectPolicy.Model.MaxRequests, projectPolicy.Model.MaxConcurrent, projectPolicy.Model.MaxRequestBytes, projectPolicy.Model.MaxResponseBytes, modelUsage,
+		gitState, trustedui.SanitizeTerminal(webState))
 	return listErr
 }
 

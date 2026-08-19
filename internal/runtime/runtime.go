@@ -60,6 +60,17 @@ type Info struct {
 	Labels map[string]string
 }
 
+// ExecResult is bounded output from one argv-based command in an Agent VM.
+// It never represents a host shell command.
+type ExecResult struct {
+	Stdout          string
+	Stderr          string
+	ExitCode        int
+	TimedOut        bool
+	StdoutTruncated bool
+	StderrTruncated bool
+}
+
 type Runtime interface {
 	ImageExists(ctx context.Context, tag string) (bool, error)
 	BuildImage(ctx context.Context, tag, contextDir string, buildArgs map[string]string) error

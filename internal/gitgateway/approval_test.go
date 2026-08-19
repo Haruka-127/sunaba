@@ -88,6 +88,22 @@ func TestPushApprovalGrantRetainsRequestExpiry(t *testing.T) {
 	}
 }
 
+func TestPushApprovalRejectConsumesExactBoundRequest(t *testing.T) {
+	recorder, _ := audit.NewRecorder(filepath.Join(t.TempDir(), "audit"))
+	manager, _ := NewPushApprovalManager(nil, recorder, "vm", "session")
+	binding := pushBinding()
+	request, err := manager.NewRequest(binding, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Reject(request.Nonce, binding); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Confirm(request.Nonce, binding); !errors.Is(err, ErrPushApprovalInvalid) {
+		t.Fatalf("rejected request remained confirmable: %v", err)
+	}
+}
+
 func pushBinding() PushBinding {
 	return PushBinding{
 		ProjectID: "project", Repository: "origin-repository", RemoteName: "origin", RemoteURL: "HTTPS://Example.COM/repo.git",

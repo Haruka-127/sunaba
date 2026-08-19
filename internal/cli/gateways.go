@@ -79,6 +79,16 @@ func (b *rotatingPushBroker) Confirm(nonce string, binding gitgateway.PushBindin
 	return current.Confirm(nonce, binding)
 }
 
+func (b *rotatingPushBroker) Reject(nonce string, binding gitgateway.PushBinding) error {
+	b.mu.RLock()
+	current := b.current
+	b.mu.RUnlock()
+	if current == nil {
+		return fmt.Errorf("Git push approval is not pending")
+	}
+	return current.Reject(nonce, binding)
+}
+
 func (b *multiPushBroker) Pending() []gitgateway.PushRequest {
 	var pending []gitgateway.PushRequest
 	for _, broker := range b.brokers {
@@ -92,6 +102,17 @@ func (b *multiPushBroker) Confirm(nonce string, binding gitgateway.PushBinding) 
 		for _, pending := range broker.Pending() {
 			if pending.Nonce == nonce {
 				return broker.Confirm(nonce, binding)
+			}
+		}
+	}
+	return fmt.Errorf("Git push approval is not pending")
+}
+
+func (b *multiPushBroker) Reject(nonce string, binding gitgateway.PushBinding) error {
+	for _, broker := range b.brokers {
+		for _, pending := range broker.Pending() {
+			if pending.Nonce == nonce {
+				return broker.Reject(nonce, binding)
 			}
 		}
 	}

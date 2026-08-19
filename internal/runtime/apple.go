@@ -202,6 +202,35 @@ func (r *AppleContainer) ExecOutput(ctx context.Context, name string, command []
 	return r.output(ctx, "container", args...)
 }
 
+// ExecCapture executes an argv vector directly through Apple Container and
+// keeps stdout, stderr, exit status, timeout, and truncation separate.
+func (r *AppleContainer) ExecCapture(ctx context.Context, name string, command []string, stdoutLimit, stderrLimit int64) (ExecResult, error) {
+	if !strings.HasPrefix(name, "sunaba-") || len(command) == 0 || stdoutLimit <= 0 || stderrLimit <= 0 {
+		return ExecResult{}, fmt.Errorf("bounded guest exec is invalid")
+	}
+	args := append([]string{"exec", name}, command...)
+	cmd := exec.CommandContext(ctx, "container", args...)
+	result, err := boundedexec.Capture(cmd, boundedexec.Limits{StdoutBytes: stdoutLimit, StderrBytes: stderrLimit})
+	exitCode := 0
+	var exitErr *exec.ExitError
+	if err != nil {
+		exitCode = -1
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+	captured := ExecResult{
+		Stdout: string(result.Stdout), Stderr: string(result.Stderr), ExitCode: exitCode,
+		TimedOut:        errors.Is(ctx.Err(), context.DeadlineExceeded),
+		StdoutTruncated: errors.Is(err, boundedexec.ErrStdoutLimit),
+		StderrTruncated: errors.Is(err, boundedexec.ErrStderrLimit),
+	}
+	if err != nil && exitErr == nil && !captured.TimedOut && !captured.StdoutTruncated && !captured.StderrTruncated {
+		return captured, fmt.Errorf("container guest exec failed: %w", err)
+	}
+	return captured, nil
+}
+
 func (r *AppleContainer) CopyTo(ctx context.Context, name, source, target string) error {
 	if !strings.HasPrefix(name, "sunaba-") {
 		return fmt.Errorf("refusing to copy into non-sunaba container %q", name)

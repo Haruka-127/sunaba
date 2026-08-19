@@ -19,6 +19,7 @@ import (
 
 	"sunaba/internal/gitgateway"
 	"sunaba/internal/recovery"
+	"sunaba/internal/runtime"
 	"sunaba/internal/session"
 	"sunaba/internal/trustedui"
 )
@@ -42,9 +43,10 @@ type approvalLocator struct {
 type pushApprovalBroker interface {
 	Pending() []gitgateway.PushRequest
 	Confirm(string, gitgateway.PushBinding) error
+	Reject(string, gitgateway.PushBinding) error
 }
 
-type pushConfirmRequest struct {
+type pushDecisionRequest struct {
 	Nonce   string                 `json:"nonce"`
 	Binding gitgateway.PushBinding `json:"binding"`
 }
@@ -63,6 +65,8 @@ type supervisorInfo struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 	IdleSeconds    int64     `json:"idle_seconds"`
 	IdleDeadline   time.Time `json:"idle_deadline"`
+	ModelUsed      int64     `json:"model_used"`
+	ModelLimit     int64     `json:"model_limit"`
 }
 
 type shellRequest struct {
@@ -73,12 +77,27 @@ type shellResponse struct {
 	Output string `json:"output"`
 }
 
+type execRequest struct {
+	Directory string   `json:"directory"`
+	Arguments []string `json:"arguments"`
+}
+
+type execResponse struct {
+	Stdout          string `json:"stdout"`
+	Stderr          string `json:"stderr"`
+	ExitCode        int    `json:"exit_code"`
+	TimedOut        bool   `json:"timed_out"`
+	StdoutTruncated bool   `json:"stdout_truncated"`
+	StderrTruncated bool   `json:"stderr_truncated"`
+}
+
 type sessionControlTarget interface {
 	Pause(context.Context) error
 	ResumeWith(context.Context, session.Activation) error
 	StopAndExport(context.Context) (session.ExportResult, error)
 	Destroy(context.Context) error
 	ExecOutput(context.Context, []string) (string, error)
+	ExecCapture(context.Context, []string, int64, int64) (runtime.ExecResult, error)
 }
 
 type controlledSession struct {
@@ -104,6 +123,7 @@ type controlledSession struct {
 	exitOnce       sync.Once
 	activate       func(context.Context) (managedActivation, error)
 	gitBroker      *rotatingPushBroker
+	modelUsage     func() (int64, int64)
 }
 
 func newControlledSession(active *session.Session, projectState string, initial managedActivation, idleTimeout time.Duration, activate func(context.Context) (managedActivation, error), broker *rotatingPushBroker) (*controlledSession, error) {
@@ -117,6 +137,7 @@ func newControlledSession(active *session.Session, projectState string, initial 
 		projectState: projectState, serverPassword: initial.activation.ServerPassword, expiresAt: initial.expiresAt,
 		idleTimeout: idleTimeout, lastActivity: now(), now: now, activity: make(chan struct{}, 1), state: "running", exit: make(chan struct{}),
 		activate: activate, gitBroker: broker,
+		modelUsage: initial.modelUsage,
 	}, nil
 }
 
@@ -127,6 +148,9 @@ func (s *controlledSession) info() supervisorInfo {
 		Version: 2, ProjectID: s.projectID, VMID: s.vmID, SessionID: s.sessionID, Container: s.container,
 		RuntimeRoot: s.runtimeRoot, WorkspacePath: s.workspacePath, AttachURL: s.attachURL, ServerPassword: s.serverPassword,
 		State: s.state, ExpiresAt: s.expiresAt, IdleSeconds: int64(s.idleTimeout / time.Second), IdleDeadline: s.lastActivity.Add(s.idleTimeout),
+	}
+	if s.state == "running" && s.modelUsage != nil {
+		info.ModelUsed, info.ModelLimit = s.modelUsage()
 	}
 	if s.state != "running" {
 		info.SessionID, info.AttachURL, info.ServerPassword, info.ExpiresAt = "", "", "", time.Time{}
@@ -185,6 +209,7 @@ func (s *controlledSession) resume(ctx context.Context) error {
 	if activation.idleTimeout >= time.Second {
 		s.idleTimeout = activation.idleTimeout
 	}
+	s.modelUsage = activation.modelUsage
 	if s.gitBroker != nil {
 		s.gitBroker.Set(activation.gitBroker)
 	}
@@ -330,6 +355,35 @@ func (s *controlledSession) shell(ctx context.Context, command string) (string, 
 	return trustedui.SanitizeTerminal(output), err
 }
 
+func (s *controlledSession) exec(ctx context.Context, directory string, arguments []string) (execResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.currentTime().Before(s.expiresAt) || s.state != "running" {
+		return execResponse{}, fmt.Errorf("guest exec requires an active Agent Session")
+	}
+	if directory == "" {
+		directory = "."
+	}
+	if filepath.IsAbs(directory) || filepath.Clean(directory) != directory || directory == ".." || strings.HasPrefix(directory, "../") || len(directory) > 4096 || strings.IndexByte(directory, 0) >= 0 || len(arguments) == 0 || len(arguments) > 256 {
+		return execResponse{}, fmt.Errorf("guest exec directory or argv is invalid")
+	}
+	for _, argument := range arguments {
+		if len(argument) > 16<<10 || strings.IndexByte(argument, 0) >= 0 {
+			return execResponse{}, fmt.Errorf("guest exec argv is invalid")
+		}
+	}
+	s.touchLocked(s.currentTime())
+	command := append([]string{"runuser", "-u", "sunaba-agent", "--", "/run/sunaba/exec-wrapper", directory}, arguments...)
+	result, err := s.active.ExecCapture(ctx, command, 1<<20, 1<<20)
+	if err != nil {
+		return execResponse{}, err
+	}
+	return execResponse{
+		Stdout: trustedui.SanitizeTerminal(result.Stdout), Stderr: trustedui.SanitizeTerminal(result.Stderr), ExitCode: result.ExitCode,
+		TimedOut: result.TimedOut, StdoutTruncated: result.StdoutTruncated, StderrTruncated: result.StderrTruncated,
+	}, nil
+}
+
 func (s *controlledSession) signalExit() { s.exitOnce.Do(func() { close(s.exit) }) }
 
 func (s *controlledSession) recoveryRetained() bool {
@@ -384,12 +438,30 @@ func startApprovalControl(projectState, runtimeBase string, broker pushApprovalB
 		}
 		decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
 		decoder.DisallowUnknownFields()
-		var confirmation pushConfirmRequest
+		var confirmation pushDecisionRequest
 		if decoder.Decode(&confirmation) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 			http.Error(response, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 			return
 		}
 		if err := broker.Confirm(confirmation.Nonce, confirmation.Binding); err != nil {
+			http.Error(response, http.StatusText(http.StatusConflict), http.StatusConflict)
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /v1/push/reject", func(response http.ResponseWriter, request *http.Request) {
+		if broker == nil {
+			http.NotFound(response, request)
+			return
+		}
+		decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+		decoder.DisallowUnknownFields()
+		var decision pushDecisionRequest
+		if decoder.Decode(&decision) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			http.Error(response, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
+		if err := broker.Reject(decision.Nonce, decision.Binding); err != nil {
 			http.Error(response, http.StatusText(http.StatusConflict), http.StatusConflict)
 			return
 		}
@@ -435,6 +507,22 @@ func startApprovalControl(projectState, runtimeBase string, broker pushApprovalB
 			}
 			response.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(response).Encode(shellResponse{Output: output})
+		})
+		mux.HandleFunc("POST /v1/session/exec", func(response http.ResponseWriter, request *http.Request) {
+			decoder := json.NewDecoder(io.LimitReader(request.Body, 4<<20))
+			decoder.DisallowUnknownFields()
+			var execution execRequest
+			if decoder.Decode(&execution) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+				http.Error(response, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+				return
+			}
+			result, err := controlled.exec(request.Context(), execution.Directory, execution.Arguments)
+			if err != nil {
+				http.Error(response, err.Error(), http.StatusConflict)
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(result)
 		})
 	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 5 * time.Second}
@@ -537,30 +625,44 @@ func (a *app) approveActivePushes(ctx context.Context, projectState string) (int
 	if decoder.Decode(&pending) != nil || decoder.Decode(&struct{}{}) != io.EOF || len(pending) > 128 {
 		return 0, fmt.Errorf("active Agent Session returned invalid approval data")
 	}
-	approved := 0
+	if len(pending) == 0 {
+		return 0, nil
+	}
 	for _, item := range pending {
 		if err := gitgateway.ValidatePushRequest(item); err != nil {
-			return approved, fmt.Errorf("active Agent Session returned an invalid push binding")
+			return 0, fmt.Errorf("active Agent Session returned an invalid push binding")
 		}
-		if err := trustedui.ConfirmPush(a.input, a.output, item); err != nil {
-			return approved, err
-		}
-		body, err := json.Marshal(pushConfirmRequest{Nonce: item.Nonce, Binding: item.Binding})
-		if err != nil {
-			return approved, err
-		}
-		confirm, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://sunaba/v1/push/confirm", bytes.NewReader(body))
-		confirm.Header.Set("Content-Type", "application/json")
-		confirmed, err := client.Do(confirm)
-		if err != nil {
-			return approved, fmt.Errorf("send Git push approval to active Agent Session: %w", err)
-		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(confirmed.Body, 4096))
-		_ = confirmed.Body.Close()
-		if confirmed.StatusCode != http.StatusNoContent {
-			return approved, fmt.Errorf("Git push approval expired or changed before confirmation")
-		}
-		approved++
 	}
-	return approved, nil
+	index, decision, err := trustedui.SelectPush(a.input, a.output, pending)
+	if err != nil {
+		return 0, err
+	}
+	if decision == "skip" {
+		return -1, nil
+	}
+	item := pending[index]
+	body, err := json.Marshal(pushDecisionRequest{Nonce: item.Nonce, Binding: item.Binding})
+	if err != nil {
+		return 0, err
+	}
+	endpoint := "/v1/push/confirm"
+	if decision == "reject" {
+		endpoint = "/v1/push/reject"
+	}
+	confirm, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://sunaba"+endpoint, bytes.NewReader(body))
+	confirm.Header.Set("Content-Type", "application/json")
+	confirmed, err := client.Do(confirm)
+	if err != nil {
+		return 0, fmt.Errorf("send Git push decision to active Agent Session: %w", err)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(confirmed.Body, 4096))
+	_ = confirmed.Body.Close()
+	if confirmed.StatusCode != http.StatusNoContent {
+		return 0, fmt.Errorf("Git push approval expired or changed before confirmation")
+	}
+	if decision == "reject" {
+		fmt.Fprintln(a.output, "Rejected the selected Git push request.")
+		return -1, nil
+	}
+	return 1, nil
 }
