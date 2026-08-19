@@ -19,8 +19,11 @@ OpenCodeとその実行コマンドはVM内で自由に動かしながら、ホ�
 - ホストの作業ツリーをVMへbind mountしない
 - OpenAIやGitの実credentialをVMへ渡さない
 - 既定のsecure modeでは、許可したGateway以外の外向き通信を拒否
+- Snapshot対象をmetadata previewし、exact digestを承認してからVMを作成
 - ホストへ反映する変更とGit pushを、ホスト側の明示的な承認に束縛
-- 同じVMを再利用でき、必要なときは承認済みのホスト状態からクリーン再生成可能
+- Agent Sessionごとに資格情報を再発行しながら同じVMの編集状態を再利用
+- exportやSupervisorの途中失敗でも、停止VMとfrozen成果物を明示的に復旧可能
+- `doctor`と`status`で前提条件、Session残り時間、quota、recovery状態を確認可能
 
 ## 動作環境
 
@@ -34,11 +37,18 @@ Apple ContainerとOpenCodeは検証済みのexact versionへ固定されます�
 
 ## 最短の利用例
 
-ビルド後、3つのsunaba binaryがあるdirectoryを`PATH`へ追加するか、3つとも既存の`PATH`上へ配置してください。また、macOS側へ固定versionのOpenCodeをインストールし、`opencode`コマンドを実行できる状態にします。最初に利用基盤をsetupし、credential登録を済ませたあと、対象プロジェクトで次を実行します。
+ビルド後、3つのsunaba binaryがあるdirectoryを`PATH`へ追加するか、3つとも既存の`PATH`上へ配置してください。また、macOS側へ固定versionのOpenCodeをインストールし、`opencode`コマンドを実行できる状態にします。OAuthを使う最短例は次のとおりです。
 
 ```sh
 sunaba setup
+sunaba credentials openai oauth login
+
+cd /path/to/project
 sunaba project init
+sunaba doctor
+sunaba config show --effective
+sunaba snapshot preview
+sunaba snapshot approve --digest <previewに表示されたexact digest>
 sunaba up
 sunaba agent
 sunaba changes export
@@ -46,7 +56,13 @@ sunaba changes review
 sunaba changes apply
 ```
 
-`agent`を終了しても、secure modeのVM内にある編集状態は保持されます。`changes export`はVMを停止・検証してChange Setを作成し、`changes review`は固定した変更前後の内容をhostへ書き込まずに表示します。`changes apply`は同じreviewを再表示し、ホスト側で承認した場合だけ作業ツリーへ反映します。
+`snapshot preview`は内容を表示せず、件数、容量、大容量file、秘密らしいfile名とdigestを示します。そのexact digestを承認しなければ、新しいVMは作られません。
+
+既定設定を変更する場合は、`snapshot preview`より前に`sunaba config edit`を実行します。API keyを使う場合は、OAuth loginの代わりに`sunaba credentials openai api-key set`を実行し、`project init --model-auth api-key`でProjectを登録します。
+
+`agent`を終了しても、secure modeのVM内にある編集状態は保持されます。次回は新しいSession ID、token、password、TTLで同じVMを再開します。`changes export`はVMを停止・検証してChange Setを作成し、`changes review`は固定した変更前後の内容をhostへ書き込まずに表示します。`changes apply`は同じreviewを再表示し、ホスト側で承認した場合だけ作業ツリーへ反映します。apply後はhost Projectが変わるため、次のVMを作る前にpreviewとdigest承認をやり直します。
+
+exportがExternal Git状態や保存失敗で拒否された場合、sunabaは停止VMを自動削除しません。`sunaba status`でrecovery状態と再試行コマンドを確認してください。破棄を伴う`--discard-external-git`や`--discard-pending`は、損失を理解した場合だけ使用します。
 
 ## セキュリティ上の注意
 

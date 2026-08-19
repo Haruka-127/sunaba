@@ -211,9 +211,10 @@ sunaba project init --model-auth api-key
 ```sh
 sunaba project init /path/to/project
 sunaba project list
+sunaba doctor --dir /path/to/project
 ```
 
-登録後の通常手順は[「初めてのプロジェクト」ワークフロー](./workflows.md#初めてのプロジェクト)を参照してください。
+`doctor`はhostと登録済みProjectを変更せず、setup、固定dependency、helper、設定、state、blocklist等を`PASS` / `WARN` / `FAIL`で確認します。`FAIL`がある場合は、VMを作る前に表示された前提条件を解消してください。登録後の通常手順は[「初めてのプロジェクト」ワークフロー](./workflows.md#初めてのプロジェクト)を参照してください。
 
 `project init`はSnapshotを作りません。VM作成前に対象をpreviewし、件数、容量、大容量file、秘密らしいfile名を確認してexact digestを承認します。内容や秘密の値はpreviewへ表示されません。
 
@@ -319,7 +320,7 @@ sunaba up --dir /path/to/project
 sunaba agent --dir /path/to/project
 ```
 
-secure modeの`up`はVMを作成・検証してpaused状態にします。`agent`は開始ごとに新しいSession ID、Gateway token、server password、TTLを発行し、VM内のOpenCode serverとホスト上の隔離されたOpenCode TUIを同時に管理します。TUIを終了するとそのSessionの資格情報を不可逆に失効させ、VMをpauseします。次の`agent`は新しい資格情報で同じVMと編集状態を再利用でき、前SessionのTTL到達後もVMの再作成は不要です。
+secure modeの`up`はVMを作成・検証してpaused状態にします。`agent`は開始ごとに新しいSession ID、Gateway token、server password、TTLを発行し、VM内のOpenCode serverとホスト上の隔離されたOpenCode TUIを同時に管理します。TUIを終了するとそのSessionの資格情報を不可逆に失効させ、VMをpauseします。pause中は前Sessionのidle/TTLを引き継がず、次の`agent`で新しい期限と資格情報を設定します。同じVMと編集状態を再利用でき、前SessionのTTL到達後もVMの再作成は不要です。
 
 複数のcommandを順に試す場合は、sanitized shellを使います。
 
@@ -345,7 +346,7 @@ VM内の変更は自動ではホストへ反映されません。まずChange Se
 sunaba changes export --dir /path/to/project
 ```
 
-exportはVMをfreeze・破棄し、追加、変更、削除、renameをホスト側で再構成します。unsafeなpath、symlink、hardlink、special file、`.git/`、sunaba管理領域、上限超過はホスト作業ツリーへ到達する前に拒否されます。
+exportはVMをfreezeし、追加、変更、削除、renameをホスト側で再構成します。Change Setの保存まで成功した場合だけVMを破棄します。unsafeなpath、symlink、hardlink、special file、`.git/`、sunaba管理領域、上限超過はホスト作業ツリーへ到達する前に拒否されます。
 
 検証済みChange Setをhost-only stateへ保存できなかった場合は、secure/devのどちらでも停止VMとfrozen成果物を保持します。容量や権限の問題を解消してから同じ`changes export`を再実行すると、同一成果物のpending確定を再試行します。明示的なdiscardなしに通常cleanupが停止VMを削除することはありません。
 
@@ -465,7 +466,7 @@ Projectを対象にするcommandは、通常次のいずれかで対象を選び
 |---|---|
 | `sunaba project list` | 登録済みProjectを一覧表示する |
 | `sunaba project list --active` | 到達可能なSupervisorまたはrunning VMがあるProjectだけを表示する |
-| `sunaba status` | mode、VM、session、quota、Gateway、pending Change Setを確認する |
+| `sunaba status` | mode、VM、session、quota、Gateway、pending Change Set、停止recoveryと回収方法を確認する |
 | `sunaba doctor` | hostとProjectのread-only診断を項目別に実行する |
 | `sunaba changes review` | pending Change Setの内容とriskをhostへ適用せず確認する |
 | `sunaba up` | secure VMを準備してpauseする。devではforeground session用artifactだけを準備する |
@@ -530,6 +531,8 @@ sunaba credentials openai api-key status
 - `require VM recreation`: mode、resource、Snapshot/export等のVM-bound変更です。先に`changes export`して`recreate`する
 - pending Change Setがある: `changes apply`で反映するか、破棄を明示して`recreate`または`destroy`する
 - `capability expired`: 現Sessionをfail closedでpauseする。次の`agent`または`shell`で同じVMへ新しいSessionを開始する
+- `recovery`または`frozen export`: 容量、権限、External Git状態を解消し、`status`に表示された同じ`changes export`を再実行する。破棄flagは成果物を失ってよい場合だけ使う
+- `Host TUI session root must be an absolute sunaba-session-* directory`: 古いsunaba binaryまたは古いSupervisorとの混在を疑う。`command -v sunaba`と`sunaba versions show`を確認し、同じrevisionから3 binaryを再buildして、状態を保持する`sunaba down`後に再実行する。guest workspace pathをhostへ手作業で作らない
 - baseline競合: host側の変更を整理し、新しいSnapshotから作業をやり直す
 - OpenCode versionまたはdigest不一致: `sunaba versions show`でactive lockのexact versionを確認し、そのversionの公式Apple silicon artifactをmacOSへ再インストールする
 - Web blocklist期限切れ: VMがない状態で`web refresh`を実行する

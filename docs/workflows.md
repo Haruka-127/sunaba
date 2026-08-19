@@ -84,9 +84,10 @@ sunaba project init "$PROJECT" --model-auth api-key
 ```sh
 sunaba config edit --dir "$PROJECT"
 sunaba config show --effective --dir "$PROJECT"
+sunaba doctor --dir "$PROJECT"
 ```
 
-Git GatewayやWeb Gatewayが不要なら、有効にする必要はありません。一般Web通信はsecure modeでは既定で無効です。
+Git GatewayやWeb Gatewayが不要なら、有効にする必要はありません。一般Web通信はsecure modeでは既定で無効です。`doctor`に`FAIL`があれば、VM作成へ進む前に表示されたsetup、dependency、helper、設定、blocklist等を解消します。診断自体はhostやProjectを変更しません。
 
 ### 4. VMを準備してOpenCodeを起動する
 
@@ -159,9 +160,13 @@ sunaba changes apply --dir "$PROJECT"
 export後はVMが破棄されます。次の作業は、apply済みのhost Projectから新しいSnapshotを作って開始します。
 
 ```sh
+sunaba snapshot preview --dir "$PROJECT"
+sunaba snapshot approve --dir "$PROJECT" --digest <表示されたdigest>
 sunaba up --dir "$PROJECT"
 sunaba agent --dir "$PROJECT"
 ```
+
+applyによってhost Projectの内容が変わるため、以前のdigest承認は次のVMへ使えません。新しいpreviewを確認してから承認します。
 
 ## OpenCode v1を更新する
 
@@ -213,6 +218,8 @@ sunaba recreate --dir "$PROJECT" --discard-pending
 その後の`up`または`agent`は、現在のhost Projectから新しいSnapshotを作ります。
 
 ```sh
+sunaba snapshot preview --dir "$PROJECT"
+sunaba snapshot approve --dir "$PROJECT" --digest <表示されたdigest>
 sunaba up --dir "$PROJECT"
 ```
 
@@ -264,8 +271,12 @@ sunaba config apply --dir "$PROJECT"
 `recreate-required`の変更を適用した後は、新しいVMを作ります。
 
 ```sh
+sunaba snapshot preview --dir "$PROJECT"
+sunaba snapshot approve --dir "$PROJECT" --digest <表示されたdigest>
 sunaba up --dir "$PROJECT"
 ```
+
+Snapshot除外、export上限、Protected Pathを変更した場合は、以前の承認が同じfile集合に見えてもpolicy digestが異なるため、必ず新しいpreviewを承認します。
 
 ## secure modeでWebを使う
 
@@ -366,6 +377,8 @@ Web Gatewayのorigin単位の許可では足りず、任意のpublic Internet接
 現在のVMとpending Change Setを処理したあと、dev modeを明示して準備します。
 
 ```sh
+sunaba snapshot preview --dir "$PROJECT"
+sunaba snapshot approve --dir "$PROJECT" --digest <表示されたdigest>
 sunaba up --dir "$PROJECT" --mode dev
 sunaba agent --dir "$PROJECT"
 ```
@@ -391,6 +404,25 @@ VM全体を破棄する場合は`recreate --discard-pending`または`destroy --
 
 host worktreeの非mount、host credentialの非注入、host・LAN・private network・他VMへの拒否は維持されます。ただし、VM自身が用意したcredentialによるGit pushなど、直接egress上の外部書き込みをGit Gateway承認で止めることはできません。
 
+## export後のrecoveryを再開する
+
+Change Setのhost-only保存に失敗した場合、secure/devのどちらでも停止VMと検証済みfrozen成果物がrecoveryとして保持されます。External Git guardで拒否された場合も、自動cleanupは停止VMを削除しません。
+
+まず状態と案内された回収commandを確認します。
+
+```sh
+sunaba status --dir "$PROJECT"
+```
+
+disk容量、directory権限、dirty/unpushedな別clone等の原因を解消し、通常exportを再試行します。同じfrozen成果物のpending確定または同じ停止VMのguard再評価が行われます。
+
+```sh
+sunaba changes export --dir "$PROJECT"
+sunaba changes review --dir "$PROJECT"
+```
+
+`--discard-external-git`は別cloneのworking tree/historyを捨てる場合、`recreate --discard-pending`と`destroy --yes --discard-pending`はVMまたはpending成果物全体を捨てる場合だけ使います。record、Project/VM identity、runtime path、停止VM labelが一致しなければ、sunabaは回収も破棄も拒否します。
+
 ## VMに不審な挙動がある
 
 VMは最初からuntrustedとして扱われますが、悪意ある永続化や侵害が疑われる場合は、同じVMを再利用しないでください。
@@ -412,6 +444,8 @@ sunaba recreate --dir "$PROJECT" --discard-pending
 次回は現在のhost Projectからclean Snapshotを作ります。
 
 ```sh
+sunaba snapshot preview --dir "$PROJECT"
+sunaba snapshot approve --dir "$PROJECT" --digest <表示されたdigest>
 sunaba up --dir "$PROJECT"
 ```
 
