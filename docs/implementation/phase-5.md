@@ -108,7 +108,7 @@ go test -race ./internal/session ./internal/apply ./internal/cleanup ./internal/
 
 ## dev session direct-egress boundary
 
-final integration用にProject/session専用Apple Container networkを追加した。default networkを共有せず、owner/project/session/mode labelとinspect結果を毎回照合する。source IPv4/IPv6 subnetへ束縛したpf anchorはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、別VM private subnet、unsolicited inboundを拒否する。
+final integration用にProject/VM専用Apple Container networkを追加した。default networkを共有せず、owner/project/VM/mode labelとinspect結果を毎回照合する。source IPv4/IPv6 subnetへ束縛したpf anchorはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、別VM private subnet、unsolicited inboundを拒否する。
 
 同時dev sessionはcurrent-user所有のmode `0600` flockで1つへ制限する。開始・再開前にnetworkを再inspectしてpfを再検証する。export前は、既存のexact source subnet用child anchorをdeny-allへ原子的にquiesceしてloaded main/child rulesを再検証してからVMを停止する。quiesce失敗時はGatewayをinactiveにしVM停止を試み、exportは拒否する。destroy時はVM削除後にanchorとnetworkを失効する。secure sessionは引き続き`network none`でありpfへ依存しない。
 

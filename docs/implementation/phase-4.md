@@ -44,7 +44,7 @@ pinned OpenCodeソースとの照合:
 - 完了: host DNSの全回答検査、public IP判定、検査済みIPへの直接dial。private/link-local/metadata/CGN/documentation/benchmark/multicast/unspecified、mixed answer、IP literalを拒否
 - 完了: HTTP GET/HEADだけ、body/upload拒否、client追跡redirectのorigin再検証
 - 完了: TLS非終端CONNECT、443固定、byte/time/concurrency上限、client証明書検証維持
-- 完了: 3本目のProject socket、guest `127.0.0.1:4343` relay、大小文字proxy環境、loopbackだけの`NO_PROXY`、apt専用config、pause/resume/end失効、export前secret除去
+- 完了: 3本目のProject socket、guest `127.0.0.1:4343` relay、大小文字proxy環境、loopbackだけの`NO_PROXY`、apt専用config、pause/endでの不可逆失効と次Sessionでの再発行、export前secret除去
 - 完了: URLhaus由来の外部maintainer feedをStevenBlack hosts repositoryの固定HTTPS pathからhostが取得する。各snapshotをSHA-256、取得時刻、最大14日の期限へ固定し、redirect、形式逸脱、改ざん、期限切れをfail closedにする
 - 完了: 実OpenCode webfetch/websearch、curl、wget、非root apt metadata、証明書検証付きHTTPS CONNECTの実VM gate
 - 完了: private/metadata、blocklist、direct IP、HTTP upload、cross-origin redirect、pause、secret export、audit redaction attack gate

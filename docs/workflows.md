@@ -97,9 +97,9 @@ sunaba up --dir "$PROJECT"
 sunaba agent --dir "$PROJECT"
 ```
 
-previewは内容を表示せず、件数、容量、大容量file、秘密らしいfile名とdigestを表示します。必要ならhost-onlyな`snapshot.exclude`を直して`config apply`し、再previewします。`up`は承認された同一digestのhost ProjectからSnapshotとVMを作成し、分離とresourceを検証してpauseします。`agent`はそのVMを再開し、ホストのOpenCode TUIをVM内serverへ接続します。
+previewは内容を表示せず、件数、容量、大容量file、秘密らしいfile名とdigestを表示します。必要ならhost-onlyな`snapshot.exclude`を直して`config apply`し、再previewします。`up`は承認された同一digestのhost ProjectからSnapshotとVMを作成し、分離とresourceを検証してpauseします。`agent`は新しいAgent Session資格情報を発行してそのVMを再開し、ホストのOpenCode TUIをVM内serverへ接続します。
 
-TUIを終了するとsession用Gatewayとrelayが失効し、VMは再びpauseします。まだhost Projectに変更はありません。
+TUIを終了するとsession用Gateway、relay、lease、server passwordが不可逆に失効し、VMは再びpauseします。まだhost Projectに変更はありません。
 
 ### 5. 成果物をhostへ反映する
 
@@ -128,7 +128,7 @@ VM内の`.git/`はChange Setに含まれません。host repositoryへcommitす�
 sunaba status --dir "$PROJECT"
 ```
 
-既存VMがpausedで、session期限内ならそのまま再開できます。
+既存VMがpausedなら、前Sessionの期限にかかわらず新しいSession ID、token、password、TTLを発行し、同じVMとupperを再開できます。終了済みSessionの資格情報は再利用しません。
 
 ```sh
 sunaba agent --dir "$PROJECT"

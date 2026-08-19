@@ -1050,6 +1050,10 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 	if err := client.operation(context.Background(), "pause"); err != nil {
 		t.Fatal(err)
 	}
+	paused, err := client.info(context.Background())
+	if err != nil || paused.State != "paused" || paused.SessionID != "" || paused.AttachURL != "" || paused.ServerPassword != "" || !paused.ExpiresAt.IsZero() {
+		t.Fatalf("paused Supervisor exposed revoked authority: info=%+v error=%v", paused, err)
+	}
 	if err := client.operation(context.Background(), "resume"); err != nil {
 		t.Fatal(err)
 	}

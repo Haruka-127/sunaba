@@ -295,11 +295,13 @@ Host TUIは利便性のためホストで動かすため、固定・検証され
 6. Agent VM内でlowerを読み取り専用、upper/workをProject専用としてOverlayFSを構成する。
 7. merged workspaceをOpenCode serverの作業ディレクトリにする。
 
+Project VM作成時にはProject IDと別のVM IDを発行し、container名、runtime root、workspace、ownership label、live guardをそのVM IDへ固定する。Agent Session IDをVM名や不変なVM policy digestへ含めない。
+
 ### 8.2 セッション開始
 
 1. SupervisorがProject lockを取得し、VMと構成の同一性、ネットワークモード、resource limitsを確認する。
 2. secureモードでは任意の直接外向き通信が遮断されていることを検査する。
-3. セッションに必要なGateway capability、OpenCode server password、attach relay identityを発行する。
+3. 開始ごとに新しいAgent Session ID、Gateway capability、OpenCode server password、attach relay identity、絶対TTLを発行する。終了済みまたは期限切れSessionのIDと資格情報を再利用しない。
 4. Model Gatewayの接続先と短命tokenをVM内OpenCode serverのセッション環境へ注入する。
 5. VM内で固定バージョンの`opencode serve`を起動する。`--hostname`、`--port`、`--mdns=false`をSupervisorが明示し、guest loopbackまたはProject専用interfaceだけでlistenする。v1.18.18には`--no-mdns` flagが存在しないため使用しない。
 6. Local Attach Relayをhost loopbackのrandom portで起動し、Project/VM専用transportでserverへ接続する。
@@ -321,10 +323,10 @@ OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能で�
 
 1. Host TUIを終了する。
 2. Local Attach Relayを閉じ、VM内OpenCode serverを停止する。
-3. OpenCode server passwordとGateway capabilityを即時失効させる。
+3. OpenCode server password、Gateway capability、永続lease、各Gateway handlerを即時かつ不可逆に失効させる。listenerを閉じ、同じSessionをactiveへ戻さない。
 4. devモードでは直接外向き通信を無効化するか、無効化を確認してからVMを停止する。
 5. セッション後のバックグラウンドプロセスによるGateway操作を拒否し、直接インターネットへも到達できないことを保証する。
-6. Project lockを解放する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。
+6. Project lockはProject VMを管理するSupervisorが保持する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。次の`agent`または`shell`は同じVM/upperに対して新しいAgent Sessionを開始する。
 
 secureモードではattach閉鎖とcapability失効を先に完了してから、signal forwardingとchild reapを行うApple Containerの固定init経由でSIGTERMを送り、1秒のbounded graceで停止し、停止状態を再確認する。正常系はinitがSIGTERMへ応答して速やかに終了させ、1秒を常時消費しない。既定の長いgraceを対話終了ごとに待たない一方、通常停止を省略して直接killする経路には変更しない。
 
@@ -540,7 +542,7 @@ UIと監査ログにはdevモードであること、情報流出防止を保証
 
 devモードでは任意の直接通信を許すため、VMが自分で取得・生成したcredentialや認証不要のendpointを使うGit pushまで、Git Gatewayの承認で強制的に止めることはできない。sunabaが確実に管理するのはホストcredentialを利用するGit Gateway経由のpushである。すべての外向きGit書き込みを承認対象にする要件は、devモードの直接通信許可と両立しない。
 
-実装方式はProject/session専用のApple Container NAT networkと、割り当てられたsource IPv4/IPv6 subnetへ束縛したpf anchorを採用する。default networkを共有せず、networkの完全名、owner/project/session/mode label、NAT plugin、subnet/gatewayを開始・再開前に再検証する。pfはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、他VM private subnet、unsolicited inboundを拒否する。実装は同時active dev sessionをhost flockで1つへ制限し、VM削除後にanchorと専用networkを失効する。secure modeはこのpfへ依存せず`network none`を維持する。
+実装方式はProject/VM専用のApple Container NAT networkと、割り当てられたsource IPv4/IPv6 subnetへ束縛したpf anchorを採用する。default networkを共有せず、networkの完全名、owner/project/VM/mode label、NAT plugin、subnet/gatewayを開始前に再検証する。pfはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、他VM private subnet、unsolicited inboundを拒否する。実装は同時active dev sessionをhost flockで1つへ制限し、VM削除後にanchorと専用networkを失効する。secure modeはこのpfへ依存せず`network none`を維持する。
 
 ### 10.3 モード遷移
 
@@ -1190,9 +1192,9 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 - `sunaba project list`はhost-only stateの直接の子だけをboundedに列挙し、Project policy、owner-only Supervisor locator、sunaba所有labelが完全一致するVMから状態を判定する。一覧取得はpolicy migration、stale locator回収、orphan cleanup、VM lifecycle操作を行わない。`--active`は到達可能なSupervisorまたはrunning状態のowned VMがあるProjectだけを表示し、VMがpause中でもSupervisorがactiveなら除外しない。
 - 公開Project操作の`config`、`model`、`up`、`agent`、`git`、`web`、`shell`、`status`、`changes`、`approvals`、`recreate`、`down`、`destroy`は、`--dir <path>`または`--project-id <id>`で対象を選択できる。両方の同時指定を拒否し、どちらも未指定ならcurrent directoryを使う。Project IDは`project list`が表示した12桁の小文字16進IDとの完全一致だけを受け付け、prefix、部分一致、aliasを使わない。通常操作のID指定は、owner-only stateとpolicyをread-onlyで検証し、policyのProject IDが一致し、保存されたcanonical Project rootが現存する場合だけそのrootへ解決する。`project init`、`project list`、利用者共通の`credentials`、内部ホスト操作の`firewall`と`_supervisor`はこのselectorの対象外とする。
 - `down`と`destroy`のID指定は、元Project rootやpolicyを失った隔離stateを安全に回収する復旧経路とする。policy内のProject pathを対象解決の根拠にせず、host-only state直下にあるcurrent-user所有、mode `0700`、非symlinkの同名directoryだけを対象とし、到達可能なSupervisorがあればそのProject IDとの一致も要求する。`down`は隔離stateを保持し、`destroy`だけが隔離stateとhost-only Project設定を削除する。host Project fileは削除せず、`--yes`と、pendingまたは未export変更に対する`--discard-pending`の要件はpath指定時と同じとする。
-- secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後にVMを停止して返す。返却時はLocal Attach Relay、Gateway gate、永続leaseがinactiveであり、一般session channelは到達不能である。
-- secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway gate、leaseをinactiveへして同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineでも同じfail-closed pauseを行う。期限内の再実行は同じVM/upperをresumeするが、TTL到達後はresumeせずexportまたはrecreateを要求する。`changes export`またはdestroyでcapability、listener、credentialを最終失効する。
-- VM再開時はtmpfsであるguestの`/run/sunaba`が空になることを前提とし、relay、provider設定、session capabilityをHost上のsession memoryからmode `0700`の単一directoryへ再生成し、1回のcopyで復元してからserverを起動する。session capabilityをVMの永続root filesystemへ退避せず、copyに使うHost runtime内一時directoryは成功・失敗を問わず直後に削除する。
+- secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後に初期Sessionを完全失効してVMを停止して返す。返却時はLocal Attach Relay、Gateway listener、activeな永続lease、server passwordがなく、一般session channelは到達不能である。
+- secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway handler、lease、server passwordを不可逆に失効して同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineや絶対TTLでも同じfail-closed pauseを行う。次回は同じVM/upperへ新しいSession ID、token、password、TTLを発行するため、TTL到達後も作業状態を保持したまま継続できる。
+- VM再開時はtmpfsであるguestの`/run/sunaba`が空になることを前提とし、relay、provider設定、新規session capabilityをmode `0700`の単一directoryへ生成し、1回のcopyで復元してからserverを起動する。終了済みSessionの入力を再利用せず、session capabilityをVMの永続root filesystemへ退避しない。copyに使うHost runtime内一時directoryは成功・失敗を問わず直後に削除する。
 - devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。background supervisorへdirect egressを残さない。
 - `sunaba shell`はraw execや未検証PTYではなく、bounded line commandの全出力をhost terminal sanitizerへ通す。
 - Model Gatewayの存在を会話やツール選択で意識する必要はない。

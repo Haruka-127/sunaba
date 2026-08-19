@@ -61,7 +61,8 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	modelID := "gpt-5"
 	upstreamKey := "upstream-" + runID
 	firstSessionID := "p1a" + runID
-	modelEditPath := "/workspace/sunaba-" + firstSessionID + "/model-edit.txt"
+	vmIdentity := "vm" + firstSessionID
+	modelEditPath := "/workspace/sunaba-" + vmIdentity + "/model-edit.txt"
 	toolCalled := make(chan struct{}, 1)
 	toolCompleted := make(chan struct{}, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +113,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 			t.Fatal(err)
 		}
 		projectID := state.ProjectID(projectRoot)
-		capability, err := modelgateway.NewCapability(modelToken, projectID, "sunaba-"+projectID+"-"+sessionID, sessionID, []string{modelID}, time.Now().Add(3*time.Minute))
+		capability, err := modelgateway.NewCapability(modelToken, projectID, "sunaba-"+projectID+"-"+vmIdentity, sessionID, []string{modelID}, time.Now().Add(3*time.Minute))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -151,10 +152,10 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		measuredRuntime := &timedRuntime{Runtime: sunabaruntime.NewAppleContainer(false), t: t}
 		return session.Config{
 			Store: &state.Store{Root: filepath.Join(runtimeBase, "state")}, Runtime: measuredRuntime,
-			ProjectRoot: projectRoot, RuntimeBase: runtimeBase, SessionID: sessionID,
+			ProjectRoot: projectRoot, RuntimeBase: runtimeBase, VMID: vmIdentity, SessionID: sessionID,
 			Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", GuestRelayBinary: relay,
 			DiskBytes: 128 << 20, ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
-			ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken, ServerPassword: password,
+			ProviderConfig: provider, ModelGateway: gateway, ModelGatewayClose: func() error { gateway.Revoke(); return nil }, ModelToken: modelToken, ServerPassword: password,
 			LeaseTTL: 3 * time.Minute, Audit: auditRecorder,
 			SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 			OnEvent: func(event session.Event) {
@@ -207,16 +208,16 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	}
 	pausedModelRequest.Header.Set("Authorization", "Bearer "+first.ModelToken)
 	pausedModelRequest.Header.Set("Content-Type", "application/json")
-	pausedModelResponse, err := unixHTTPClient(filepath.Join(active.Root, "model-gateway.sock")).Do(pausedModelRequest)
-	if err != nil {
-		t.Fatal(err)
+	if pausedModelResponse, err := unixHTTPClient(filepath.Join(active.Root, "model-gateway.sock")).Do(pausedModelRequest); err == nil {
+		_ = pausedModelResponse.Body.Close()
+		t.Fatalf("paused Model Gateway remained reachable: status=%d", pausedModelResponse.StatusCode)
 	}
-	_ = pausedModelResponse.Body.Close()
-	if pausedModelResponse.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("paused Model Gateway status=%d", pausedModelResponse.StatusCode)
-	}
+	secondActivation := newConfig("p1b" + runID)
 	resumeBegan := time.Now()
-	if err := active.Resume(ctx); err != nil {
+	if err := active.ResumeWith(ctx, session.Activation{
+		SessionID: secondActivation.SessionID, ProviderConfig: secondActivation.ProviderConfig, ModelGateway: secondActivation.ModelGateway, ModelGatewayClose: secondActivation.ModelGatewayClose,
+		ModelToken: secondActivation.ModelToken, ServerPassword: secondActivation.ServerPassword, LeaseTTL: secondActivation.LeaseTTL,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	resumeElapsed := time.Since(resumeBegan)
@@ -224,7 +225,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	if resumeElapsed >= 8*time.Second {
 		t.Fatalf("secure session resume latency regressed: %s", resumeElapsed)
 	}
-	message := exerciseOpenCodeResponses(t, ctx, filepath.Join(active.Root, "attach.sock"), first.ServerPassword, modelID)
+	message := exerciseOpenCodeResponses(t, ctx, filepath.Join(active.Root, "attach.sock"), secondActivation.ServerPassword, modelID)
 	if !strings.Contains(message, "phase1 tool complete") {
 		t.Fatalf("OpenCode did not use Model Gateway: %s", message)
 	}
@@ -258,7 +259,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertArchiveHasNoSecrets(t, result.Archive, upstreamKey, first.ModelToken, first.ServerPassword)
+	assertArchiveHasNoSecrets(t, result.Archive, upstreamKey, first.ModelToken, first.ServerPassword, secondActivation.ModelToken, secondActivation.ServerPassword)
 	want := map[string]workspace.ChangeKind{"model-edit.txt": workspace.ChangeAdd, "modify.txt": workspace.ChangeModify, "delete.txt": workspace.ChangeDelete}
 	if len(result.ChangeSet.Changes) != len(want) {
 		t.Fatalf("Change Set=%+v", result.ChangeSet)
@@ -279,7 +280,7 @@ func TestPhase1SecureSessionVerticalSlice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second := newConfig("p1b" + runID)
+	second := newConfig("p1c" + runID)
 	clean, err := session.Start(ctx, second)
 	if err != nil {
 		t.Fatal(err)

@@ -130,7 +130,8 @@ func TestPhase4WebGatewayInAgentVM(t *testing.T) {
 	runID := randomID(t)
 	projectID := state.ProjectID(project)
 	sessionID := "p4w" + runID
-	vmID := "sunaba-" + projectID + "-" + sessionID
+	vmIdentity := "vm" + sessionID
+	vmID := "sunaba-" + projectID + "-" + vmIdentity
 	modelToken, _ := session.NewSecret()
 	webToken, _ := session.NewSecret()
 	serverPassword, _ := session.NewSecret()
@@ -215,10 +216,10 @@ func TestPhase4WebGatewayInAgentVM(t *testing.T) {
 	relay := buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
 	cfg := session.Config{
 		Store: &state.Store{Root: filepath.Join(runtimeBase, "state")}, Runtime: sunabaruntime.NewAppleContainer(false),
-		ProjectRoot: project, RuntimeBase: runtimeBase, SessionID: sessionID,
+		ProjectRoot: project, RuntimeBase: runtimeBase, VMID: vmIdentity, SessionID: sessionID,
 		Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", DiskBytes: 128 << 20,
 		ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
-		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelToken: modelToken,
+		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelGatewayClose: func() error { modelHandler.Revoke(); return nil }, ModelToken: modelToken,
 		WebGateway: webGateway, WebToken: webToken, WebGatewayClose: func() error { webGateway.Revoke(); return nil },
 		ServerPassword: serverPassword, LeaseTTL: 5 * time.Minute, Audit: auditRecorder,
 		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
@@ -293,24 +294,6 @@ func TestPhase4WebGatewayInAgentVM(t *testing.T) {
 	case <-mcpCalled:
 	case <-time.After(5 * time.Second):
 		t.Fatal("OpenCode websearch did not reach the mock Exa MCP endpoint")
-	}
-
-	webClient := unixHTTPClient(filepath.Join(active.Root, "web-gateway.sock"))
-	if err := active.Pause(ctx); err != nil {
-		t.Fatal(err)
-	}
-	pausedRequest, _ := http.NewRequest(http.MethodGet, "http://measure.invalid/final", nil)
-	pausedRequest.Header.Set("Proxy-Authorization", "Bearer "+webToken)
-	pausedResponse, err := webClient.Do(pausedRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = pausedResponse.Body.Close()
-	if pausedResponse.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("paused Web Gateway status=%d", pausedResponse.StatusCode)
-	}
-	if err := active.Resume(ctx); err != nil {
-		t.Fatal(err)
 	}
 
 	result, err := active.StopAndExport(ctx)

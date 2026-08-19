@@ -41,7 +41,7 @@ secure VMの停止、capability失効、固定OpenCodeのdigest/version検証、
 
 - OpenCode healthは最初に即時確認し、失敗時だけ25 msから最大100 msまでのbounded backoffで再確認する。個々のreadiness probeは200 msで打ち切り、guest relayがbackend起動前の接続を保持しても全体の60秒deadlineを消費させない。従来の2秒固定pollと10秒の単一probe待ちを廃止した。
 - Host TUIのdigestと`--version`検証をVM再開と並列化する。検証結果は外部から構築できない短命identityとして渡し、command生成直前にinode、mode、size、mtimeが変わっていないことを再確認する。管理copyが正常ならPATH上の別copyをhashしない。
-- 実際のVM停止・再開で空になるguest tmpfsの`/run/sunaba`は、Host memory内のsession設定から再生成する。capabilityを永続VMへ保存せず、mode 0700のruntime内一時directoryをcopy成否にかかわらず直後に削除する。
+- 実際のVM停止・再開で空になるguest tmpfsの`/run/sunaba`には、再開ごとに新しいSession ID、Gateway token、server password、TTLからsession設定を生成する。終了済みSessionの設定を再利用せず、capabilityを永続VMへ保存しない。mode 0700のruntime内一時directoryはcopy成否にかかわらず直後に削除する。
 - TUI終了時はattachとcapabilityを先に失効し、`container stop --time 1`で通常のSIGTERM停止を行った後、stopped状態を再確認する。Apple Container既定の5秒graceを対話終了ごとに待たない。
 - Phase 1実機gateはstartup、pause、resumeと主要runtime操作の所要時間を個別に出力し、8秒、0.75秒、8秒の上限で固定待ちの再混入を拒否する。pauseの上限は1秒graceを正常系で常時消費する退行を検出する。
 

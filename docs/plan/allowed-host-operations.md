@@ -113,10 +113,10 @@ container stats sunaba-<projectID> ...
 container export --output <host-quarantine-archive> sunaba-<projectID>
 container cp <host-snapshot> sunaba-<projectID>:<guest-path>
 container cp sunaba-<projectID>:<guest-path> <host-quarantine>
-container network create sunaba-<projectID>-<sessionID>-net ...
+container network create sunaba-<projectID>-<vmID>-net ...
 container network list ...
-container network inspect sunaba-<projectID>-<sessionID>-net ...
-container network delete sunaba-<projectID>-<sessionID>-net
+container network inspect sunaba-<projectID>-<vmID>-net ...
+container network delete sunaba-<projectID>-<vmID>-net
 container volume create sunaba-<projectID>-<purpose> ...
 container volume list ...
 container volume inspect sunaba-<projectID>-<purpose> ...
@@ -133,10 +133,10 @@ Apple Container 1.2.2の`container rm`は`container delete`のaliasである。`
 通常の`container stop`が60秒待っても応答せず、個別`inspect`で次をすべて再確認できる障害復旧に限り、下記のexact signal操作を人間の個別承認後に使ってよい。
 
 ```sh
-container kill --signal KILL sunaba-<projectID>-<sessionID>
+container kill --signal KILL sunaba-<projectID>-<vmID>
 ```
 
-- 完全名がlabelのProject ID / Session IDと一致する
+- 完全名がlabelのProject ID / VM IDと一致する
 - `dev.sunaba.owner=sunaba-supervisor`であり、当該検証が作成したVMである
 - 対応するSupervisor process、runtime directory、live guardが存在しない
 - `container kill --all`、部分一致、glob、別containerとの同時指定を使わない
@@ -148,10 +148,10 @@ container kill --signal KILL sunaba-<projectID>-<sessionID>
 上記のexact `container kill --signal KILL`も60秒以上応答せず、別clientの個別`inspect`で対象がなお`running`と確認された場合は、次をすべて満たすorphan test VMの最終復旧に限り、人間の追加個別承認後に下記を1台ずつ実行してよい。
 
 ```sh
-container delete --force sunaba-<projectID>-<sessionID>
+container delete --force sunaba-<projectID>-<vmID>
 ```
 
-- force delete直前の個別`inspect`で、完全名とowner/project/session/mode labelが再び完全一致する
+- force delete直前の個別`inspect`で、完全名とowner/project/VM/mode labelが再び完全一致する
 - 対応するSupervisor process、runtime directory、live guardが存在せず、VMに未exportの利用者成果物がないことを確認する
 - 当該検証が作成した一時VMであり、VM overlayを破棄して同じtestをclean recreationできる
 - 1 invocationにexactな1台だけを指定し、`--all`、glob、部分一致、複数指定を使わない

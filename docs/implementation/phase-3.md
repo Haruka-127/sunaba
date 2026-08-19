@@ -32,7 +32,7 @@ host UIはProject、repository、remote名、固定送信先、push digest、期
 
 ## secure session lifecycle
 
-Git Gatewayはmodel channelと別のProject/VM専用mode `0600` Unix socketとしてsecure session policy digestへ含める。VMへはsocket mount、guest loopback relay、実credentialではない短命Git capabilityだけを渡す。OpenCodeのGit subprocessには固定loopback repositoryだけへ送るcapability headerをprocess environmentで設定し、guest repositoryのremote URLにはcredentialを含めない。pause中は永続leaseとin-process gateの双方で`503`にし、resume時は同一VM/socket relayで再開する。session endではHTTP handlerに加えてapproval hook channelのclose callbackを一度だけ実行する。
+Git Gatewayはmodel channelと別のProject/VM専用mode `0600` Unix socketとしてVM policyへ束縛する。VMへはsocket mount、guest loopback relay、実credentialではない短命Git capabilityだけを渡す。OpenCodeのGit subprocessには固定loopback repositoryだけへ送るcapability headerをprocess environmentで設定し、guest repositoryのremote URLにはcredentialを含めない。pause時はlistener、永続lease、read/receive handler、approval hook channelを失効する。次回は同一VMのsocket pathへ新しいSession IDとcapabilityでhandlerを作り直す。
 
 複数remoteは単一のProject Git socket上で`/<remote>.git`へ明示routeするが、認証headerはURL scopeごとの別tokenとする。別remote tokenの流用、未登録route、guest指定upstreamを拒否する。legacy policy schema v2のURL配列はv3 load時に`origin`、`remote-2`以降へ決定的にmigrationする。
 

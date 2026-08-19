@@ -317,7 +317,7 @@ sunaba up --dir /path/to/project
 sunaba agent --dir /path/to/project
 ```
 
-secure modeの`up`はVMを作成・検証してpaused状態にします。`agent`はVM内のOpenCode serverと、ホスト上の隔離されたOpenCode TUIを同時に管理します。TUIを終了するとGatewayを失効させ、VMをpauseします。session期限内であれば、次の`agent`で同じVMと編集状態を再利用できます。
+secure modeの`up`はVMを作成・検証してpaused状態にします。`agent`は開始ごとに新しいSession ID、Gateway token、server password、TTLを発行し、VM内のOpenCode serverとホスト上の隔離されたOpenCode TUIを同時に管理します。TUIを終了するとそのSessionの資格情報を不可逆に失効させ、VMをpauseします。次の`agent`は新しい資格情報で同じVMと編集状態を再利用でき、前SessionのTTL到達後もVMの再作成は不要です。
 
 単発のcommandを確認したい場合は、sanitized shellを使います。
 
@@ -502,7 +502,7 @@ sunaba credentials openai api-key status
 - `credential helper`: hostのGit credential helperが登録済みHTTPS URLを非対話で解決できるか確認する
 - `cannot change ... active`: 先に`changes export`または`recreate`でVMを処理する
 - pending Change Setがある: `changes apply`で反映するか、破棄を明示して`recreate`または`destroy`する
-- `capability expired`: `changes export`で成果物を保存するか、`recreate`でclean環境へ移る
+- `capability expired`: 現Sessionをfail closedでpauseする。次の`agent`または`shell`で同じVMへ新しいSessionを開始する
 - baseline競合: host側の変更を整理し、新しいSnapshotから作業をやり直す
 - OpenCode versionまたはdigest不一致: `sunaba versions show`でactive lockのexact versionを確認し、そのversionの公式Apple silicon artifactをmacOSへ再インストールする
 - Web blocklist期限切れ: VMがない状態で`web refresh`を実行する

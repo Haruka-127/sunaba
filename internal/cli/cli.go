@@ -420,8 +420,10 @@ func (a *app) status(ctx context.Context, dir string) error {
 	if client, clientErr := openSupervisorClient(projectState); clientErr == nil {
 		if info, infoErr := client.info(ctx); infoErr == nil && info.ProjectID == projectPolicy.ProjectID {
 			states = append(states, info.Container+"="+info.State+"/"+projectPolicy.Mode)
-			sessionExpiry = info.ExpiresAt.UTC().Format(time.RFC3339)
-			idleDeadline = info.IdleDeadline.UTC().Format(time.RFC3339)
+			if info.State == "running" {
+				sessionExpiry = info.ExpiresAt.UTC().Format(time.RFC3339)
+				idleDeadline = info.IdleDeadline.UTC().Format(time.RFC3339)
+			}
 			unexported = "possible (run 'sunaba changes export' to compute the trusted Change Set)"
 		} else if infoErr != nil {
 			listErr = infoErr
