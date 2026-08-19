@@ -28,7 +28,7 @@ hostが固定したpre-receive helperはGit自身のobject quarantine pathとold
 
 ## Trusted Git Approval UI
 
-host UIはProject、repository、remote名、固定送信先、push digest、期限、各refのold/new object IDとforce/deleteを構造化表示する。表示したbindingとdigestの整合性を再検証してから、host生成nonceの完全一致入力だけを受理する。OpenCode、guest terminal、hook messageだけではconfirmを呼べず、force/deleteを通常pushとして表示できない。
+host UIはProject、repository、remote名、固定送信先、push digest、期限、各refのold/new object IDとforce/deleteを構造化表示する。利用者は番号または12桁のdigest IDで対象を選び、`approve` / `reject` / `skip`を入力する。host生成nonceは表示・手入力せず、選択したrequestとdecisionへ内部で束縛してbindingとdigestを再検証する。OpenCode、guest terminal、hook messageだけではconfirmを呼べず、force/deleteを通常pushとして表示できない。
 
 ## secure session lifecycle
 

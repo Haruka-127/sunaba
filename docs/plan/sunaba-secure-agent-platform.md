@@ -970,7 +970,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 - session開始・終了、capability発行・失効
 - Gatewayごとのrequest metadata、許可・拒否、利用量、error
 - Git push承認の対象object IDと結果
-- Trusted Approval UIが表示した対象digest/object ID、内部で束縛したnonce、承認・拒否。利用者は番号またはdigest IDで対象とdecisionを選び、nonceを手入力しない。guest由来の自由形式文字列はescapeする
+- Trusted Approval UIが表示した対象digest/object ID、内部で束縛したnonce、承認・拒否。Git pushは番号またはdigest IDで対象とdecisionを選び、内部nonceを手入力しない。Change Set applyは表示されたhost生成nonceの完全一致入力を要求する。guest由来の自由形式文字列はescapeする
 - workspace freeze/exportとChange Set digest
 - Change Set承認・拒否・適用結果
 - resource limit超過と強制停止

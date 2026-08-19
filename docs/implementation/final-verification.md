@@ -1,34 +1,37 @@
 # 最終検証台帳
 
-この台帳はPhase単位の完了記録とは別に、最終終了条件を現在のcode、test、実機resourceへ照合する。`PASS`は記載した再現手順が当該境界を直接検証した場合だけ使う。実装済み、unit test済み、過去の個別gate通過だけでは、最新HEADの最終統合を`PASS`にしない。
+この台帳はPhase単位の完了記録とは別に、最終終了条件を現在のcode、test、実機resourceへ照合する。`PASS`は記載した再現手順が当該境界を直接検証した場合だけ使う。過去の実機gateは証拠として保持するが、現在mainで再実行していない場合は`LIVE RECHECK`と明記し、unit testやintegration build-tagのコンパイルだけを実機通過と扱わない。
+
+現在の基準は2026-08-20のmain merge commit `f83bc7b1e4cc16de488b0f082b24f66fa2d5d0af`である。このcommitでは通常gate、全race、integration build-tagのコンパイルを再実行した。Apple Containerを起動する実機gate、clean-room、bounded fuzzは再実行していない。
 
 ## 要件と証拠
 
 | 最終要件 | 実装・再現可能な証拠 | 現在の判定 |
 | --- | --- | --- |
-| Phase 0〜5成果物 | [`phase-0.md`](./phase-0.md)〜[`phase-5.md`](./phase-5.md)、各`internal/*` unit/race test | PASS。最新HEADの通常gateを再実行済み |
-| DG-01 secure network | `TestPhase0SecureNetworkAndGatewayTransport`、`runtime.ValidateSecureSessionSpec` attack test | PASS。public IPv4/IPv6、host gateway、他VM、private、metadata、UDP、外部DNS、raw ICMPを実VMで直接拒否 |
-| DG-02 Snapshot / Overlay / export | `TestPhase0OverlayFreezeAndExportLayout`、`internal/workspace` attack test | PASS。OverlayFS layout、freeze、safe exportとhost再計算を直接検証 |
-| DG-03 OpenCode / Model / Attach / terminal | Phase 0/1 integration、`internal/modelgateway`、`internal/attachrelay`、`internal/opencode`、`internal/trustedui` | PASS。固定v1.18.16、認証、version一致、pause/revoke、terminal sanitizeを直接検証 |
-| Phase 2 lifecycle / apply / approval | Phase 1/2 integration、`internal/session`、`internal/apply`、`internal/approval`、`internal/lease`、`internal/cleanup` | PASS。pause/resume、orphan cleanup、export、approval、crash-safe applyを再実行済み |
-| 永続Project VM / shell / TTL / idle | `TestPublicCLIPersistentSupervisorAndSanitizedShell`、supervisor control unit/race test | PASS。停止VMのOverlayFS再mount修正後に公開CLI実機gateを再実行 |
-| Git Gateway | `TestPhase3GitGatewayInAgentVM`、`internal/gitgateway` smart HTTP/TOCTOU/partial-failure/fuzz test | PASS。限定runtime復旧後のclean systemで実VMgateを27秒で再実行 |
-| Web Gateway | Phase 4 measurement/integration、`internal/webgateway` attack/compatibility/fuzz test | PASS。実VMattack/compatibility gateと外部dialなしmeasurementを再実行 |
-| Phase 5 hardening | dependency/provenance、migration、retention/redaction、ENOSPC/reboot/partial failure、4 bounded fuzz target | PASS。通常gateと4 target各10秒のbounded fuzzを再実行 |
-| dev active-session egress | `TestDevSessionNetworkBoundary`がactive public egress、host/LAN/peer/inbound拒否、稼働VMのdeny-all quiesce、stopを検査 | PASS。人間の認証済みterminalから41.19秒で実行し、firewall disableとexact cleanupを含め成功 |
-| 最終cleanup / user resource非干渉 | exact nameとowner/project/session labelを再検証するcleanup、最終`container ls` / network / volume / process / temp inventory | PASS。`buildkit`とbuiltin `default`だけが残り、volume、sunaba process、検証tempは残っていない |
-| Git運用 | `dev`上の意図別Conventional Commit、`git status`、remote非書込み | PASS。本台帳を意図別commit後にcleanを再確認し、pushしない |
+| Phase 0〜5成果物 | [`phase-0.md`](./phase-0.md)〜[`phase-5.md`](./phase-5.md)、各`internal/*` unit/race test | AUTO PASS。current mainで通常gateと全raceを再実行済み。LIVE RECHECK |
+| DG-01 secure network | `TestPhase0SecureNetworkAndGatewayTransport`、`runtime.ValidateSecureSessionSpec` attack test | LIVE PASSは2026-08-11の当時HEAD。current mainはunit/raceとintegration compileのみ。LIVE RECHECK |
+| DG-02 Snapshot / Overlay / export | `TestPhase0OverlayFreezeAndExportLayout`、`internal/workspace` attack test | LIVE PASSは2026-08-11の当時HEAD。current mainのSnapshot preview/除外、recovery変更はunit/raceのみ。LIVE RECHECK |
+| DG-03 OpenCode / Model / Attach / terminal | Phase 0/1 integration、[`phase-5.md`](./phase-5.md)のv1.18.18更新gate、`internal/modelgateway`、`internal/attachrelay`、`internal/opencode`、`internal/trustedui` | 固定v1.18.18の更新gateは2026-08-13にPASS。current mainのHost TUI session root修正はunit/raceのみ。LIVE RECHECK |
+| Phase 2 lifecycle / apply / approval | Phase 1/2 integration、`internal/session`、`internal/apply`、`internal/approval`、`internal/lease`、`internal/cleanup` | 過去の実機gateはPASS。current mainのVM/Session分離、pause timer、frozen recoveryはunit/raceのみ。LIVE RECHECK |
+| 永続Project VM / shell / TTL / idle | `TestPublicCLIPersistentSupervisorAndSanitizedShell`、supervisor control unit/race test | current mainのunit/raceとdeadline反復testはPASS。公開CLI実機gateは変更前の証拠。LIVE RECHECK |
+| Git Gateway | `TestPhase3GitGatewayInAgentVM`、`internal/gitgateway` smart HTTP/TOCTOU/partial-failure/fuzz test | 2026-08-11の実VMgateはPASS。current mainの番号/ID承認とExternal Git guardはunit/raceのみ。LIVE RECHECK |
+| Web Gateway | Phase 4 measurement/integration、`internal/webgateway` attack/compatibility/fuzz test | 過去の実VMattack/compatibility gateはPASS。current mainでは再実行していない。LIVE RECHECK |
+| Phase 5 hardening | dependency/provenance、migration、retention/redaction、ENOSPC/reboot/partial failure、4 bounded fuzz target | current mainの通常gateはPASS。clean-roomと4 bounded fuzz targetは再実行していない |
+| dev active-session egress | `TestDevSessionNetworkBoundary`がactive public egress、host/LAN/peer/inbound拒否、稼働VMのdeny-all quiesce、stopを検査 | 2026-08-11の実機gateはPASS。current mainのdev recovery変更後は再実行していない。LIVE RECHECK |
+| 最終cleanup / user resource非干渉 | exact nameとowner/project/VM labelを再検証するcleanup、最終`container ls` / network / volume / process / temp inventory | 2026-08-11の実機作業後はPASS。current mainではcontainerを起動しておらず、新しい実機inventoryは未実施 |
+| Git運用 | `dev`上の意図別Conventional Commit、PR経由のmain統合、`git status` | PASS。mainへの直接commit/pushは行わず、明示承認を得たPR #2をmerge commitで統合した |
 
 ## 最新の自動gate
 
 ```sh
-scripts/verify.sh
-scripts/verify-race.sh
-scripts/verify-clean.sh
-SUNABA_FUZZ=1 scripts/verify.sh
+./scripts/verify.sh
+./scripts/verify-race.sh
+go test -tags=integration -run '^$' ./test/integration
 ```
 
-通常gateはformat、全unit、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを検証し、raceとclean-room gateは独立したscriptで実行する。bounded fuzzはModel Responses envelope、Git push binding、Web hostname、blocklist parserの4 targetを各10秒実行して通過した。実OpenAI credentialを使うbillable live requestは自動実行せず、mock upstream contractを正とする。
+2026-08-20のcurrent mainで上記3 commandを実行し、通常gate、全race、integration build-tagのコンパイルがPASSした。通常gateはformat、全unit、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを検証する。`go test -tags=integration -run '^$'`はcompile-onlyであり、Apple Container VMを起動しない。
+
+`./scripts/verify-clean.sh`と`SUNABA_FUZZ=1 ./scripts/verify.sh`は以前のPhase 5 gateでPASSしているが、current mainでは再実行していない。実OpenAI credentialを使うbillable live requestも自動実行せず、mock upstream contractを正とする。
 
 2026-08-12のModel Gateway認証拡張では、同じ通常gateを再実行してPASSした。追加したmock contractはAPI key/OAuth別model catalog、custom `sunaba` provider設定、schema v4からv5へのmigration、OAuth device flow/PKCE、期限前refreshとtoken rotation、固定Keychain identity、Codex endpoint/header/request差分を含む。実ChatGPT accountへのdevice loginとsubscription requestは外部認証を伴うため自動実行していない。
 
@@ -40,9 +43,11 @@ SUNABA_FUZZ=1 scripts/verify.sh
 
 2026-08-13のChange Set review追加でも通常gateと`internal/workspace`、`internal/trustedui`、`internal/cli`のrace testを再実行してPASSした。pending schema v3のbaseline/Merged View自己完結保存、旧schema v2互換、manifest/digestとfd-relative content再検証、bounded text diff、binary/巨大fileの未表示警告、実行属性・symlink risk、ANSI/OSC/BEL/bidi sanitize、exact path filter、apply前の同一digest再reviewをunit testへ固定した。公開CLI実機gateには`changes review`を追加したが、Apple Container実機integrationはこの変更では再実行していない。
 
-## 最新の実機gate
+2026-08-20の利用性hardeningでは、Snapshot preview/除外、VM/Session identity分離、Sessionごとの資格情報再発行、設定反映の三分類、doctor/status/argv exec、番号/IDによるGit push承認、External Git guard、secure/dev frozen recovery、Host TUI session root分離、pause中timer停止をmainへ統合した。`./scripts/verify.sh`、`./scripts/verify-race.sh`、integration compileがPASSし、Supervisor deadline回帰testは通常100反復、race付き10反復でもPASSした。Apple Container実機gateはこの統合後に実行していない。
 
-2026-08-11の最新HEADで次を直接実行した。
+## 最新の実機gate（current mainより前）
+
+一式を最後に直接実行したのは2026-08-11の当時HEADである。OpenCode v1.18.18への更新固有gateは2026-08-13に実行しており、詳細は[`phase-5.md`](./phase-5.md)に記録する。current mainでは以下を再実行していない。
 
 ```sh
 SUNABA_INTEGRATION=1 scripts/verify.sh
