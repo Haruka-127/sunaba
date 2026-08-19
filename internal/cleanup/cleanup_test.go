@@ -5,13 +5,16 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"sunaba/internal/audit"
 	"sunaba/internal/lease"
+	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
+	"sunaba/internal/workspace"
 )
 
 func TestCleanupKeepsLiveSessionAndRemovesGuardlessOrphan(t *testing.T) {
@@ -71,6 +74,64 @@ func TestCleanupRecoversPersistedActiveLeaseAfterSupervisorRestart(t *testing.T)
 	record, err := registryAfterRestart.Load("restarted")
 	if err != nil || record.State != lease.Revoked {
 		t.Fatalf("restart recovery lease=%+v error=%v", record, err)
+	}
+}
+
+func TestCleanupKeepsExactStoppedDevRecoveryWithoutProcessGuard(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	root, _ = filepath.EvalSymlinks(root)
+	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const projectID, vmID, sessionID = "0123456789ab", "vm123456", "session1"
+	projectState := filepath.Join(root, "projects", projectID)
+	if err := os.MkdirAll(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectState, err = filepath.EvalSymlinks(projectState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := recovery.NewRuntimeBase(projectState, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "snapshot"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	baseline, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "sunaba-" + projectID + "-" + vmID
+	record := recovery.State{Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: name, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, ExportPolicyDigest: strings.Repeat("a", 64), Reason: "guard refused", CreatedAt: time.Now().UTC()}
+	if err := recovery.Save(projectState, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recovery.Load(projectState); err != nil {
+		t.Fatalf("load recovery: %v", err)
+	}
+	labels := ownedLabels(projectID, vmID)
+	labels["dev.sunaba.mode"] = "dev"
+	fake := &cleanupRuntime{resources: map[string]runtime.Info{name: {Name: name, State: runtime.StateStopped, Labels: labels}}}
+	result, err := Run(context.Background(), Config{Store: &state.Store{Root: root}, Runtime: fake, Audit: recorder})
+	if err != nil || len(result.Kept) != 1 || result.Kept[0] != name || fake.removed != "" {
+		t.Fatalf("result=%+v removed=%q error=%v", result, fake.removed, err)
+	}
+	// A running or label-substituted resource is never trusted merely because
+	// a recovery record exists.
+	item := fake.resources[name]
+	item.State = runtime.StateRunning
+	fake.resources[name] = item
+	result, err = Run(context.Background(), Config{Store: &state.Store{Root: root}, Runtime: fake, Audit: recorder})
+	if err != nil || len(result.Refused) != 1 || fake.removed != "" {
+		t.Fatalf("running recovery result=%+v removed=%q error=%v", result, fake.removed, err)
 	}
 }
 

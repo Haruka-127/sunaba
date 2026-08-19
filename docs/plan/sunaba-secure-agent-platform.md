@@ -330,6 +330,10 @@ OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能で�
 5. セッション後のバックグラウンドプロセスによるGateway操作を拒否し、直接インターネットへも到達できないことを保証する。
 6. Project lockはProject VMを管理するSupervisorが保持する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。次の`agent`または`shell`は同じVM/upperに対して新しいAgent Sessionを開始する。
 
+dev foreground終了時にExternal Git guardが作業損失を検出した場合は、自動破棄へ進まない。Supervisorはdirect egressをquiesceし、relay、Gateway handler、lease、server passwordを失効し、VMを停止して専用networkとpf stateを削除する。その後、Project/VM ID、停止VMのownership label、固定runtime root、baseline、export policy digestをhost-onlyなrecovery recordへ束縛し、停止VMだけを明示的な復旧資産として保持する。recovery record保存または後処理が失敗しても、それをVM破棄の許可として扱わない。
+
+recovery状態は`status`で回収方法とともに表示し、通常のorphan cleanupは完全一致する停止VMを削除しない。`changes export`は同じVMをdeny-all network上で一時的に再所有してguardを再評価し、成功時だけChange Set化してVMを削除する。External Git状態を捨ててmain workspaceだけをexportする場合は`changes export --discard-external-git`、VM全体を捨てる場合は`recreate --discard-pending`または`destroy --yes --discard-pending`という明示操作を要求する。record、Project root、runtime path、VM labelのいずれかが一致しなければ回収も破棄も拒否する。
+
 secureモードではattach閉鎖とcapability失効を先に完了してから、signal forwardingとchild reapを行うApple Containerの固定init経由でSIGTERMを送り、1秒のbounded graceで停止し、停止状態を再確認する。正常系はinitがSIGTERMへ応答して速やかに終了させ、1秒を常時消費しない。既定の長いgraceを対話終了ごとに待たない一方、通常停止を省略して直接killする経路には変更しない。
 
 Agent Sessionの正常系とfail-closed経路は次のとおりである。
@@ -529,6 +533,8 @@ secureモードの初期vertical sliceでは、Model Gatewayだけを到達可�
 devモードでは、Agent VMからインターネットへの直接外向き通信を許可する。このモードでは、侵害されたVMから外部への情報流出をsunabaが防ぐという保証は提供しない。
 
 直接外向き通信を許可するのはactiveなAgent Session中だけとする。セッション終了時には接続を閉じ、新しいセッション開始時にモードを再確認して構成する。これはセッション中の情報流出を防ぐものではないが、状態保持されたVM内のマルウェアが利用者不在時に通信し続ける時間を限定する。
+
+export拒否後に保持するdev recovery VMはactive sessionではない。VMは停止し、専用network、pf state、Gateway capability、attach経路を持たない。後続exportのために一時起動する場合も、同じidentityの専用networkをVM停止中に再作成し、deny-allを適用してから起動する。
 
 ただし、devモードでも次は維持する。
 
@@ -981,6 +987,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 | capability期限切れ/identity不一致 | 拒否し、必要なら新しいsessionを開始する |
 | host baselineが変化 | Change Set適用を拒否する |
 | export検証失敗 | quarantineを保持し、host worktreeへ適用しない |
+| dev終了時にExternal Git guardが拒否 | egressとcapabilityを失効してVMを停止し、host-only recovery ownershipとして保持する。明示discardなしに破棄しない |
 | resource limit超過 | 記録し、対象processまたはVMを停止する |
 | VM侵害の疑い | capability失効後、必要ならquarantine exportしてクリーン再生成する |
 | cleanup失敗 | 対象Project/VM identityを表示し、他リソースを広く削除しない |
@@ -1179,7 +1186,7 @@ sunaba up [--mode secure|dev]    secure VMを作成してpause、devはforegroun
 sunaba agent                     server、relay、Host TUIを起動してAgent Session開始
 sunaba shell                     bounded line commandをterminal sanitizer経由で実行
 sunaba status                    mode、VM、session、quota、未export変更を表示
-sunaba changes export            freeze/exportとChange Set作成
+sunaba changes export [--discard-external-git] freeze/exportとChange Set作成。flagはguard対象のExternal Git状態だけを明示破棄
 sunaba changes review            保存済みbaselineとMerged Viewから安全な内容差分を表示
 sunaba changes apply             同じChange Setを再reviewし、Trusted Approval UIで確認後にhost適用
 sunaba approvals                 pending push/apply requestをhost側で確認・処理
@@ -1203,7 +1210,7 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 - secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後に初期Sessionを完全失効してVMを停止して返す。返却時はLocal Attach Relay、Gateway listener、activeな永続lease、server passwordがなく、一般session channelは到達不能である。
 - secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway handler、lease、server passwordを不可逆に失効して同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineや絶対TTLでも同じfail-closed pauseを行う。次回は同じVM/upperへ新しいSession ID、token、password、TTLを発行するため、TTL到達後も作業状態を保持したまま継続できる。
 - VM再開時はtmpfsであるguestの`/run/sunaba`が空になることを前提とし、relay、provider設定、新規session capabilityをmode `0700`の単一directoryへ生成し、1回のcopyで復元してからserverを起動する。終了済みSessionの入力を再利用せず、session capabilityをVMの永続root filesystemへ退避しない。copyに使うHost runtime内一時directoryは成功・失敗を問わず直後に削除する。
-- devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。background supervisorへdirect egressを残さない。
+- devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。export拒否時だけ、capability、pf、networkを全て失効した停止VMをhost-only recovery recordへ束縛して保持し、通常cleanupから保護する。background supervisorやdirect egressは残さない。
 - `sunaba shell`はraw execや未検証PTYではなく、bounded line commandの全出力をhost terminal sanitizerへ通す。
 - Model Gatewayの存在を会話やツール選択で意識する必要はない。
 - `sunaba config edit`はHost CLIだけで動くboundedな行入力式ウィザードとし、VM、OpenCode server、Host TUIへ設定入力を委ねない。既存のhost-only宣言設定を候補としてmemory上で編集し、最終確認まではfileや実効policyを変更しない。cancel、EOF、入力上限超過では変更を残さない。

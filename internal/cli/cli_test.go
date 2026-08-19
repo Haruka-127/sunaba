@@ -20,6 +20,7 @@ import (
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
+	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
@@ -843,6 +844,7 @@ type fakeSessionControlTarget struct {
 	exported  int
 	commands  [][]string
 	output    string
+	exportErr error
 }
 
 func (f *fakeSessionControlTarget) Pause(context.Context) error { f.paused++; return nil }
@@ -852,7 +854,7 @@ func (f *fakeSessionControlTarget) ResumeWith(context.Context, session.Activatio
 }
 func (f *fakeSessionControlTarget) StopAndExport(context.Context) (session.ExportResult, error) {
 	f.exported++
-	return session.ExportResult{}, nil
+	return session.ExportResult{}, f.exportErr
 }
 
 func TestSupervisorExpiryAllowsFreshSessionButRejectsExpiredShell(t *testing.T) {
@@ -922,6 +924,111 @@ func TestSupervisorExportWithoutChangesDestroysPersistentVM(t *testing.T) {
 	default:
 		t.Fatal("export did not signal supervisor exit")
 	}
+}
+
+func TestDevRecoveryPersistenceFailureNeverAuthorizesDestroy(t *testing.T) {
+	projectState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := &fakeSessionControlTarget{exportErr: &session.RecoveryRequiredError{Cause: errors.New("external Git unsafe")}}
+	persistent := &session.Session{ProjectID: "0123456789ab", ProjectRoot: projectState, VMID: "vm123456", SessionID: "session1", Container: "sunaba-0123456789ab-vm123456", Root: "/invalid", WorkspacePath: "/workspace/sunaba-vm123456", Baseline: workspace.SnapshotManifest{Digest: strings.Repeat("a", 64), Root: projectState}, ExportPolicyDigest: strings.Repeat("b", 64)}
+	controlled := &controlledSession{active: target, persistent: persistent, projectState: projectState, state: "running", exit: make(chan struct{})}
+	if err := controlled.exportAndDestroy(context.Background()); err == nil || !controlled.recoveryRetained() {
+		t.Fatalf("error=%v state=%s", err, controlled.state)
+	}
+	if target.destroyed != 0 {
+		t.Fatal("recovery metadata failure authorized VM destruction")
+	}
+}
+
+func TestExplicitDevRecoveryDiscardRequiresExactStoppedVMOwnership(t *testing.T) {
+	storeRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	if err := os.Chmod(storeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: storeRoot}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	const projectID, vmID, sessionID = "0123456789ab", "vm123456", "session1"
+	projectState := filepath.Join(storeRoot, "projects", projectID)
+	if err := os.MkdirAll(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectState, _ = filepath.EvalSymlinks(projectState)
+	runtimeBase, err := recovery.NewRuntimeBase(projectState, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "snapshot"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := "sunaba-" + projectID + "-" + vmID
+	record := recovery.State{Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: container, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, ExportPolicyDigest: strings.Repeat("a", 64), Reason: "guard refused", CreatedAt: time.Now().UTC()}
+	if err := recovery.Save(projectState, record); err != nil {
+		t.Fatal(err)
+	}
+	fake := &discardRecoveryRuntime{info: runtime.Info{Name: container, State: runtime.StateStopped, Labels: map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": vmID, "dev.sunaba.mode": "dev"}}}
+	a := &app{store: store, runtime: fake, output: io.Discard, errors: io.Discard}
+	fake.info.Labels["dev.sunaba.vm"] = "substituted"
+	if err := a.discardDevRecovery(context.Background(), projectID, projectState); err == nil || fake.removed {
+		t.Fatalf("substituted labels discard error=%v removed=%t", err, fake.removed)
+	}
+	fake.info.Labels["dev.sunaba.vm"] = vmID
+	if err := a.discardDevRecovery(context.Background(), projectID, projectState); err != nil || !fake.removed {
+		t.Fatalf("explicit discard error=%v removed=%t", err, fake.removed)
+	}
+	if _, err := os.Lstat(recovery.Path(projectState)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery record remained: %v", err)
+	}
+}
+
+type discardRecoveryRuntime struct {
+	info    runtime.Info
+	removed bool
+}
+
+func (f *discardRecoveryRuntime) Inspect(context.Context, string) (runtime.Info, error) {
+	return f.info, nil
+}
+func (f *discardRecoveryRuntime) Remove(context.Context, string) error {
+	f.removed = true
+	return nil
+}
+func (f *discardRecoveryRuntime) ImageExists(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (f *discardRecoveryRuntime) BuildImage(context.Context, string, string, map[string]string) error {
+	return nil
+}
+func (f *discardRecoveryRuntime) ContainerState(context.Context, string) (runtime.State, error) {
+	return f.info.State, nil
+}
+func (f *discardRecoveryRuntime) Create(context.Context, runtime.ContainerSpec) error { return nil }
+func (f *discardRecoveryRuntime) CreateSecure(context.Context, runtime.ContainerSpec, runtime.SecureSessionPolicy) error {
+	return nil
+}
+func (f *discardRecoveryRuntime) Start(context.Context, string) error                { return nil }
+func (f *discardRecoveryRuntime) Stop(context.Context, string) error                 { return nil }
+func (f *discardRecoveryRuntime) Exec(context.Context, string, bool, []string) error { return nil }
+func (f *discardRecoveryRuntime) ExecOutput(context.Context, string, []string) (string, error) {
+	return "", nil
+}
+func (f *discardRecoveryRuntime) CopyTo(context.Context, string, string, string) error { return nil }
+func (f *discardRecoveryRuntime) Export(context.Context, string, string) error         { return nil }
+func (f *discardRecoveryRuntime) IPAddress(context.Context, string) (string, error)    { return "", nil }
+func (f *discardRecoveryRuntime) List(context.Context) ([]runtime.Info, error) {
+	return []runtime.Info{f.info}, nil
 }
 
 func TestStaleSupervisorRecoveryRemovesOnlyBoundPrivateRuntime(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
+	"sunaba/internal/recovery"
 	"sunaba/internal/secretstore"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
@@ -57,6 +58,15 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	}()
 	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil {
 		return nil, fmt.Errorf("a pending Change Set exists; apply or discard it before starting another Agent Session")
+	}
+	if _, err := recovery.Load(projectState); err == nil {
+		return nil, fmt.Errorf("a stopped dev VM is retained after a refused export; run 'sunaba status' and recover or explicitly discard it before starting another Agent Session")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil {
+			return nil, fmt.Errorf("dev export recovery metadata is unsafe: %w", err)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, statErr
+		}
 	}
 	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
 	if err != nil {
@@ -98,7 +108,12 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if err != nil {
 		return nil, err
 	}
-	runtimeBase, err := makeRuntimeBase()
+	runtimeBase := ""
+	if projectPolicy.Mode == "dev" {
+		runtimeBase, err = recovery.NewRuntimeBase(projectState, vmID)
+	} else {
+		runtimeBase, err = makeRuntimeBase()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -407,13 +422,16 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
+	recoveryRetained := false
 	defer func() {
 		if !destroyed {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
 		}
-		_ = os.RemoveAll(managed.runtimeBase)
+		if !recoveryRetained {
+			_ = os.RemoveAll(managed.runtimeBase)
+		}
 	}()
 	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
@@ -442,7 +460,11 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 	exportContext, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	exportErr := controlled.exportAndDestroy(exportContext)
 	cancel()
-	destroyed = exportErr == nil
+	recoveryRetained = controlled.recoveryRetained()
+	destroyed = exportErr == nil || recoveryRetained
+	if recoveryRetained {
+		fmt.Fprintln(a.errors, "Dev export was refused. Direct egress and all session capabilities were revoked; the stopped VM was retained. Run 'sunaba status'; retry 'sunaba changes export', export the main workspace while explicitly discarding External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'.")
+	}
 	if exportErr == nil {
 		if pending, err := loadPending(projectState, projectPolicy); err == nil {
 			fmt.Fprintf(a.output, "Dev Agent Session ended; direct egress was quiesced and Change Set %s (%d changes) was exported.\n", pending.ChangeSet.Digest, len(pending.ChangeSet.Changes))
@@ -461,13 +483,16 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
+	recoveryRetained := false
 	defer func() {
 		if !destroyed {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
 		}
-		_ = os.RemoveAll(managed.runtimeBase)
+		if !recoveryRetained {
+			_ = os.RemoveAll(managed.runtimeBase)
+		}
 	}()
 	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
@@ -486,6 +511,10 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 	exportContext, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	err = controlled.exportAndDestroy(exportContext)
 	cancel()
-	destroyed = err == nil
+	recoveryRetained = controlled.recoveryRetained()
+	destroyed = err == nil || recoveryRetained
+	if recoveryRetained {
+		fmt.Fprintln(a.errors, "Dev export was refused. Direct egress and all session capabilities were revoked; the stopped VM was retained. Run 'sunaba status'; retry 'sunaba changes export', export the main workspace while explicitly discarding External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'.")
+	}
 	return err
 }

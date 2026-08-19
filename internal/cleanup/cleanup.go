@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"sunaba/internal/audit"
 	"sunaba/internal/lease"
+	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 )
@@ -46,6 +48,18 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		projectID, vmID, owned := ownedIdentity(info)
 		if !owned {
 			result.Refused = append(result.Refused, listed.Name)
+			continue
+		}
+		projectState := filepath.Join(cfg.Store.Root, "projects", projectID)
+		if retained, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
+			if retained.ProjectID == projectID && retained.VMID == vmID && retained.Container == info.Name && info.State == runtime.StateStopped {
+				result.Kept = append(result.Kept, info.Name)
+				continue
+			}
+			result.Refused = append(result.Refused, info.Name)
+			continue
+		} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			result.Refused = append(result.Refused, info.Name)
 			continue
 		}
 		guard, err := registry.AcquireGuard(vmID)

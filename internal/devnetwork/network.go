@@ -45,6 +45,16 @@ type Boundary struct {
 }
 
 func Activate(ctx context.Context, stateRoot, projectID, sessionID string) (_ *Boundary, err error) {
+	return activate(ctx, stateRoot, projectID, sessionID, false)
+}
+
+// ActivateQuiesced recreates an owned network while the retained VM is
+// stopped, then installs deny-all rules before returning it to the caller.
+func ActivateQuiesced(ctx context.Context, stateRoot, projectID, sessionID string) (_ *Boundary, err error) {
+	return activate(ctx, stateRoot, projectID, sessionID, true)
+}
+
+func activate(ctx context.Context, stateRoot, projectID, sessionID string, quiesced bool) (_ *Boundary, err error) {
 	lock, err := acquireExclusiveLock(stateRoot)
 	if err != nil {
 		return nil, err
@@ -59,8 +69,14 @@ func Activate(ctx context.Context, stateRoot, projectID, sessionID string) (_ *B
 	if err != nil {
 		return nil, err
 	}
-	if err := boundary.Verify(ctx); err != nil {
-		return nil, err
+	if quiesced {
+		if err := boundary.Quiesce(ctx); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := boundary.Verify(ctx); err != nil {
+			return nil, err
+		}
 	}
 	return boundary, nil
 }

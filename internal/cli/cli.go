@@ -28,6 +28,7 @@ import (
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
+	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/trustedui"
@@ -452,6 +453,21 @@ func (a *app) status(ctx context.Context, dir string) error {
 	if change, pendingErr := loadPending(projectState, projectPolicy); pendingErr == nil {
 		pending = fmt.Sprintf("%s (%d changes)", change.ChangeSet.Digest, len(change.ChangeSet.Changes))
 	}
+	recoveryState := "none"
+	if retained, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
+		if retained.ProjectID != projectPolicy.ProjectID || retained.ProjectRoot != projectPolicy.ProjectRoot {
+			listErr = errors.Join(listErr, fmt.Errorf("dev export recovery identity does not match Project policy"))
+		} else {
+			info, inspectErr := a.runtime.Inspect(ctx, retained.Container)
+			if inspectErr != nil || info.Name != retained.Container || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != retained.ProjectID || info.Labels["dev.sunaba.vm"] != retained.VMID || info.Labels["dev.sunaba.mode"] != "dev" {
+				listErr = errors.Join(listErr, fmt.Errorf("dev export recovery VM does not match its host ownership record"))
+			} else {
+				recoveryState = fmt.Sprintf("stopped VM %s retained after refused export; retry 'sunaba changes export', explicitly discard only External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'", retained.Container)
+			}
+		}
+	} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		listErr = errors.Join(listErr, fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr))
+	}
 	gitState := "disabled"
 	if len(projectPolicy.Git.Remotes) > 0 {
 		gitState = fmt.Sprintf("enabled (%d fixed HTTPS remotes)", len(projectPolicy.Git.Remotes))
@@ -483,11 +499,11 @@ func (a *app) status(ctx context.Context, dir string) error {
 	if _, err := a.requireActiveProjectDependency(projectPolicy); err != nil {
 		dependencyState = "not active: " + err.Error()
 	}
-	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nDependency lock: %s\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
+	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nDependency lock: %s\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nDev export recovery: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
 		projectPolicy.ProjectRoot, projectPolicy.ProjectID, projectPolicy.Mode, projectPolicy.SchemaVersion,
 		configPath, configState, dependencyState,
 		projectPolicy.Dependency.OpenCode, projectPolicy.Dependency.AppleContainer, projectPolicy.Dependency.AgentImage,
-		sessionVMs, sessionExpiry, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, pending,
+		sessionVMs, sessionExpiry, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, recoveryState, pending,
 		projectPolicy.Resources.CPUs, projectPolicy.Resources.Memory, projectPolicy.Resources.DiskBytes, projectPolicy.Resources.ProcessMax, projectPolicy.Resources.FileSizeMax, projectPolicy.Resources.OpenFileMax,
 		projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","),
 		projectPolicy.Model.MaxRequests, projectPolicy.Model.MaxConcurrent, projectPolicy.Model.MaxRequestBytes, projectPolicy.Model.MaxResponseBytes,
@@ -495,13 +511,22 @@ func (a *app) status(ctx context.Context, dir string) error {
 	return listErr
 }
 
-func (a *app) changes(ctx context.Context, action, dir string, reviewOptions workspace.ReviewOptions) error {
+func (a *app) changes(ctx context.Context, action, dir string, reviewOptions workspace.ReviewOptions, discardExternalGit bool) error {
 	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
 	switch action {
 	case "export":
+		recoveryExported := false
+		if _, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
+			if err := a.exportDevRecovery(ctx, projectPolicy, projectState, discardExternalGit); err != nil {
+				return err
+			}
+			recoveryExported = true
+		} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr)
+		}
 		pending, pendingErr := loadPending(projectState, projectPolicy)
 		if pendingErr != nil {
 			pendingPath := filepath.Join(projectState, "pending", "change.json")
@@ -509,6 +534,10 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 				return pendingErr
 			} else if !errors.Is(err, os.ErrNotExist) {
 				return err
+			}
+			if recoveryExported {
+				fmt.Fprintln(a.output, "Recovery export completed with no Project changes; the retained dev VM was removed.")
+				return nil
 			}
 			client, err := openSupervisorClient(projectState)
 			if err != nil {
@@ -670,6 +699,16 @@ func (a *app) recreate(ctx context.Context, dir string, discard bool) error {
 			return err
 		}
 	}
+	if _, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
+		if !discard {
+			return fmt.Errorf("a stopped dev VM is retained after a refused export; retry 'sunaba changes export' or pass --discard-pending explicitly")
+		}
+		if err := a.discardDevRecovery(ctx, projectPolicy.ProjectID, projectState); err != nil {
+			return err
+		}
+	} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr)
+	}
 	if client, err := openSupervisorClient(projectState); err == nil {
 		operation := "export"
 		if discard {
@@ -731,8 +770,20 @@ func (a *app) down(ctx context.Context, selector projectSelector) error {
 		}
 	} else if !errors.Is(err, errNoSupervisor) {
 		return err
-	} else if err := a.cleanupOrphans(ctx); err != nil {
-		return err
+	} else {
+		if retained, recoveryErr := recovery.Load(target.ProjectState); recoveryErr == nil {
+			info, inspectErr := a.runtime.Inspect(ctx, retained.Container)
+			if retained.ProjectID != target.ProjectID || inspectErr != nil || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != retained.ProjectID || info.Labels["dev.sunaba.vm"] != retained.VMID || info.Labels["dev.sunaba.mode"] != "dev" {
+				return fmt.Errorf("dev export recovery VM does not match its host ownership record")
+			}
+			fmt.Fprintln(a.output, "Dev export recovery VM is already stopped with direct egress and session capabilities revoked; retry 'sunaba changes export', use 'sunaba changes export --discard-external-git' to keep only the main workspace, or explicitly discard the VM.")
+			return nil
+		} else if _, statErr := os.Lstat(recovery.Path(target.ProjectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr)
+		}
+		if err := a.cleanupOrphans(ctx); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintln(a.output, "No managed persistent Agent VM was active; guardless owned resources were recovered.")
 	return nil
@@ -752,6 +803,16 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect pending Change Set: %w", err)
+	}
+	if _, recoveryErr := recovery.Load(target.ProjectState); recoveryErr == nil {
+		if !discard {
+			return fmt.Errorf("a stopped dev VM contains unexported changes; run 'sunaba changes export' or pass --discard-pending")
+		}
+		if err := a.discardDevRecovery(ctx, target.ProjectID, target.ProjectState); err != nil {
+			return err
+		}
+	} else if _, statErr := os.Lstat(recovery.Path(target.ProjectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr)
 	}
 	if client, err := openSupervisorClient(target.ProjectState); err == nil {
 		info, infoErr := client.info(ctx)

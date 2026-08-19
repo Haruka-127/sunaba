@@ -26,6 +26,7 @@ import (
 	"sunaba/internal/externalgit"
 	"sunaba/internal/lease"
 	"sunaba/internal/opencode"
+	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/workspace"
@@ -93,6 +94,22 @@ type Config struct {
 	ExportPolicyDigest string
 }
 
+type RecoveryConfig struct {
+	Store              *state.Store
+	Runtime            runtime.Runtime
+	Record             recovery.State
+	Audit              *audit.Recorder
+	SnapshotPolicy     workspace.SnapshotPolicy
+	ExportPolicy       workspace.ExportPolicy
+	ExportPolicyDigest string
+	DevNetworkName     string
+	DevNetworkQuiesce  func(context.Context) error
+	DevNetworkClose    func(context.Context) error
+	DiscardExternalGit bool
+	GitGateway         bool
+	WebGateway         bool
+}
+
 // Activation contains authority that is valid for exactly one Agent Session.
 // A Project VM may outlive many Activations, but a revoked Activation is never
 // resumed.
@@ -127,29 +144,30 @@ type Session struct {
 	ExportPolicy       workspace.ExportPolicy
 	ExportPolicyDigest string
 
-	cfg              Config
-	lifecycleContext context.Context
-	projectLock      *state.ProjectLock
-	leaseRegistry    *lease.Registry
-	vmGuard          *lease.Guard
-	leaseCreated     bool
-	gatewayServer    *http.Server
-	gatewayDone      chan error
-	gitGatewayServer *http.Server
-	gitGatewayDone   chan error
-	webGatewayServer *http.Server
-	webGatewayDone   chan error
-	gatewayActive    atomic.Bool
-	attachCancel     context.CancelFunc
-	attachDone       <-chan error
-	vmCreated        bool
-	paused           bool
-	closeOnce        sync.Once
-	modelCloseOnce   sync.Once
-	gitCloseOnce     sync.Once
-	webCloseOnce     sync.Once
-	devCloseOnce     sync.Once
-	closeErr         error
+	cfg                Config
+	lifecycleContext   context.Context
+	projectLock        *state.ProjectLock
+	leaseRegistry      *lease.Registry
+	vmGuard            *lease.Guard
+	leaseCreated       bool
+	gatewayServer      *http.Server
+	gatewayDone        chan error
+	gitGatewayServer   *http.Server
+	gitGatewayDone     chan error
+	webGatewayServer   *http.Server
+	webGatewayDone     chan error
+	gatewayActive      atomic.Bool
+	attachCancel       context.CancelFunc
+	attachDone         <-chan error
+	vmCreated          bool
+	paused             bool
+	closeOnce          sync.Once
+	modelCloseOnce     sync.Once
+	gitCloseOnce       sync.Once
+	webCloseOnce       sync.Once
+	devCloseOnce       sync.Once
+	discardExternalGit bool
+	closeErr           error
 }
 
 type ExportResult struct {
@@ -158,6 +176,17 @@ type ExportResult struct {
 	Merged     workspace.SnapshotManifest
 	ChangeSet  workspace.ChangeSet
 }
+
+// RecoveryRequiredError reports that export was refused and the dev VM has
+// already been stripped of capabilities, stopped, and disconnected. The
+// caller must persist its recovery ownership before releasing the VM guard.
+type RecoveryRequiredError struct{ Cause error }
+
+func (e *RecoveryRequiredError) Error() string {
+	return "dev export was refused; the stopped VM must be retained for explicit recovery: " + e.Cause.Error()
+}
+
+func (e *RecoveryRequiredError) Unwrap() error { return e.Cause }
 
 func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	if cfg.Mode == "" {
@@ -302,6 +331,67 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, err
 	}
 	s.gatewayActive.Store(true)
+	return s, nil
+}
+
+// AdoptRecovery acquires process ownership of an exact stopped dev VM. It does
+// not create or resume an Agent Session and therefore issues no capability.
+func AdoptRecovery(ctx context.Context, cfg RecoveryConfig) (_ *Session, err error) {
+	record := cfg.Record
+	if cfg.Store == nil || cfg.Runtime == nil || cfg.Audit == nil || record.Version != recovery.Version || record.ProjectRoot == "" || record.ExportPolicyDigest != cfg.ExportPolicyDigest || !filepath.IsAbs(record.RuntimeBase) || record.RuntimeRoot != filepath.Join(record.RuntimeBase, "sunaba-vm-"+record.VMID) {
+		return nil, fmt.Errorf("dev recovery configuration is incomplete")
+	}
+	projectLock, err := cfg.Store.AcquireProjectLock(record.ProjectRoot)
+	if err != nil {
+		return nil, err
+	}
+	s := &Session{
+		ProjectID: record.ProjectID, ProjectRoot: record.ProjectRoot, VMID: record.VMID, SessionID: record.SessionID,
+		Root: record.RuntimeRoot, Container: record.Container, WorkspacePath: record.WorkspacePath,
+		Baseline: record.Baseline, SnapshotRoot: filepath.Join(record.RuntimeRoot, "snapshot"), SnapshotPolicy: cfg.SnapshotPolicy,
+		ExportPolicyDigest: cfg.ExportPolicyDigest, projectLock: projectLock, lifecycleContext: ctx, vmCreated: true, paused: true,
+	}
+	rejected := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+	})
+	s.cfg = Config{
+		Store: cfg.Store, Runtime: cfg.Runtime, ProjectRoot: record.ProjectRoot, RuntimeBase: record.RuntimeBase,
+		VMID: record.VMID, SessionID: record.SessionID, Mode: "dev", Audit: cfg.Audit,
+		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicy: cfg.ExportPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
+		DevNetworkName: cfg.DevNetworkName, DevNetworkQuiesce: cfg.DevNetworkQuiesce, DevNetworkClose: cfg.DevNetworkClose,
+	}
+	s.discardExternalGit = cfg.DiscardExternalGit
+	if cfg.GitGateway {
+		s.cfg.GitGateway = rejected
+	}
+	if cfg.WebGateway {
+		s.cfg.WebGateway = rejected
+	}
+	defer func() {
+		if err != nil {
+			s.vmCreated = false
+			_ = s.Close()
+		}
+	}()
+	if projectLock.ProjectID != record.ProjectID || projectLock.ProjectRoot != record.ProjectRoot {
+		return nil, fmt.Errorf("dev recovery Project identity changed")
+	}
+	s.leaseRegistry = &lease.Registry{Root: filepath.Join(cfg.Store.Root, "leases")}
+	s.vmGuard, err = s.leaseRegistry.AcquireGuard(record.VMID)
+	if err != nil {
+		return nil, err
+	}
+	info, err := cfg.Runtime.Inspect(ctx, record.Container)
+	if err != nil {
+		return nil, err
+	}
+	if info.Name != record.Container || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != record.ProjectID || info.Labels["dev.sunaba.vm"] != record.VMID || info.Labels["dev.sunaba.mode"] != "dev" {
+		return nil, fmt.Errorf("stopped dev recovery VM ownership does not match its record")
+	}
+	actual, err := workspace.BuildSnapshotManifest(s.SnapshotRoot, cfg.SnapshotPolicy)
+	if err != nil || actual.Digest != record.Baseline.Digest {
+		return nil, fmt.Errorf("dev recovery baseline no longer matches its record")
+	}
 	return s, nil
 }
 
@@ -1001,8 +1091,13 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	} else if containerState != runtime.StateRunning {
 		return ExportResult{}, fmt.Errorf("session VM cannot be frozen from state %s", containerState)
 	}
-	if err := externalgit.CheckBeforeExport(ctx, s.cfg.Runtime, s.Container, s.WorkspacePath); err != nil {
-		return ExportResult{}, err
+	if !s.discardExternalGit {
+		if err := externalgit.CheckBeforeExport(ctx, s.cfg.Runtime, s.Container, s.WorkspacePath); err != nil {
+			if s.cfg.Mode == "dev" {
+				return ExportResult{}, &RecoveryRequiredError{Cause: errors.Join(err, s.stopDevForRecovery(ctx))}
+			}
+			return ExportResult{}, err
+		}
 	}
 	if err := s.stopChannels(ctx); err != nil {
 		return ExportResult{}, err
@@ -1047,6 +1142,68 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, err
 	}
 	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: merged.Manifest, ChangeSet: changeSet}, nil
+}
+
+func (s *Session) stopDevForRecovery(ctx context.Context) error {
+	var recoveryErr error
+	s.gatewayActive.Store(false)
+	recoveryErr = errors.Join(recoveryErr, s.stopChannels(ctx))
+	if s.leaseCreated {
+		if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
+			recoveryErr = errors.Join(recoveryErr, err)
+		} else {
+			s.leaseCreated = false
+			recoveryErr = errors.Join(recoveryErr, s.emit("capability.revoked", "dev-recovery"))
+		}
+	}
+	current, err := s.cfg.Runtime.ContainerState(ctx, s.Container)
+	if err != nil {
+		recoveryErr = errors.Join(recoveryErr, err)
+	} else if current == runtime.StateRunning {
+		recoveryErr = errors.Join(recoveryErr, s.cfg.Runtime.Stop(ctx, s.Container))
+	} else if current != runtime.StateStopped {
+		recoveryErr = errors.Join(recoveryErr, fmt.Errorf("dev recovery VM has unsupported state %s", current))
+	}
+	s.paused = true
+	current, err = s.cfg.Runtime.ContainerState(ctx, s.Container)
+	if err != nil || current != runtime.StateStopped {
+		recoveryErr = errors.Join(recoveryErr, fmt.Errorf("dev recovery VM is not stopped: state=%s error=%v", current, err))
+	}
+	recoveryErr = errors.Join(recoveryErr, s.closeDevNetwork(ctx))
+	if emitErr := s.emit("session.recovery_retained", "export-refused"); emitErr != nil {
+		recoveryErr = errors.Join(recoveryErr, emitErr)
+	}
+	return recoveryErr
+}
+
+func (s *Session) RecoveryState(reason string) recovery.State {
+	return recovery.State{
+		Version: recovery.Version, ProjectID: s.ProjectID, ProjectRoot: s.ProjectRoot, VMID: s.VMID,
+		SessionID: s.SessionID, Container: s.Container, RuntimeBase: s.cfg.RuntimeBase, RuntimeRoot: s.Root,
+		WorkspacePath: s.WorkspacePath, Baseline: s.Baseline, ExportPolicyDigest: s.ExportPolicyDigest,
+		Reason: reason, CreatedAt: time.Now().UTC(),
+	}
+}
+
+// DetachForRecovery releases process-scoped locks only after the host recovery
+// record is durable. It never removes the stopped VM or its runtime root.
+func (s *Session) DetachForRecovery(ctx context.Context) error {
+	current, err := s.cfg.Runtime.ContainerState(ctx, s.Container)
+	if err != nil || current != runtime.StateStopped {
+		return fmt.Errorf("refusing to detach a dev recovery VM that is not stopped: state=%s error=%v", current, err)
+	}
+	if s.cfg.Mode != "dev" || s.leaseCreated || s.gatewayActive.Load() {
+		return fmt.Errorf("refusing to detach an active or non-dev session for recovery")
+	}
+	if err := s.closeDevNetwork(ctx); err != nil {
+		return err
+	}
+	s.vmCreated = false
+	return s.Close()
+}
+
+func (s *Session) RetainForRecovery(ctx context.Context) error {
+	return errors.Join(s.stopDevForRecovery(ctx), s.DetachForRecovery(ctx))
 }
 
 func (s *Session) startRevokedGatewaysForExport() error {

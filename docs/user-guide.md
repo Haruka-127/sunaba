@@ -306,7 +306,7 @@ Model Gatewayは常に必要です。Git GatewayとWeb Gatewayは、Projectで�
 
 dev modeは、foregroundの`agent`または`shell`が動いている間だけpublic Internetへの直接接続を許可します。この間の情報流出防止は保証しません。
 
-host、LAN、private/link-local/metadata、他VM、unsolicited inbound、host credential、host worktreeとの境界は維持します。session終了時はegressをdeny-allへ切り替えてからVMをexport・破棄します。同時にactiveにできるdev sessionは1つです。
+host、LAN、private/link-local/metadata、他VM、unsolicited inbound、host credential、host worktreeとの境界は維持します。session終了時はegressをdeny-allへ切り替えてからVMをexport・破棄します。exportが作業損失防止guardに拒否された場合は、capabilityと専用networkを削除した停止VMとして保持します。同時にactiveにできるdev sessionは1つです。
 
 dev modeのpf操作は、[ホスト操作の許可範囲](./plan/allowed-host-operations.md)に記載された`sunaba firewall`操作だけに限定されます。一般的なpf変更や`pfctl -d`は使用しないでください。
 
@@ -339,7 +339,15 @@ sunaba changes export --dir /path/to/project
 
 exportはVMをfreeze・破棄し、追加、変更、削除、renameをホスト側で再構成します。unsafeなpath、symlink、hardlink、special file、`.git/`、sunaba管理領域、上限超過はホスト作業ツリーへ到達する前に拒否されます。
 
-既定workspace以外に作ったGit cloneにdirty fileまたは未push commitがある場合、exportは作業損失を避けるため拒否します。main workspaceへ必要なworking fileを移し、commitを登録remoteへpushしてから再実行するか、VM全体を破棄する場合だけ明示的なdiscardを選びます。
+既定workspace以外に作ったGit cloneにdirty fileまたは未push commitがある場合、exportは作業損失を避けるため拒否します。dev foreground終了時に拒否された場合もVMは削除されず、direct egress、capability、専用networkを失った停止recovery状態になります。`sunaba status`で対象VMと回収コマンドを確認してください。
+
+状態を整理した後の通常exportは`changes export`で再試行します。External Gitのworking tree/historyは捨て、main workspaceだけをChange Set化する場合に限り、損失を理解したうえで明示します。
+
+```sh
+sunaba changes export --discard-external-git --dir /path/to/project
+```
+
+VM全体を破棄する場合は`sunaba recreate --discard-pending`または`sunaba destroy --yes --discard-pending`を使います。これらのflagがない操作や通常cleanupはrecovery VMを削除しません。
 
 exportされたbaselineとMerged Viewはhost-only stateへ固定されます。次に、host worktreeへ書き込まずに内容差分を確認します。
 

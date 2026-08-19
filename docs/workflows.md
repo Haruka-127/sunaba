@@ -333,7 +333,7 @@ git merge --ff-only origin/main
 
 fetch、pullにはhost承認は不要です。固定remote、session、quotaの範囲はGatewayが強制します。
 
-互換目的で別directoryへcloneしたrepositoryが残っている場合、dirty working treeまたは未push commitがある間はexportを拒否します。必要なworking fileを既定workspaceへ移し、commitをpushしてからexportしてください。
+互換目的で別directoryへcloneしたrepositoryが残っている場合、dirty working treeまたは未push commitがある間はexportを拒否します。必要なworking fileを既定workspaceへ移し、commitをpushしてからexportしてください。dev foreground終了時に検出した場合、VMはcapabilityとnetworkを失った停止recovery状態で保持され、`status`に回収方法が表示されます。External Git状態を明示的に捨ててmain workspaceだけをexportする場合は`changes export --discard-external-git`を使います。
 
 ### 3. pushを承認する
 
@@ -366,7 +366,22 @@ sunaba agent --dir "$PROJECT"
 
 dev modeでは、foregroundの`agent`または`shell`が動いている間だけ専用networkから直接egressできます。session中の情報流出防止は保証されません。Project内のsource、`.env`、生成物など、VMから読める情報は外部へ送信され得ます。
 
-session終了時、sunabaはegressをdeny-allへ切り替え、VMをexportして破棄します。dev VMをbackgroundで保持しません。同時にactiveにできるdev sessionは1つです。
+session終了時、sunabaはegressをdeny-allへ切り替え、VMをexportして破棄します。exportがExternal Git guardに拒否された場合だけ、自動破棄せず、VMを停止してcapability、pf state、専用networkを削除し、host-only recovery recordへ束縛します。これはbackground sessionではなく、通信不能な回収待ち資産です。同時にactiveにできるdev sessionは1つです。
+
+拒否後は次で状態と正確なVM identityを確認します。
+
+```sh
+sunaba status --dir "$PROJECT"
+sunaba changes export --dir "$PROJECT"
+```
+
+guard対象のExternal Git working tree/historyを捨て、main workspaceだけをChange Set化する場合に限り、明示的に実行します。
+
+```sh
+sunaba changes export --discard-external-git --dir "$PROJECT"
+```
+
+VM全体を破棄する場合は`recreate --discard-pending`または`destroy --yes --discard-pending`を使います。recovery recordのProject/VM ID、runtime path、停止VM labelが一致しない場合、sunabaは回収も破棄も拒否します。
 
 host worktreeの非mount、host credentialの非注入、host・LAN・private network・他VMへの拒否は維持されます。ただし、VM自身が用意したcredentialによるGit pushなど、直接egress上の外部書き込みをGit Gateway承認で止めることはできません。
 

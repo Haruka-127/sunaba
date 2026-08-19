@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"sunaba/internal/gitgateway"
+	"sunaba/internal/recovery"
 	"sunaba/internal/session"
 	"sunaba/internal/trustedui"
 )
@@ -257,6 +258,24 @@ func (s *controlledSession) exportAndDestroy(ctx context.Context) error {
 	}
 	result, err := s.active.StopAndExport(ctx)
 	if err != nil {
+		var recoveryRequired *session.RecoveryRequiredError
+		if errors.As(err, &recoveryRequired) && s.persistent != nil {
+			// Export refusal irrevocably transfers this path away from automatic
+			// destruction, even if host metadata persistence itself reports an
+			// error. Losing the record must never authorize losing guest state.
+			s.state = "recovery"
+			s.signalExit()
+			record := s.persistent.RecoveryState(recoveryRequired.Cause.Error())
+			if saveErr := recovery.Save(s.projectState, record); saveErr != nil {
+				return errors.Join(err, fmt.Errorf("persist stopped dev VM recovery ownership: %w", saveErr))
+			}
+			// The durable record becomes the owner before process-scoped locks are
+			// released. No later cleanup error may turn this into VM destruction.
+			if detachErr := s.persistent.DetachForRecovery(ctx); detachErr != nil {
+				return errors.Join(err, fmt.Errorf("release stopped dev VM to recovery ownership: %w", detachErr))
+			}
+			return err
+		}
 		s.state = "failed"
 		return err
 	}
@@ -312,6 +331,12 @@ func (s *controlledSession) shell(ctx context.Context, command string) (string, 
 }
 
 func (s *controlledSession) signalExit() { s.exitOnce.Do(func() { close(s.exit) }) }
+
+func (s *controlledSession) recoveryRetained() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state == "recovery"
+}
 
 func startApprovalControl(projectState, runtimeBase string, broker pushApprovalBroker, controlled *controlledSession) (*approvalControl, error) {
 	if broker == nil && controlled == nil {

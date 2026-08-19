@@ -384,6 +384,39 @@ func TestDevExportQuiesceFailureStopsVMAndCapabilities(t *testing.T) {
 	}
 }
 
+func TestDevExternalGitRefusalStopsVMRevokesCapabilitiesAndClosesNetwork(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	cfg.Mode = "dev"
+	canonical, err := state.ResolveProjectPath(cfg.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.VMID + "-net"
+	cfg.DevNetworkVerify = func(context.Context) error { return nil }
+	quiesced, closed := 0, 0
+	cfg.DevNetworkQuiesce = func(context.Context) error { quiesced++; return nil }
+	cfg.DevNetworkClose = func(context.Context) error { closed++; return nil }
+	fake.externalGitUnsafe = true
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.StopAndExport(context.Background())
+	var recoveryErr *RecoveryRequiredError
+	if !errors.As(err, &recoveryErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if fake.state != runtime.StateStopped || fake.removed || quiesced != 1 || closed != 1 || s.gatewayActive.Load() || s.leaseCreated {
+		t.Fatalf("state=%s removed=%t quiesced=%d closed=%d gateway=%t lease=%t", fake.state, fake.removed, quiesced, closed, s.gatewayActive.Load(), s.leaseCreated)
+	}
+	if err := s.DetachForRecovery(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fake.removed {
+		t.Fatal("detaching recovery removed the stopped VM")
+	}
+}
+
 func TestPausedExportRevokesCapabilityBeforeRestartAndKeepsMountSocket(t *testing.T) {
 	cfg, fake := sessionFixture(t)
 	s, err := Start(context.Background(), cfg)
@@ -734,19 +767,20 @@ func rotatedActivation(cfg Config, sessionID string) Activation {
 }
 
 type fakeRuntime struct {
-	mu         sync.Mutex
-	spec       runtime.ContainerSpec
-	state      runtime.State
-	setup      string
-	setupError error
-	listener   net.Listener
-	server     *http.Server
-	removed    bool
-	copies     map[string][]byte
-	copyCount  map[string]int
-	commands   []string
-	startHook  func()
-	startError error
+	mu                sync.Mutex
+	spec              runtime.ContainerSpec
+	state             runtime.State
+	setup             string
+	externalGitUnsafe bool
+	setupError        error
+	listener          net.Listener
+	server            *http.Server
+	removed           bool
+	copies            map[string][]byte
+	copyCount         map[string]int
+	commands          []string
+	startHook         func()
+	startError        error
 }
 
 func (f *fakeRuntime) ImageExists(context.Context, string) (bool, error) { return true, nil }
@@ -812,6 +846,9 @@ func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) 
 	joined := strings.Join(command, " ")
 	f.commands = append(f.commands, joined)
 	if strings.Contains(joined, "SUNABA_EXTERNAL_GIT_SAFE") {
+		if f.externalGitUnsafe {
+			return "SUNABA_EXTERNAL_GIT_UNSAFE", nil
+		}
 		return "SUNABA_EXTERNAL_GIT_SAFE", nil
 	}
 	if strings.Contains(joined, "opencode serve") {

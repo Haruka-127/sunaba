@@ -150,6 +150,9 @@ func (a *app) configCommand() *urfavecli.Command {
 	for _, action := range []string{"path", "edit", "validate", "diff", "apply", "show"} {
 		action := action
 		flags := projectSelectorFlags()
+		if action == "export" {
+			flags = projectSelectorFlags(&urfavecli.BoolFlag{Name: "discard-external-git", Usage: "Explicitly discard guarded External Git state after exporting the main workspace", OnlyOnce: true})
+		}
 		if action == "show" {
 			flags = append(flags, &urfavecli.BoolFlag{Name: "effective", Usage: "Show the compiled effective policy", OnlyOnce: true})
 		}
@@ -263,7 +266,7 @@ func (a *app) changesCommand() *urfavecli.Command {
 			)
 		}
 		commands = append(commands, &urfavecli.Command{Name: action, Usage: map[string]string{"export": "Export VM changes as a trusted Change Set", "review": "Safely review a pending Change Set before host apply", "apply": "Review and apply an approved Change Set to the host Project"}[action], Flags: flags, Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
-			return a.changes(ctx, action, dir, workspace.ReviewOptions{Context: cmd.Int("context"), StatOnly: cmd.Bool("stat"), Path: cmd.String("path")})
+			return a.changes(ctx, action, dir, workspace.ReviewOptions{Context: cmd.Int("context"), StatOnly: cmd.Bool("stat"), Path: cmd.String("path")}, cmd.Bool("discard-external-git"))
 		}))})
 	}
 	return &urfavecli.Command{Name: "changes", Usage: "Export, review, and apply Project changes", Commands: commands}
