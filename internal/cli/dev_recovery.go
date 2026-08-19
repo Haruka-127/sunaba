@@ -47,7 +47,7 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 		Store: a.store, Runtime: a.runtime, Record: record, Audit: recorder,
 		SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest,
 		DevNetworkName: boundary.Network.Name, DevNetworkQuiesce: boundary.Quiesce, DevNetworkClose: boundary.Close,
-		DiscardExternalGit: discardExternalGit, GitGateway: len(projectPolicy.Git.Remotes) > 0, WebGateway: projectPolicy.Web.Enabled,
+		DiscardExternalGit: discardExternalGit, GitGateway: record.GitGateway, WebGateway: record.WebGateway,
 	})
 	if err != nil {
 		return err

@@ -36,6 +36,8 @@ type State struct {
 	WorkspacePath      string                     `json:"workspace_path"`
 	Baseline           workspace.SnapshotManifest `json:"baseline"`
 	ExportPolicyDigest string                     `json:"export_policy_digest"`
+	GitGateway         bool                       `json:"git_gateway"`
+	WebGateway         bool                       `json:"web_gateway"`
 	Reason             string                     `json:"reason"`
 	CreatedAt          time.Time                  `json:"created_at"`
 }

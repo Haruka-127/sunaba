@@ -36,12 +36,12 @@ func TestRecoveryRecordBindsPrivateRuntimeAndRejectsSubstitution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := State{Version: Version, ProjectID: "0123456789ab", ProjectRoot: projectRoot, VMID: vmID, SessionID: "session1", Container: "sunaba-0123456789ab-" + vmID, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, ExportPolicyDigest: strings.Repeat("a", 64), Reason: "guard refused", CreatedAt: time.Now().UTC()}
+	record := State{Version: Version, ProjectID: "0123456789ab", ProjectRoot: projectRoot, VMID: vmID, SessionID: "session1", Container: "sunaba-0123456789ab-" + vmID, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, ExportPolicyDigest: strings.Repeat("a", 64), GitGateway: true, WebGateway: true, Reason: "guard refused", CreatedAt: time.Now().UTC()}
 	if err := Save(projectState, record); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := Load(projectState)
-	if err != nil || loaded.Container != record.Container {
+	if err != nil || loaded.Container != record.Container || !loaded.GitGateway || !loaded.WebGateway {
 		t.Fatalf("loaded=%+v error=%v", loaded, err)
 	}
 	loaded.VMID = "different"

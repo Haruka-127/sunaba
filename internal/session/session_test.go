@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"sunaba/internal/dependency"
 	"sunaba/internal/lease"
 	"sunaba/internal/opencode"
+	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/testutil"
@@ -163,6 +165,31 @@ func TestStartEnforcesConfiguredExportFileLimit(t *testing.T) {
 	cfg.ExportPolicy.Workspace = cfg.SnapshotPolicy
 	if _, err := Start(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "exceeds maximum size 4") {
 		t.Fatalf("configured export limit was not enforced: %v", err)
+	}
+}
+
+func TestRecoverySessionRetainsSelfContainedExportPolicy(t *testing.T) {
+	exportPolicy := workspace.DefaultExportPolicy()
+	snapshotPolicy := workspace.DefaultSnapshotPolicy()
+	s := newRecoverySession(context.Background(), RecoveryConfig{
+		Record: recovery.State{
+			ProjectID: "0123456789ab", ProjectRoot: "/project", VMID: "vm123456", SessionID: "session1",
+			RuntimeBase: "/runtime", RuntimeRoot: "/runtime/sunaba-vm-vm123456", Container: "sunaba-0123456789ab-vm123456",
+			WorkspacePath: "/workspace/sunaba-vm123456",
+		},
+		SnapshotPolicy: snapshotPolicy, ExportPolicy: exportPolicy, ExportPolicyDigest: strings.Repeat("a", 64),
+	}, nil)
+	if !reflect.DeepEqual(s.ExportPolicy, exportPolicy) || !reflect.DeepEqual(s.SnapshotPolicy, snapshotPolicy) || s.ExportPolicyDigest != strings.Repeat("a", 64) {
+		t.Fatalf("recovery Session lost its self-contained export contract: %+v", s)
+	}
+}
+
+func TestRecoveryStateRetainsOriginalGatewayMountTopology(t *testing.T) {
+	rejected := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	s := &Session{cfg: Config{GitGateway: rejected, WebGateway: rejected}}
+	record := s.RecoveryState("test")
+	if !record.GitGateway || !record.WebGateway {
+		t.Fatalf("recovery record lost gateway mount topology: %+v", record)
 	}
 }
 

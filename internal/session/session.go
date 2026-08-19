@@ -345,12 +345,7 @@ func AdoptRecovery(ctx context.Context, cfg RecoveryConfig) (_ *Session, err err
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{
-		ProjectID: record.ProjectID, ProjectRoot: record.ProjectRoot, VMID: record.VMID, SessionID: record.SessionID,
-		Root: record.RuntimeRoot, Container: record.Container, WorkspacePath: record.WorkspacePath,
-		Baseline: record.Baseline, SnapshotRoot: filepath.Join(record.RuntimeRoot, "snapshot"), SnapshotPolicy: cfg.SnapshotPolicy,
-		ExportPolicyDigest: cfg.ExportPolicyDigest, projectLock: projectLock, lifecycleContext: ctx, vmCreated: true, paused: true,
-	}
+	s := newRecoverySession(ctx, cfg, projectLock)
 	rejected := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 	})
@@ -393,6 +388,17 @@ func AdoptRecovery(ctx context.Context, cfg RecoveryConfig) (_ *Session, err err
 		return nil, fmt.Errorf("dev recovery baseline no longer matches its record")
 	}
 	return s, nil
+}
+
+func newRecoverySession(ctx context.Context, cfg RecoveryConfig, projectLock *state.ProjectLock) *Session {
+	record := cfg.Record
+	return &Session{
+		ProjectID: record.ProjectID, ProjectRoot: record.ProjectRoot, VMID: record.VMID, SessionID: record.SessionID,
+		Root: record.RuntimeRoot, Container: record.Container, WorkspacePath: record.WorkspacePath,
+		Baseline: record.Baseline, SnapshotRoot: filepath.Join(record.RuntimeRoot, "snapshot"), SnapshotPolicy: cfg.SnapshotPolicy,
+		ExportPolicy: cfg.ExportPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
+		projectLock: projectLock, lifecycleContext: ctx, vmCreated: true, paused: true,
+	}
 }
 
 func validateConfig(cfg Config) error {
@@ -1213,6 +1219,7 @@ func (s *Session) RecoveryState(reason string) recovery.State {
 		Version: recovery.Version, ProjectID: s.ProjectID, ProjectRoot: s.ProjectRoot, VMID: s.VMID,
 		SessionID: s.SessionID, Container: s.Container, RuntimeBase: s.cfg.RuntimeBase, RuntimeRoot: s.Root,
 		WorkspacePath: s.WorkspacePath, Baseline: s.Baseline, ExportPolicyDigest: s.ExportPolicyDigest,
+		GitGateway: s.cfg.GitGateway != nil, WebGateway: s.cfg.WebGateway != nil,
 		Reason: reason, CreatedAt: time.Now().UTC(),
 	}
 }
