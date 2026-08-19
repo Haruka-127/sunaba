@@ -1003,6 +1003,18 @@ func (a *app) loadPolicy(directory string) (policy.ProjectPolicy, string, string
 	if err != nil {
 		return policy.ProjectPolicy{}, "", "", err
 	}
+	return a.validateDeclarativePolicy(loaded, path, projectState)
+}
+
+func (a *app) loadPolicyLocked(directory string) (policy.ProjectPolicy, string, string, error) {
+	loaded, path, projectState, err := a.loadEffectivePolicyLocked(directory)
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", err
+	}
+	return a.validateDeclarativePolicy(loaded, path, projectState)
+}
+
+func (a *app) validateDeclarativePolicy(loaded policy.ProjectPolicy, path, projectState string) (policy.ProjectPolicy, string, string, error) {
 	configStore, err := a.projectConfigStore()
 	if err != nil {
 		return policy.ProjectPolicy{}, "", "", err
@@ -1022,6 +1034,23 @@ func (a *app) loadEffectivePolicy(directory string) (policy.ProjectPolicy, strin
 	if err != nil {
 		return policy.ProjectPolicy{}, "", "", err
 	}
+	configLock, err := a.store.AcquireConfigLock(state.ProjectID(root))
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", err
+	}
+	defer configLock.Close()
+	return a.loadEffectivePolicyRootLocked(root)
+}
+
+func (a *app) loadEffectivePolicyLocked(directory string) (policy.ProjectPolicy, string, string, error) {
+	root, err := state.ResolveProjectPath(directory)
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", err
+	}
+	return a.loadEffectivePolicyRootLocked(root)
+}
+
+func (a *app) loadEffectivePolicyRootLocked(root string) (policy.ProjectPolicy, string, string, error) {
 	projectState := a.projectState(root)
 	path := filepath.Join(projectState, "policy.json")
 	if err := recoverConfigPolicyTransaction(projectState); err != nil {

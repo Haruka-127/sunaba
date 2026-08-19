@@ -600,6 +600,32 @@ func TestHostGitAuthorizationUsesOnlyNonInteractiveCredentialHelper(t *testing.T
 	}
 }
 
+func TestEffectivePolicyLoadDoesNotRecoverWhileConfigurationWriterOwnsLock(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state")}
+	var output bytes.Buffer
+	a := &app{store: store, output: &output, errors: &output}
+	prepareTestSetup(t, a)
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := store.AcquireConfigLock(state.ProjectID(project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if _, _, _, err := a.loadEffectivePolicy(project); err == nil || !strings.Contains(err.Error(), "already being changed") {
+		t.Fatalf("policy loader bypassed the configuration transaction lock: %v", err)
+	}
+}
+
 func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

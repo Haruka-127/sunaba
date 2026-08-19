@@ -70,7 +70,7 @@ func (a *app) config(ctx context.Context, action, dir string, effectiveOutput bo
 			return err
 		}
 		defer lock.Close()
-		latestEffective, latestPolicyPath, latestProjectState, err := a.loadEffectivePolicy(dir)
+		latestEffective, latestPolicyPath, latestProjectState, err := a.loadEffectivePolicyLocked(dir)
 		if err != nil {
 			return err
 		}

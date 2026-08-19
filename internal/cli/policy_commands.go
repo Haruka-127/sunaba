@@ -42,7 +42,7 @@ func (a *app) modelPolicy(_ context.Context, action, auth, dir string, models []
 		return err
 	}
 	defer configLock.Close()
-	projectPolicy, path, _, err = a.loadPolicy(dir)
+	projectPolicy, path, _, err = a.loadPolicyLocked(dir)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func (a *app) gitPolicy(_ context.Context, action, dir, name, remoteURL string) 
 		return err
 	}
 	defer configLock.Close()
-	projectPolicy, path, _, err = a.loadPolicy(dir)
+	projectPolicy, path, _, err = a.loadPolicyLocked(dir)
 	if err != nil {
 		return err
 	}
@@ -169,7 +169,7 @@ func (a *app) webPolicy(ctx context.Context, action, dir string, includeSubdomai
 		return err
 	}
 	defer configLock.Close()
-	projectPolicy, path, projectState, err = a.loadPolicy(dir)
+	projectPolicy, path, projectState, err = a.loadPolicyLocked(dir)
 	if err != nil {
 		return err
 	}

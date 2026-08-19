@@ -47,6 +47,19 @@ type managedActivation struct {
 }
 
 func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (*managedSession, error) {
+	configLock, err := a.store.AcquireConfigLock(projectPolicy.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer configLock.Close()
+	currentPolicy, _, currentProjectState, err := a.loadPolicyLocked(projectPolicy.ProjectRoot)
+	if err != nil {
+		return nil, err
+	}
+	if currentProjectState != projectState || currentPolicy.ProjectID != projectPolicy.ProjectID {
+		return nil, fmt.Errorf("Project policy identity changed before VM creation")
+	}
+	projectPolicy = currentPolicy
 	operationLock, err := a.store.AcquireOperationReadLock()
 	if err != nil {
 		return nil, err
