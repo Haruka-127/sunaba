@@ -266,8 +266,9 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatalf("guest push pending=%+v", pending)
 	}
 	var trusted bytes.Buffer
-	if err := trustedui.ConfirmPush(strings.NewReader(pending[0].Nonce+"\n"), &trusted, pending[0]); err != nil {
-		t.Fatal(err)
+	selected, decision, err := trustedui.SelectPush(strings.NewReader("approve 1\n"), &trusted, pending)
+	if err != nil || selected != 0 || decision != "approve" || strings.Contains(trusted.String(), pending[0].Nonce) {
+		t.Fatalf("trusted selection index=%d decision=%q error=%v output=%s", selected, decision, err, trusted.String())
 	}
 	if err := broker.Confirm(pending[0].Nonce, pending[0].Binding); err != nil {
 		t.Fatal(err)
