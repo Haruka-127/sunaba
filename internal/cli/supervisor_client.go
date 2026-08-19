@@ -76,7 +76,7 @@ func (c *supervisorClient) info(ctx context.Context) (supervisorInfo, error) {
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	var info supervisorInfo
-	if decoder.Decode(&info) != nil || decoder.Decode(&struct{}{}) != io.EOF || info.Version != 2 || info.ProjectID == "" || info.VMID == "" || info.Container != "sunaba-"+info.ProjectID+"-"+info.VMID || !filepath.IsAbs(info.RuntimeRoot) || filepath.Dir(info.RuntimeRoot) != filepath.Dir(c.socket) || !filepath.IsAbs(info.WorkspacePath) || info.IdleSeconds < 1 || info.IdleDeadline.IsZero() {
+	if decoder.Decode(&info) != nil || decoder.Decode(&struct{}{}) != io.EOF || info.Version != 2 || info.ProjectID == "" || info.VMID == "" || info.Container != "sunaba-"+info.ProjectID+"-"+info.VMID || !filepath.IsAbs(info.RuntimeRoot) || filepath.Base(info.RuntimeRoot) != "sunaba-vm-"+info.VMID || filepath.Dir(info.RuntimeRoot) != filepath.Dir(c.socket) || !filepath.IsAbs(info.WorkspacePath) || info.IdleSeconds < 1 || info.IdleDeadline.IsZero() {
 		return supervisorInfo{}, fmt.Errorf("active supervisor returned invalid session identity")
 	}
 	if info.State == "running" && (info.SessionID == "" || info.AttachURL == "" || len(info.ServerPassword) < 32 || info.ExpiresAt.IsZero()) {

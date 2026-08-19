@@ -889,7 +889,7 @@ func TestSupervisorExpiryAllowsFreshSessionButRejectsExpiredShell(t *testing.T) 
 	fresh := managedActivation{activation: session.Activation{SessionID: "fresh-session", ServerPassword: strings.Repeat("n", 32)}, expiresAt: time.Now().Add(time.Hour)}
 	controlled := &controlledSession{
 		active: target, projectID: "project", vmID: "vm", sessionID: "session", container: "sunaba-project-vm",
-		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-session-session", workspacePath: "/workspace/sunaba-session",
+		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-vm-vm", workspacePath: "/workspace/sunaba-session",
 		attachURL: "http://127.0.0.1:12345", projectState: "/private/tmp/project", serverPassword: strings.Repeat("s", 32),
 		expiresAt: time.Now().Add(-time.Second), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
 		activate: func(context.Context) (managedActivation, error) { return fresh, nil },
@@ -957,7 +957,7 @@ func TestSupervisorExportWithoutChangesDestroysPersistentVM(t *testing.T) {
 	target := &fakeSessionControlTarget{}
 	controlled := &controlledSession{
 		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
-		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-session-session", workspacePath: "/workspace/sunaba-session",
+		runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-vm-vm", workspacePath: "/workspace/sunaba-session",
 		attachURL: "http://127.0.0.1:12345", projectState: "/private/tmp/project", serverPassword: strings.Repeat("s", 32),
 		expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
 	}

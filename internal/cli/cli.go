@@ -284,9 +284,18 @@ func (a *app) agent(ctx context.Context, dir string) (returnErr error) {
 		defer cancel()
 		return errors.Join(prepared.err, client.operation(pauseContext, "pause"))
 	}
+	tuiSessionRoot, err := createHostTUISessionRoot(info.RuntimeRoot, info.VMID, info.SessionID)
+	if err != nil {
+		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		return errors.Join(err, client.operation(pauseContext, "pause"))
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, removeHostTUISessionRoot(info.RuntimeRoot, info.VMID, info.SessionID, tuiSessionRoot))
+	}()
 	tui, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
 		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
-		SessionRoot: info.RuntimeRoot, ServerURL: info.AttachURL,
+		SessionRoot: tuiSessionRoot, ServerURL: info.AttachURL,
 		GuestWorkspace: info.WorkspacePath, Password: info.ServerPassword,
 		ExpectedExecutableSHA256: activeLock.Manifest.OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())

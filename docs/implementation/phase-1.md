@@ -7,7 +7,7 @@
 `internal/session`がcanonical Projectに対する一つのsecure sessionを所有する。
 
 - canonical Project lockを最初に取得し、VM削除まで保持する。稼働VMが残る状態で`Close`だけを呼んでもlockを解放しない。
-- Unix socket path長に依存しない短いOS temp上のmode `0700` runtime baseへ、一意な`sunaba-session-*` rootを作る。永続stateとlockはStore側に分離する。
+- Unix socket path長に依存しない短いOS temp上のmode `0700` runtime baseへ、VM-boundな`sunaba-vm-*` rootを作る。Host TUIのHOME/XDG stateには、その配下へAgent Sessionごとに一意な`sunaba-session-*` rootを作り、TUI終了時に削除する。永続stateとlockはStore側に分離する。
 - host Projectをfd-relative/no-followで固定Snapshotへcopyし、worktreeをVMへbind mountしない。
 - 固定image、CPU/memory、`--network none --no-dns`、`SYS_ADMIN`だけのbootstrap、専用Model Gateway/attach socket、policy digest/ownership labelをsecure spec validatorで強制する。inline env、env file、host directory mount、追加capability、任意bootstrapはcontainer CLI前に拒否する。
 - guestへSnapshot、固定provider config、guest relay、短命password/tokenだけをcopyする。upstream credentialとhost Project pathは渡さない。

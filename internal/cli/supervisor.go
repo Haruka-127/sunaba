@@ -460,9 +460,16 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 	if prepared.err != nil {
 		return prepared.err
 	}
+	tuiSessionRoot, err := createHostTUISessionRoot(managed.active.Root, managed.active.VMID, managed.initialActivation.activation.SessionID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, removeHostTUISessionRoot(managed.active.Root, managed.active.VMID, managed.initialActivation.activation.SessionID, tuiSessionRoot))
+	}()
 	tui, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
 		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
-		SessionRoot: managed.active.Root, ServerURL: managed.active.AttachURL,
+		SessionRoot: tuiSessionRoot, ServerURL: managed.active.AttachURL,
 		GuestWorkspace: managed.active.WorkspacePath, Password: managed.initialActivation.activation.ServerPassword,
 		ExpectedExecutableSHA256: activeLock.Manifest.OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
