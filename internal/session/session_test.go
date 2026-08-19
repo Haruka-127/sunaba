@@ -321,17 +321,34 @@ func TestPausedExportRemountsWorkspaceBeforeFreeze(t *testing.T) {
 		t.Fatalf("export error=%v", err)
 	}
 	commands := fake.commands[before:]
-	if len(commands) < 2 || !strings.Contains(commands[0], "test -f /var/lib/sunaba/overlay.img") || !strings.Contains(commands[0], "mount -t overlay overlay") || strings.Contains(commands[0], "nohup") {
+	if len(commands) < 3 || !strings.Contains(commands[0], "test -f /var/lib/sunaba/overlay.img") || !strings.Contains(commands[0], "mount -t overlay overlay") || strings.Contains(commands[0], "nohup") {
 		t.Fatalf("paused export remount command=%q", commands)
 	}
-	if !strings.Contains(commands[1], "/var/lib/sunaba/merged-export") {
+	if !strings.Contains(commands[1], "SUNABA_EXTERNAL_GIT_SAFE") || !strings.Contains(commands[2], "/var/lib/sunaba/merged-export") {
 		t.Fatalf("workspace freeze did not follow remount: %q", commands)
 	}
-	if strings.Contains(commands[1], "/var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/") {
-		t.Fatalf("workspace freeze copied both merged and upper trees: %q", commands[1])
+	if strings.Contains(commands[2], "/var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/") {
+		t.Fatalf("workspace freeze copied both merged and upper trees: %q", commands[2])
 	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDestroyBypassesExportGuardForExplicitDiscard(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(fake.commands)
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range fake.commands[before:] {
+		if strings.Contains(command, "SUNABA_EXTERNAL_GIT_SAFE") {
+			t.Fatalf("explicit destroy unexpectedly ran export guard: %q", command)
+		}
 	}
 }
 
@@ -669,6 +686,9 @@ func (f *fakeRuntime) Exec(context.Context, string, bool, []string) error { retu
 func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) (string, error) {
 	joined := strings.Join(command, " ")
 	f.commands = append(f.commands, joined)
+	if strings.Contains(joined, "SUNABA_EXTERNAL_GIT_SAFE") {
+		return "SUNABA_EXTERNAL_GIT_SAFE", nil
+	}
 	if strings.Contains(joined, "opencode serve") {
 		f.setup = joined
 		if f.setupError != nil {

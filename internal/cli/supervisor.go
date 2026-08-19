@@ -22,6 +22,7 @@ import (
 	"sunaba/internal/secretstore"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
+	"sunaba/internal/workspace"
 )
 
 type managedSession struct {
@@ -48,6 +49,18 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	}()
 	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil {
 		return nil, fmt.Errorf("a pending Change Set exists; apply or discard it before starting another Agent Session")
+	}
+	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+	if err != nil {
+		return nil, err
+	}
+	approvedManifest, err := workspace.BuildSnapshotManifest(projectPolicy.ProjectRoot, exportPolicy.Snapshot)
+	if err != nil {
+		return nil, err
+	}
+	_, err = verifySnapshotApproval(projectState, exportPolicy, approvedManifest)
+	if err != nil {
+		return nil, err
 	}
 	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
 	if err != nil {
@@ -163,10 +176,6 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 			}
 		}
 	}()
-	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
-	if err != nil {
-		return nil, err
-	}
 	config := session.Config{
 		Store: a.store, Runtime: a.runtime, ProjectRoot: projectPolicy.ProjectRoot, RuntimeBase: runtimeBase,
 		SessionID: sessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
@@ -176,7 +185,7 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
 		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
 		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second, Audit: recorder,
-		SnapshotPolicy: exportPolicy.Snapshot, ExportPolicy: exportPolicy.Export, ExportPolicyDigest: exportPolicy.Digest,
+		SnapshotPolicy: exportPolicy.Snapshot, ApprovedSnapshot: approvedManifest, ExportPolicy: exportPolicy.Export, ExportPolicyDigest: exportPolicy.Digest,
 	}
 	var devBoundary *devnetwork.Boundary
 	if projectPolicy.Mode == "dev" {

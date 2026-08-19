@@ -23,6 +23,7 @@ import (
 	"sunaba/internal/attachrelay"
 	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
+	"sunaba/internal/externalgit"
 	"sunaba/internal/lease"
 	"sunaba/internal/opencode"
 	"sunaba/internal/runtime"
@@ -85,6 +86,7 @@ type Config struct {
 	Audit              *audit.Recorder
 	OnEvent            func(Event)
 	SnapshotPolicy     workspace.SnapshotPolicy
+	ApprovedSnapshot   workspace.SnapshotManifest
 	ExportPolicy       workspace.ExportPolicy
 	ExportPolicyDigest string
 }
@@ -180,7 +182,11 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, err
 	}
 	s.SnapshotRoot = filepath.Join(s.Root, "snapshot")
-	s.Baseline, err = workspace.CreateProjectSnapshot(s.ProjectRoot, s.SnapshotRoot, cfg.SnapshotPolicy)
+	if cfg.ApprovedSnapshot.Digest != "" {
+		s.Baseline, err = workspace.CreateApprovedProjectSnapshot(s.ProjectRoot, s.SnapshotRoot, cfg.ApprovedSnapshot, cfg.SnapshotPolicy)
+	} else {
+		s.Baseline, err = workspace.CreateProjectSnapshot(s.ProjectRoot, s.SnapshotRoot, cfg.SnapshotPolicy)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -915,6 +921,9 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 		}
 	} else if containerState != runtime.StateRunning {
 		return ExportResult{}, fmt.Errorf("session VM cannot be frozen from state %s", containerState)
+	}
+	if err := externalgit.CheckBeforeExport(ctx, s.cfg.Runtime, s.Container, s.WorkspacePath); err != nil {
+		return ExportResult{}, err
 	}
 	if err := s.stopChannels(ctx); err != nil {
 		return ExportResult{}, err
