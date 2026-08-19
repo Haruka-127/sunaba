@@ -890,7 +890,7 @@ func TestSupervisorExecUsesExactArgvAndStructuredSanitizedOutput(t *testing.T) {
 	if len(target.commands) != 1 || strings.Join(target.commands[0], "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("guest argv=%v want=%v", target.commands, want)
 	}
-	if strings.ContainsRune(result.Stdout, '\x1b') || !strings.Contains(result.Stdout, "<U+001B>") || result.ExitCode != 0 {
+	if !strings.ContainsRune(result.Stdout, '\x1b') || result.ExitCode != 0 {
 		t.Fatalf("structured result=%+v", result)
 	}
 	if _, err := controlled.exec(context.Background(), "../escape", []string{"true"}); err == nil || len(target.commands) != 1 {
@@ -1190,6 +1190,10 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 	if info.IdleSeconds != 900 || info.IdleDeadline.IsZero() || info.ModelUsed != 3 || info.ModelLimit != 10 {
 		t.Fatalf("idle policy missing from supervisor info: %+v", info)
 	}
+	execResult, err := client.exec(context.Background(), ".", []string{"printf", "safe"})
+	if err != nil || strings.ContainsRune(execResult.Stdout, '\x1b') || !strings.Contains(execResult.Stdout, "<U+001B>") {
+		t.Fatalf("Supervisor exec result was not sanitized at the client boundary: result=%+v error=%v", execResult, err)
+	}
 	if err := client.operation(context.Background(), "heartbeat"); err != nil {
 		t.Fatal(err)
 	}
@@ -1211,7 +1215,7 @@ func TestSupervisorControlPausesResumesAndSanitizesShell(t *testing.T) {
 	if err != nil || !strings.Contains(output, "safe\n") || strings.ContainsAny(output, "\x1b\a\u202E") || !strings.Contains(output, "<U+001B>") {
 		t.Fatalf("shell output=%q error=%v", output, err)
 	}
-	if len(target.commands) != 1 || target.commands[0][len(target.commands[0])-1] != "printf test" {
+	if len(target.commands) != 2 || target.commands[1][len(target.commands[1])-1] != "printf test" {
 		t.Fatalf("shell command=%v", target.commands)
 	}
 	if err := client.operation(context.Background(), "destroy"); err != nil {

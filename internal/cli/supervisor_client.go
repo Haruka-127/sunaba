@@ -133,12 +133,14 @@ func (c *supervisorClient) exec(ctx context.Context, directory string, arguments
 		return execResponse{}, err
 	}
 	defer response.Body.Close()
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 3<<20))
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 16<<20))
 	decoder.DisallowUnknownFields()
 	var result execResponse
-	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.ExitCode < -1 || len(result.Stdout) > 2<<20 || len(result.Stderr) > 2<<20 {
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.ExitCode < -1 || len(result.Stdout) > 1<<20 || len(result.Stderr) > 1<<20 {
 		return execResponse{}, fmt.Errorf("active supervisor returned invalid exec result")
 	}
+	result.Stdout = trustedui.SanitizeTerminal(result.Stdout)
+	result.Stderr = trustedui.SanitizeTerminal(result.Stderr)
 	return result, nil
 }
 

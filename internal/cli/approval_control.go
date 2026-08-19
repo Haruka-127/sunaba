@@ -379,7 +379,7 @@ func (s *controlledSession) exec(ctx context.Context, directory string, argument
 		return execResponse{}, err
 	}
 	return execResponse{
-		Stdout: trustedui.SanitizeTerminal(result.Stdout), Stderr: trustedui.SanitizeTerminal(result.Stderr), ExitCode: result.ExitCode,
+		Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode,
 		TimedOut: result.TimedOut, StdoutTruncated: result.StdoutTruncated, StderrTruncated: result.StderrTruncated,
 	}, nil
 }
