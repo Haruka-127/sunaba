@@ -231,7 +231,7 @@ flowchart LR
         GitGW["Git Gateway<br/>host Git credential"]
         WebGW["Web Gateway<br/>explicit forward proxy"]
         Quarantine["0700 Quarantine<br/>host-generated Change Set"]
-        Approval["Trusted Approval UI<br/>nonce + digest / object ID"]
+        Approval["Trusted Approval UI<br/>number/ID selection + bound nonce"]
         Apply["Transactional Apply"]
     end
 
@@ -277,7 +277,7 @@ flowchart LR
     Apply --> Project
 ```
 
-Agent VMはエージェントとコード実行環境の両方である。VM内部のshell/file/build操作はHost Supervisorを経由しない。Host Supervisorが仲介・監査するのは、VMライフサイクル、TUI attach、外部通信、認証、成果物の搬出、ホスト適用などの境界操作である。
+Agent VMはエージェントとコード実行環境の両方である。VM内部のshell/file/build操作はHost Supervisorを経由しない。利用者がhost CLIから明示的に開始するsanitized line shellと単発`exec`だけはSupervisorがbounded guest execへ変換する。Host Supervisorが仲介・監査するのは、VMライフサイクル、これらの明示的なhost CLI操作、TUI attach、外部通信、認証、成果物の搬出、ホスト適用などの境界操作である。
 
 Host TUIは利便性のためホストで動かすため、固定・検証されたtrusted dependencyとしてTCBへ入る。ただしserverから受け取る表示データは常にuntrustedであり、sunabaの承認経路としては使わない。
 
@@ -328,7 +328,9 @@ OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能で�
 3. OpenCode server password、Gateway capability、永続lease、各Gateway handlerを即時かつ不可逆に失効させる。listenerを閉じ、同じSessionをactiveへ戻さない。
 4. devモードでは直接外向き通信を無効化するか、無効化を確認してからVMを停止する。
 5. セッション後のバックグラウンドプロセスによるGateway操作を拒否し、直接インターネットへも到達できないことを保証する。
-6. Project lockはProject VMを管理するSupervisorが保持する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。次の`agent`または`shell`は同じVM/upperに対して新しいAgent Sessionを開始する。
+6. Project lockはProject VMを管理するSupervisorが保持する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。次の`agent`、`shell`またはsecure modeの`exec`は同じVM/upperに対して新しいAgent Sessionを開始する。
+
+host CLIの`exec`はcommandと各argumentを別々のJSON fieldとしてSupervisorへ渡し、host shellへ再解釈させない。Supervisorは固定したguest wrapperとargvをApple Containerのexec境界へ直接渡し、stdout、stderr、exit code、timeout、各streamのtruncationを分離したbounded resultとして返す。cwdはProject workspaceからの正規化済み相対pathだけを受理する。対話TTY、raw `container exec`、host command実行へのfallbackは行わない。dev modeでは既存のforeground shell/agent以外に直接egress可能な入口を増やさず、`exec`を拒否する。
 
 dev foreground終了時にExternal Git guardが作業損失を検出した場合は、自動破棄へ進まない。Supervisorはdirect egressをquiesceし、relay、Gateway handler、lease、server passwordを失効し、VMを停止して専用networkとpf stateを削除する。その後、Project/VM ID、停止VMのownership label、固定runtime root、baseline、export policy digestをhost-onlyなrecovery recordへ束縛し、停止VMだけを明示的な復旧資産として保持する。recovery record保存または後処理が失敗しても、それをVM破棄の許可として扱わない。
 
@@ -968,7 +970,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 - session開始・終了、capability発行・失効
 - Gatewayごとのrequest metadata、許可・拒否、利用量、error
 - Git push承認の対象object IDと結果
-- Trusted Approval UIが表示したnonce、対象digest、承認・拒否。guest由来の自由形式文字列はescapeする
+- Trusted Approval UIが表示した対象digest/object ID、内部で束縛したnonce、承認・拒否。利用者は番号またはdigest IDで対象とdecisionを選び、nonceを手入力しない。guest由来の自由形式文字列はescapeする
 - workspace freeze/exportとChange Set digest
 - Change Set承認・拒否・適用結果
 - resource limit超過と強制停止
@@ -979,6 +981,8 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 ---
 
 ## 18. 失敗時の原則
+
+`sunaba doctor`はhostを変更しないread-only診断とする。platform/architecture、固定helper、OpenCode v1 exact lockとdigest、Apple Container、active image、state/runtime directory、global/Project config、Web blocklistを項目別に`PASS` / `WARN` / `FAIL`で表示し、1件でも`FAIL`なら非zeroで終了する。診断のためにsetup、migration、transaction recovery、container起動、host設定変更を行わない。
 
 | 失敗 | 動作 |
 |---|---|

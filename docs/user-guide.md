@@ -321,13 +321,21 @@ sunaba agent --dir /path/to/project
 
 secure modeの`up`はVMを作成・検証してpaused状態にします。`agent`は開始ごとに新しいSession ID、Gateway token、server password、TTLを発行し、VM内のOpenCode serverとホスト上の隔離されたOpenCode TUIを同時に管理します。TUIを終了するとそのSessionの資格情報を不可逆に失効させ、VMをpauseします。次の`agent`は新しい資格情報で同じVMと編集状態を再利用でき、前SessionのTTL到達後もVMの再作成は不要です。
 
-単発のcommandを確認したい場合は、sanitized shellを使います。
+複数のcommandを順に試す場合は、sanitized shellを使います。
 
 ```sh
 sunaba shell --dir /path/to/project
 ```
 
 shellは1行ずつcommandを受け付け、Ctrl-Dで終了します。command、時間、出力量には上限があり、出力はhost terminal sanitizerを通ります。interactive TTY、raw `container exec`、未検証PTYの代替ではありません。
+
+secure modeで1回だけcommandを実行する場合は`exec`を使います。`--`以後はhost shell文字列ではなくargvとしてguestへ渡され、`--cwd`はProject workspaceからの相対pathです。
+
+```sh
+sunaba exec --dir /path/to/project --cwd . --timeout 2m -- go test ./...
+```
+
+結果はstdout、stderr、exit code、timeout、各streamのtruncationを分けて表示します。非zero exitまたはtimeoutでは`sunaba`も非zeroで終了します。host shellのglob、pipe、redirect、command substitutionをsunabaが実行することはありません。shell自身が`--`より前に展開しないよう、必要ならargumentをquoteしてください。dev modeの単発`exec`は直接egress入口を増やさないため拒否され、対話`sunaba shell`を使用します。
 
 ## 変更をホストへ反映する
 
@@ -381,11 +389,13 @@ sunaba git remote list --dir /path/to/project
 
 hostのGit credential helperが、このURLのcredentialを非対話で取得できるようにしておいてください。tokenやpasswordをURLへ埋め込まないでください。
 
-VM内では通常の`git fetch`、`git pull`、`git push`を使えます。clone、fetch、pullは固定remoteとquotaの範囲で承認なしに利用できます。pushの初回はpending approvalを作って拒否されます。別のhost terminalで次を実行し、remote、ref、old/new object ID、force/delete、nonceを確認してください。
+VM内では通常の`git fetch`、`git pull`、`git push`を使えます。clone、fetch、pullは固定remoteとquotaの範囲で承認なしに利用できます。pushの初回はpending approvalを作って拒否されます。別のhost terminalで次を実行し、一覧のremote、ref、old/new object ID、force/delete、有効期限を確認してください。
 
 ```sh
 sunaba approvals --dir /path/to/project
 ```
+
+`approve <番号またはID>`、`reject <番号またはID>`、`skip`から選びます。nonceはhost内部で選択対象とdecisionへ束縛されるため、表示された長いnonceを手入力する必要はありません。
 
 承認後、VM内で内容が変わっていない同じpushを期限内に再実行します。承認はone-shotで、remote、object、ref、force/deleteのいずれかが変わると再承認が必要です。
 
@@ -454,10 +464,12 @@ Projectを対象にするcommandは、通常次のいずれかで対象を選び
 | `sunaba project list` | 登録済みProjectを一覧表示する |
 | `sunaba project list --active` | 到達可能なSupervisorまたはrunning VMがあるProjectだけを表示する |
 | `sunaba status` | mode、VM、session、quota、Gateway、pending Change Setを確認する |
+| `sunaba doctor` | hostとProjectのread-only診断を項目別に実行する |
 | `sunaba changes review` | pending Change Setの内容とriskをhostへ適用せず確認する |
 | `sunaba up` | secure VMを準備してpauseする。devではforeground session用artifactだけを準備する |
 | `sunaba agent` | OpenCode sessionを開始する |
 | `sunaba shell` | sanitized shellを開始する |
+| `sunaba exec` | secure VM内でargv指定の単発commandを実行する |
 | `sunaba down` | secure VMを停止し、隔離された状態を保持する |
 | `sunaba recreate` | 現在のVMを処理し、次回をclean Snapshotから開始する |
 | `sunaba destroy` | sunabaのProject stateとhost-only設定を削除する |
@@ -497,6 +509,7 @@ sunaba destroy \
 まず次を確認します。
 
 ```sh
+sunaba doctor --dir /path/to/project
 container system version
 sunaba versions show
 sunaba project list
@@ -505,6 +518,8 @@ sunaba credentials openai oauth status
 # API keyを使うProjectの場合
 sunaba credentials openai api-key status
 ```
+
+`doctor`はplatform/architecture、helper binary、固定OpenCode v1、Apple Container、active image/version lock、state/runtime directory、global/Project config、blocklistを変更せず検査します。各項目を`PASS` / `WARN` / `FAIL`で示し、`FAIL`があれば非zeroで終了します。診断中にsetup、設定migration、container起動、host設定変更は行いません。`status`はactive Sessionの残り時間とModel request使用量/上限、blocklistの状態と期限を表示し、取得できない値は`unavailable`と明示します。tokenやpasswordは表示しません。
 
 よくある状態と対応:
 

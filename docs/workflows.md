@@ -134,10 +134,16 @@ sunaba status --dir "$PROJECT"
 sunaba agent --dir "$PROJECT"
 ```
 
-短いcommandで状態を確認したいときはsanitized shellを使います。
+複数のcommandを順に確認したいときはsanitized shellを使います。
 
 ```sh
 sunaba shell --dir "$PROJECT"
+```
+
+secure modeで単発commandだけを実行するときはargv-based `exec`を使います。stdout/stderr、exit code、timeout、truncationが分けて表示されます。
+
+```sh
+sunaba exec --dir "$PROJECT" --cwd . --timeout 2m -- go test ./...
 ```
 
 作業途中でTUIやshellを終了しても、すぐにexportする必要はありません。secure modeのVMはnetworkとsession capabilityを失ったpaused状態で、隔離された編集内容を保持します。次回の`agent`または`shell`で続きを行えます。
@@ -349,7 +355,7 @@ Agent Sessionを動かしたまま、別のhost terminalで承認requestを確�
 sunaba approvals --dir "$PROJECT"
 ```
 
-remote、ref、old/new object ID、force/delete、nonceを確認して承認します。その後、VM内で変更を加えずに同じpushを期限内に再実行します。
+remote、ref、old/new object ID、force/delete、有効期限を確認し、`approve <番号またはID>`、`reject <番号またはID>`、`skip`を選びます。nonceはhost内部で選択対象へ束縛され、手入力しません。その後、承認した場合だけVM内で変更を加えずに同じpushを期限内に再実行します。
 
 承認はone-shotです。commit、ref、remote、force/deleteが変わった場合は、新しいrequestを確認してください。OpenCode TUI内の表示だけではhost承認は成立しません。
 
