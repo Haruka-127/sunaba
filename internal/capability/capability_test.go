@@ -35,6 +35,9 @@ func TestGateEnforcesTokenExpiryQuotaConcurrencyAndRevoke(t *testing.T) {
 	if _, status := gate.Admit(strings.Repeat("t", 32), now); status != RequestQuotaExceeded {
 		t.Fatalf("quota admission status=%v", status)
 	}
+	if used, limit := gate.Usage(); used != 3 || limit != 3 {
+		t.Fatalf("usage=%d/%d", used, limit)
+	}
 	gate.Revoke()
 	if _, status := gate.Admit(strings.Repeat("t", 32), now); status != Revoked {
 		t.Fatalf("revoked admission status=%v", status)

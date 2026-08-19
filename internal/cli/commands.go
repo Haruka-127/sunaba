@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	urfavecli "github.com/urfave/cli/v3"
 
@@ -42,13 +43,16 @@ func (a *app) command() *urfavecli.Command {
 	}
 	command.Commands = []*urfavecli.Command{
 		a.setupCommand(), a.versionsCommand(), a.updateCommand(),
+		a.simpleProjectCommand("doctor", "Run read-only host and Project diagnostics", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.doctor(ctx, dir) })),
 		a.projectCommand(), a.configCommand(), a.credentialsCommand(), a.modelCommand(),
+		a.snapshotCommand(),
 		a.simpleProjectCommand("up", "Prepare the Project VM", projectSelectorFlags(&urfavecli.StringFlag{Name: "mode", Usage: "Execution mode (secure or dev)", OnlyOnce: true, Validator: optionalEnum("mode", "secure", "dev")}), a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.up(ctx, dir, cmd.String("mode"))
 		})),
 		a.simpleProjectCommand("agent", "Start the Project Agent", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.agent(ctx, dir) })),
 		a.gitCommand(), a.webCommand(),
 		a.simpleProjectCommand("shell", "Start a sanitized shell in the isolated VM", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.shell(ctx, dir) })),
+		a.execCommand(),
 		a.simpleProjectCommand("status", "Show Project status", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.status(ctx, dir) })),
 		a.changesCommand(),
 		a.simpleProjectCommand("approvals", "Process pending host approvals", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.approvals(ctx, dir) })),
@@ -62,6 +66,35 @@ func (a *app) command() *urfavecli.Command {
 	}
 	addProjectSelectorConstraints(command)
 	return command
+}
+
+func (a *app) execCommand() *urfavecli.Command {
+	return &urfavecli.Command{
+		Name: "exec", Usage: "Run one argv-based command in the isolated VM", ArgsUsage: "-- <command> [args...]",
+		Flags: projectSelectorFlags(
+			&urfavecli.StringFlag{Name: "cwd", Value: ".", Usage: "Guest working directory relative to the Project workspace", OnlyOnce: true},
+			&urfavecli.DurationFlag{Name: "timeout", Value: 2 * time.Minute, Usage: "Command timeout (1s-10m)", OnlyOnce: true},
+		),
+		Action: a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.execGuest(ctx, dir, cmd.String("cwd"), cmd.Duration("timeout"), cmd.Args().Slice())
+		}),
+	}
+}
+
+func (a *app) snapshotCommand() *urfavecli.Command {
+	return &urfavecli.Command{Name: "snapshot", Usage: "Preview and approve host Project snapshots", Commands: []*urfavecli.Command{
+		{Name: "preview", Usage: "Show bounded snapshot metadata without file contents", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.snapshotPreview(dir)
+		}))},
+		{Name: "approve", Usage: "Approve the exact digest shown by snapshot preview", Flags: projectSelectorFlags(&urfavecli.StringFlag{Name: "digest", Usage: "Exact preview digest", Required: true, OnlyOnce: true}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.snapshotApprove(dir, cmd.String("digest"))
+		}))},
+		{Name: "exclude", Usage: "Manage host-only snapshot exclusions", Commands: []*urfavecli.Command{
+			{Name: "import-gitignore", Usage: "Import literal .gitignore entries as exclusion candidates", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+				return a.snapshotImportGitignore(dir)
+			}))},
+		}},
+	}}
 }
 
 func (a *app) simpleProjectCommand(name, usage string, flags []urfavecli.Flag, action urfavecli.ActionFunc) *urfavecli.Command {
@@ -238,6 +271,9 @@ func (a *app) changesCommand() *urfavecli.Command {
 	for _, action := range []string{"export", "review", "apply"} {
 		action := action
 		flags := projectSelectorFlags()
+		if action == "export" {
+			flags = projectSelectorFlags(&urfavecli.BoolFlag{Name: "discard-external-git", Usage: "Explicitly discard guarded External Git state after exporting the main workspace", OnlyOnce: true})
+		}
 		if action == "review" {
 			flags = projectSelectorFlags(
 				&urfavecli.BoolFlag{Name: "stat", Usage: "Show metadata and risk summary without file content", OnlyOnce: true},
@@ -246,7 +282,7 @@ func (a *app) changesCommand() *urfavecli.Command {
 			)
 		}
 		commands = append(commands, &urfavecli.Command{Name: action, Usage: map[string]string{"export": "Export VM changes as a trusted Change Set", "review": "Safely review a pending Change Set before host apply", "apply": "Review and apply an approved Change Set to the host Project"}[action], Flags: flags, Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
-			return a.changes(ctx, action, dir, workspace.ReviewOptions{Context: cmd.Int("context"), StatOnly: cmd.Bool("stat"), Path: cmd.String("path")})
+			return a.changes(ctx, action, dir, workspace.ReviewOptions{Context: cmd.Int("context"), StatOnly: cmd.Bool("stat"), Path: cmd.String("path")}, cmd.Bool("discard-external-git"))
 		}))})
 	}
 	return &urfavecli.Command{Name: "changes", Usage: "Export, review, and apply Project changes", Commands: commands}

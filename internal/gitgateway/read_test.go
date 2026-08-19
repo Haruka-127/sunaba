@@ -94,6 +94,26 @@ func TestReadGatewayRejectsPushExpiredCapabilityAndUnknownRoutes(t *testing.T) {
 	}
 }
 
+func TestReadGatewayRevokePermanentlyRejectsSessionToken(t *testing.T) {
+	token := strings.Repeat("r", 32)
+	capability, err := NewReadCapability(token, "project", "vm", "session", time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, err := NewReadGateway(ReadConfig{UpstreamURL: "https://example.invalid/repository.git", GuestRepositoryPath: "/repository.git", AuthorizationHeader: "Bearer host-secret", Capability: capability, Audit: func(ReadAuditEvent) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway.Revoke()
+	request := httptest.NewRequest(http.MethodGet, "/repository.git/info/refs?service=git-upload-pack", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked Git capability status=%d", response.Code)
+	}
+}
+
 func TestAuditFailureRevokesSharedGitCapability(t *testing.T) {
 	capability, err := NewReadCapability(strings.Repeat("g", 32), "project", "vm", "session", time.Now().Add(time.Minute))
 	if err != nil {

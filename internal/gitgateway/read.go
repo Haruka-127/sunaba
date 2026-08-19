@@ -74,6 +74,12 @@ type ReadGateway struct {
 	gate          *corecapability.Gate
 }
 
+func (g *ReadGateway) Revoke() {
+	if g != nil && g.gate != nil {
+		g.gate.Revoke()
+	}
+}
+
 func NewReadGateway(config ReadConfig) (*ReadGateway, error) {
 	upstream, err := url.Parse(config.UpstreamURL)
 	if err != nil || upstream.Scheme != "https" || upstream.Host == "" || upstream.User != nil || upstream.RawQuery != "" || upstream.Fragment != "" || !strings.HasSuffix(upstream.Path, ".git") {

@@ -29,6 +29,30 @@ func CreateProjectSnapshot(root, destination string, policy SnapshotPolicy) (man
 	return manifest, nil
 }
 
+// CreateApprovedProjectSnapshot materializes exactly a previously approved
+// manifest and fails if the source changed after approval.
+func CreateApprovedProjectSnapshot(root, destination string, approved SnapshotManifest, policy SnapshotPolicy) (SnapshotManifest, error) {
+	if err := validateCanonicalManifest(approved, policy); err != nil {
+		return SnapshotManifest{}, fmt.Errorf("invalid approved manifest: %w", err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return SnapshotManifest{}, err
+	}
+	canonicalRoot, err = filepath.Abs(canonicalRoot)
+	if err != nil || canonicalRoot != approved.Root {
+		return SnapshotManifest{}, fmt.Errorf("approved manifest root does not match snapshot source")
+	}
+	verified, err := materializeSnapshot(canonicalRoot, destination, approved.Entries, policy)
+	if err != nil {
+		return SnapshotManifest{}, err
+	}
+	if verified.Digest != approved.Digest {
+		return SnapshotManifest{}, fmt.Errorf("materialized snapshot digest %s does not match approval %s", verified.Digest, approved.Digest)
+	}
+	return verified, nil
+}
+
 func CreateApprovedSnapshotSubset(root, destination string, approved SnapshotManifest, roots []string, policy SnapshotPolicy) (SnapshotManifest, error) {
 	if err := validateCanonicalManifest(approved, policy); err != nil {
 		return SnapshotManifest{}, fmt.Errorf("invalid approved manifest: %w", err)

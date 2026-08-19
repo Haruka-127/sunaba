@@ -76,6 +76,18 @@ const (
 	testModel = "gpt-sunaba-test"
 )
 
+func TestGatewayRevokePermanentlyRejectsSessionToken(t *testing.T) {
+	gateway := testGateway(t, "https://example.invalid", func(AuditEvent) {})
+	gateway.Revoke()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"`+testModel+`","input":"hi"}`))
+	request.Header.Set("Authorization", "Bearer "+testToken)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked Model capability status=%d", response.Code)
+	}
+}
+
 func TestGatewayPreservesResponsesStreamingAndToolEvents(t *testing.T) {
 	var receivedAuthorization string
 	var upstreamBody []byte

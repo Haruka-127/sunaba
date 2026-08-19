@@ -92,7 +92,7 @@ func TestDevSessionNetworkBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sessionRoot := filepath.Join(temp, "sunaba-session-session"+runID)
+	sessionRoot := filepath.Join(temp, "sunaba-vm-session"+runID)
 	if err := os.Mkdir(sessionRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestDevSessionNetworkBoundary(t *testing.T) {
 	projectID, sessionID := "dev"+runID, "session"+runID
 	name := "sunaba-" + projectID + "-" + sessionID
 	policy := sunabaruntime.SecureSessionPolicy{
-		ProjectID: projectID, SessionID: sessionID, Mode: "dev", NetworkName: dev.Name,
+		ProjectID: projectID, VMID: sessionID, Mode: "dev", NetworkName: dev.Name,
 		Image: dependency.MustPinned().AgentImage.Tag, SessionRoot: sessionRoot,
 		CPUs: 1, Memory: "1G", DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
 	}
@@ -123,7 +123,7 @@ func TestDevSessionNetworkBoundary(t *testing.T) {
 		Mounts:  []sunabaruntime.Mount{{Type: "socket", Source: gatewayPath, Target: sunabaruntime.SecureGatewayGuestPath}},
 		Sockets: []sunabaruntime.PublishedSocket{{HostPath: filepath.Join(sessionRoot, "attach.sock"), GuestPath: sunabaruntime.SecureAttachGuestPath}},
 		Labels: map[string]string{
-			"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.session": sessionID,
+			"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": sessionID,
 			"dev.sunaba.mode": "dev", "dev.sunaba.policy-digest": digest, "dev.sunaba.run-id": runID,
 		},
 	}

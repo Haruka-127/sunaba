@@ -126,6 +126,21 @@ func (m *PushApprovalManager) Confirm(nonce string, presented PushBinding) (*Pus
 	return &PushGrant{id: grantID}, nil
 }
 
+// Reject consumes one exact pending request without creating a grant.
+func (m *PushApprovalManager) Reject(nonce string, presented PushBinding) error {
+	id := sha256.Sum256([]byte(nonce))
+	canonical, digest, err := canonicalBinding(presented)
+	m.mu.Lock()
+	item, ok := m.pending[id]
+	delete(m.pending, id)
+	m.mu.Unlock()
+	if err != nil || !ok || !m.now().Before(item.expires) || !equalDigest(item.digest, digest) {
+		_ = m.record("git.push.approval", "rejected", canonical, digest, nonce)
+		return ErrPushApprovalInvalid
+	}
+	return m.record("git.push.approval", "rejected", item.binding, item.digest, nonce)
+}
+
 func (m *PushApprovalManager) Consume(grant *PushGrant, current PushBinding) error {
 	if grant == nil {
 		return ErrPushApprovalInvalid

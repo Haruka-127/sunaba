@@ -120,6 +120,20 @@ func (b *HookBroker) Confirm(nonce string, presented PushBinding) error {
 	return nil
 }
 
+func (b *HookBroker) Reject(nonce string, presented PushBinding) error {
+	b.mu.Lock()
+	request, ok := b.pending[nonce]
+	if ok {
+		delete(b.pending, nonce)
+		delete(b.byDigest, request.Digest)
+	}
+	b.mu.Unlock()
+	if !ok {
+		return ErrPushApprovalInvalid
+	}
+	return b.Approvals.Reject(nonce, presented)
+}
+
 func (b *HookBroker) Close() error {
 	b.closeOnce.Do(func() { b.closeErr = b.listener.Close() })
 	return b.closeErr

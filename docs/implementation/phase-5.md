@@ -77,15 +77,16 @@ Project policy schema v6はProject identity/root、mode、dependency、resource�
 
 ## Host-only Project configuration
 
-Projectの利用者設定を内部stateから分離し、`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/project.json` schema v2を起動設定、同directoryの`web-origins.txt`をProject固有Web allowlist追加分の正本とした。組み込み`common-development` presetはsunaba本体へ固定し、選択名だけを`project.json`へ置く。両fileはcurrent user所有のmode `0600`、directoryはmode `0700`とし、symlink、未知JSON field、trailing data、oversize、不正originを拒否する。Project worktreeとVMには設定directoryを公開しない。
+Projectの利用者設定を内部stateから分離し、`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/project.json` schema v3を起動設定、同directoryの`web-origins.txt`をProject固有Web allowlist追加分の正本とした。組み込み`common-development` presetはsunaba本体へ固定し、選択名だけを`project.json`へ置く。両fileはcurrent user所有のmode `0600`、directoryはmode `0700`とし、symlink、未知JSON field、trailing data、oversize、不正originを拒否する。Project worktreeとVMには設定directoryを公開しない。
 
-- `config path|edit|validate|diff|apply|show`でpath確認、host上の対話設定、厳格検証、実効policyとの差分、停止状態でのcompile、declarative/effective表示を行う
+- `config path|edit|validate|diff|apply|show`でpath確認、host上の対話設定、厳格検証、実効policyとの差分、即時/次Session/VM再作成の適用分類、declarative/effective表示を行う
 - `config edit`はboundedな行入力だけを使い、secure/dev、固定catalogのModel、named Git remote、Web origin presetとProject固有origin、resource/session/quotaをmemory上の候補へ反映する。local Git configはfixed `/usr/bin/git`、`--local --no-includes`、system/global config無効、64 KiB/2秒上限でread-only検出し、厳格検証後も人間の`y`なしには登録しない。最終確認前のcancel/EOF/oversize/control inputではfileを変更せず、dev、HTTPS tunnel、`common-development`の広い許可集合という非保証を選択時に表示する
-- 対話開始時の宣言設定、Web origin、実効policy digestを保存直前にも再読込して比較し、Project lockの有無にかかわらず手編集を含む同時変更を上書きしない。適用は既存のactive VM、pending Change Set、blocklist、compile gateを再利用する
+- 対話開始時の宣言設定、Web origin、実効policy digestを保存直前にも再読込して比較し、専用のProject設定lockでwriterを直列化して手編集を含む同時変更を上書きしない。audit retentionは保存後に即時実行し、Model/Git/Web/session authorityはactive Sessionを変えず次Sessionのfresh activationへ反映する。mode/resource/Snapshot/export等は既存VMがある間recreate-requiredとして拒否する
 - dependency、blocklist binding、push承認必須、Protected Path、runtime identity、credential/capabilityはdeclarative設定から除外し、host側で生成する
 - 未適用設定がある場合は`up`、`agent`、`shell`、Supervisor起動を拒否する一方、`status`、`down`、export、recreate、destroyは復旧経路として維持する
 - `web-origins.txt`は64 KiB/1024 ruleを上限とし、HTTP(S) root originと任意の`include-subdomains`だけを行単位で受理する
 - Model/Git/Webの既存設定CLIはhost設定と実効policyを同時更新し、一方だけが古くなる経路を残さない
+- pending Change Set metadata v4は作成時のSnapshot/export policyとdigestを保存し、v2/v3をread-only互換で検証しながら、後続の無関係なProject設定変更後もv4をreview/applyできる
 
 ## Audit retention / redaction
 
@@ -108,7 +109,7 @@ go test -race ./internal/session ./internal/apply ./internal/cleanup ./internal/
 
 ## dev session direct-egress boundary
 
-final integration用にProject/session専用Apple Container networkを追加した。default networkを共有せず、owner/project/session/mode labelとinspect結果を毎回照合する。source IPv4/IPv6 subnetへ束縛したpf anchorはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、別VM private subnet、unsolicited inboundを拒否する。
+final integration用にProject/VM専用Apple Container networkを追加した。default networkを共有せず、owner/project/VM/mode labelとinspect結果を毎回照合する。source IPv4/IPv6 subnetへ束縛したpf anchorはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、別VM private subnet、unsolicited inboundを拒否する。
 
 同時dev sessionはcurrent-user所有のmode `0600` flockで1つへ制限する。開始・再開前にnetworkを再inspectしてpfを再検証する。export前は、既存のexact source subnet用child anchorをdeny-allへ原子的にquiesceしてloaded main/child rulesを再検証してからVMを停止する。quiesce失敗時はGatewayをinactiveにしVM停止を試み、exportは拒否する。destroy時はVM削除後にanchorとnetworkを失効する。secure sessionは引き続き`network none`でありpfへ依存しない。
 

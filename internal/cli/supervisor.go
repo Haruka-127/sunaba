@@ -19,23 +19,104 @@ import (
 	"sunaba/internal/openauth"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
+	"sunaba/internal/projectconfig"
+	"sunaba/internal/recovery"
 	"sunaba/internal/secretstore"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
+	"sunaba/internal/workspace"
 )
 
 type managedSession struct {
-	active         *session.Session
-	projectPolicy  policy.ProjectPolicy
-	projectState   string
-	runtimeBase    string
-	serverPassword string
-	expiresAt      time.Time
-	gitBroker      pushApprovalBroker
-	operationLock  *state.OperationLock
+	active            *session.Session
+	projectPolicy     policy.ProjectPolicy
+	projectState      string
+	runtimeBase       string
+	initialActivation managedActivation
+	activationFactory func(context.Context) (managedActivation, error)
+	gitBroker         *rotatingPushBroker
+	operationLock     *state.OperationLock
+}
+
+type managedActivation struct {
+	activation  session.Activation
+	expiresAt   time.Time
+	idleTimeout time.Duration
+	gitBroker   pushApprovalBroker
+	modelUsage  func() (int64, int64)
+}
+
+type sessionDeadlineTimers struct {
+	idle     *time.Timer
+	expiry   *time.Timer
+	idleC    <-chan time.Time
+	expiryC  <-chan time.Time
+	revision uint64
+}
+
+func newSessionDeadlineTimers() *sessionDeadlineTimers {
+	idle := time.NewTimer(time.Hour)
+	expiry := time.NewTimer(time.Hour)
+	idle.Stop()
+	expiry.Stop()
+	return &sessionDeadlineTimers{idle: idle, expiry: expiry}
+}
+
+func (t *sessionDeadlineTimers) reconcile(snapshot sessionDeadlineSnapshot, now time.Time) error {
+	t.disarm()
+	t.revision = snapshot.revision
+	if snapshot.state != "running" {
+		return nil
+	}
+	if snapshot.idleDeadline.IsZero() || snapshot.expiresAt.IsZero() {
+		return fmt.Errorf("running Agent Session has incomplete deadlines")
+	}
+	t.idle.Reset(deadlineDelay(snapshot.idleDeadline, now))
+	t.expiry.Reset(deadlineDelay(snapshot.expiresAt, now))
+	t.idleC = t.idle.C
+	t.expiryC = t.expiry.C
+	return nil
+}
+
+func (t *sessionDeadlineTimers) disarm() {
+	stopAndDrainTimer(t.idle)
+	stopAndDrainTimer(t.expiry)
+	t.idleC = nil
+	t.expiryC = nil
+}
+
+func deadlineDelay(deadline, now time.Time) time.Duration {
+	delay := deadline.Sub(now)
+	if delay <= 0 {
+		return time.Nanosecond
+	}
+	return delay
+}
+
+func stopAndDrainTimer(timer *time.Timer) {
+	if timer == nil || timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
+	}
 }
 
 func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (*managedSession, error) {
+	configLock, err := a.store.AcquireConfigLock(projectPolicy.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer configLock.Close()
+	currentPolicy, _, currentProjectState, err := a.loadPolicyLocked(projectPolicy.ProjectRoot)
+	if err != nil {
+		return nil, err
+	}
+	if currentProjectState != projectState || currentPolicy.ProjectID != projectPolicy.ProjectID {
+		return nil, fmt.Errorf("Project policy identity changed before VM creation")
+	}
+	projectPolicy = currentPolicy
 	operationLock, err := a.store.AcquireOperationReadLock()
 	if err != nil {
 		return nil, err
@@ -48,6 +129,27 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	}()
 	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil {
 		return nil, fmt.Errorf("a pending Change Set exists; apply or discard it before starting another Agent Session")
+	}
+	if _, err := recovery.Load(projectState); err == nil {
+		return nil, fmt.Errorf("a stopped VM is retained after an incomplete export; run 'sunaba status' and recover or explicitly discard it before starting another Agent Session")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil {
+			return nil, fmt.Errorf("export recovery metadata is unsafe: %w", err)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, statErr
+		}
+	}
+	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+	if err != nil {
+		return nil, err
+	}
+	approvedManifest, err := workspace.BuildSnapshotManifest(projectPolicy.ProjectRoot, exportPolicy.Snapshot)
+	if err != nil {
+		return nil, err
+	}
+	_, err = verifySnapshotApproval(projectState, exportPolicy, approvedManifest)
+	if err != nil {
+		return nil, err
 	}
 	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
 	if err != nil {
@@ -71,67 +173,31 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		return nil, err
 	}
 	if len(cleanupResult.Refused) > 0 {
+		var blocked []string
+		for _, name := range cleanupResult.Refused {
+			info, inspectErr := a.runtime.Inspect(ctx, name)
+			if inspectErr != nil {
+				return nil, inspectErr
+			}
+			if info.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && info.Labels["dev.sunaba.project"] == projectPolicy.ProjectID {
+				blocked = append(blocked, name)
+			}
+		}
+		if len(blocked) > 0 {
+			return nil, fmt.Errorf("stopped Project VM requires recovery or explicit discard before a new VM can be created: %s", strings.Join(blocked, ", "))
+		}
 		fmt.Fprintf(a.errors, "WARNING: cleanup refused resources without matching current ownership/lease: %s\n", strings.Join(cleanupResult.Refused, ", "))
 	}
-	upstreamBaseURL := "https://api.openai.com"
-	upstreamKey := ""
-	var oauthTokens modelgateway.OAuthTokenSource
-	if projectPolicy.Model.AuthMode == modelcatalog.AuthOAuth {
-		manager := openauth.NewManager()
-		if _, err := manager.AccessToken(ctx); err != nil {
-			return nil, err
-		}
-		upstreamBaseURL = "https://chatgpt.com/backend-api/codex"
-		oauthTokens = manager
+	vmID, err := newVMID()
+	if err != nil {
+		return nil, err
+	}
+	var runtimeBase string
+	if projectPolicy.Mode == "dev" {
+		runtimeBase, err = recovery.NewRuntimeBase(projectState, vmID)
 	} else {
-		var err error
-		upstreamKey, err = secretstore.LoadOpenAIKey(ctx)
-		if err != nil {
-			return nil, err
-		}
+		runtimeBase, err = recovery.NewSecureRuntimeBase(projectPolicy.ProjectID, vmID)
 	}
-	sessionID, err := newSessionID()
-	if err != nil {
-		return nil, err
-	}
-	vmID := "sunaba-" + projectPolicy.ProjectID + "-" + sessionID
-	modelToken, err := session.NewSecret()
-	if err != nil {
-		return nil, err
-	}
-	serverPassword, err := session.NewSecret()
-	if err != nil {
-		return nil, err
-	}
-	expiresAt := time.Now().Add(time.Duration(projectPolicy.Session.TTLSeconds) * time.Second)
-	modelID := projectPolicy.Model.AllowedModels[0]
-	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, vmID, sessionID, projectPolicy.Model.AllowedModels, expiresAt)
-	if err != nil {
-		return nil, err
-	}
-	capability.MaxRequests = projectPolicy.Model.MaxRequests
-	capability.MaxConcurrent = projectPolicy.Model.MaxConcurrent
-	capability.MaxRequestBytes = projectPolicy.Model.MaxRequestBytes
-	capability.MaxResponseBytes = projectPolicy.Model.MaxResponseBytes
-	gateway, err := modelgateway.New(modelgateway.Config{
-		UpstreamBaseURL: upstreamBaseURL, UpstreamAPIKey: upstreamKey, AuthMode: projectPolicy.Model.AuthMode, OAuthTokens: oauthTokens, Capability: capability,
-		Audit: func(event modelgateway.AuditEvent) error {
-			return recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
-				"model": event.Model, "status": fmt.Sprint(event.Status), "request_bytes": fmt.Sprint(event.RequestBytes), "response_bytes": fmt.Sprint(event.ResponseBytes), "reason": event.Reason,
-			}})
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
-		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: projectPolicy.Model.AllowedModels,
-		DefaultModel: modelID, TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", AuthMode: projectPolicy.Model.AuthMode,
-	})
-	if err != nil {
-		return nil, err
-	}
-	runtimeBase, err := makeRuntimeBase()
 	if err != nil {
 		return nil, err
 	}
@@ -148,39 +214,38 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 	if err := validateGuestRelay(guestRelay); err != nil {
 		return nil, err
 	}
-	gateways, err := a.configureGateways(ctx, projectPolicy, projectState, runtimeBase, vmID, sessionID, expiresAt, recorder)
+	activation, err := a.newManagedActivation(ctx, projectPolicy, projectState, runtimeBase, vmID, recorder)
 	if err != nil {
 		return nil, err
 	}
-	gatewaysHandedOff := false
+	activationHandedOff := false
 	defer func() {
-		if !gatewaysHandedOff {
-			if gateways.webClose != nil {
-				_ = gateways.webClose()
+		if !activationHandedOff {
+			if activation.activation.ModelGatewayClose != nil {
+				_ = activation.activation.ModelGatewayClose()
 			}
-			if gateways.gitClose != nil {
-				_ = gateways.gitClose()
+			if activation.activation.WebGatewayClose != nil {
+				_ = activation.activation.WebGatewayClose()
+			}
+			if activation.activation.GitGatewayClose != nil {
+				_ = activation.activation.GitGatewayClose()
 			}
 		}
 	}()
-	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
-	if err != nil {
-		return nil, err
-	}
 	config := session.Config{
 		Store: a.store, Runtime: a.runtime, ProjectRoot: projectPolicy.ProjectRoot, RuntimeBase: runtimeBase,
-		SessionID: sessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
+		VMID: vmID, SessionID: activation.activation.SessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
 		CPUs: projectPolicy.Resources.CPUs, Memory: projectPolicy.Resources.Memory, DiskBytes: projectPolicy.Resources.DiskBytes,
 		ProcessMax: projectPolicy.Resources.ProcessMax, FileSizeMax: projectPolicy.Resources.FileSizeMax, OpenFileMax: projectPolicy.Resources.OpenFileMax,
-		GuestRelayBinary: guestRelay, ProviderConfig: provider, ModelGateway: gateway, ModelToken: modelToken,
-		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
-		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
-		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second, Audit: recorder,
-		SnapshotPolicy: exportPolicy.Snapshot, ExportPolicy: exportPolicy.Export, ExportPolicyDigest: exportPolicy.Digest,
+		GuestRelayBinary: guestRelay, ProviderConfig: activation.activation.ProviderConfig, ModelGateway: activation.activation.ModelGateway, ModelGatewayClose: activation.activation.ModelGatewayClose, ModelToken: activation.activation.ModelToken,
+		GitGateway: activation.activation.GitGateway, GitRemotes: activation.activation.GitRemotes, GitGatewayClose: activation.activation.GitGatewayClose,
+		WebGateway: activation.activation.WebGateway, WebToken: activation.activation.WebToken, WebGatewayClose: activation.activation.WebGatewayClose,
+		ServerPassword: activation.activation.ServerPassword, LeaseTTL: activation.activation.LeaseTTL, Audit: recorder,
+		SnapshotPolicy: exportPolicy.Snapshot, ApprovedSnapshot: approvedManifest, ExportPolicy: exportPolicy.Export, ExportPolicyDigest: exportPolicy.Digest,
 	}
 	var devBoundary *devnetwork.Boundary
 	if projectPolicy.Mode == "dev" {
-		devBoundary, err = devnetwork.Activate(ctx, a.store.Root, projectPolicy.ProjectID, sessionID)
+		devBoundary, err = devnetwork.Activate(ctx, a.store.Root, projectPolicy.ProjectID, vmID)
 		if err != nil {
 			return nil, err
 		}
@@ -196,13 +261,118 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		}
 		return nil, err
 	}
-	gatewaysHandedOff = true
+	activationHandedOff = true
 	cleanupRuntime = false
 	handedOff = true
+	broker := &rotatingPushBroker{}
+	broker.Set(activation.gitBroker)
 	return &managedSession{
 		active: active, projectPolicy: projectPolicy, projectState: projectState, runtimeBase: runtimeBase,
-		serverPassword: serverPassword, expiresAt: expiresAt, gitBroker: gateways.gitBroker, operationLock: operationLock,
+		initialActivation: activation, gitBroker: broker, operationLock: operationLock,
+		activationFactory: func(factoryContext context.Context) (managedActivation, error) {
+			current, err := a.reloadActivationPolicy(projectPolicy, filepath.Join(projectState, "policy.json"))
+			if err != nil {
+				return managedActivation{}, err
+			}
+			return a.newManagedActivation(factoryContext, current, projectState, runtimeBase, vmID, recorder)
+		},
 	}, nil
+}
+
+func (a *app) reloadActivationPolicy(vmPolicy policy.ProjectPolicy, policyPath string) (policy.ProjectPolicy, error) {
+	current, migrated, err := policy.LoadReadOnly(policyPath, time.Now())
+	if err != nil {
+		return policy.ProjectPolicy{}, fmt.Errorf("reload policy for the next Agent Session: %w", err)
+	}
+	if migrated {
+		return policy.ProjectPolicy{}, fmt.Errorf("the current policy requires migration; stop the VM and run a host configuration command before resuming")
+	}
+	configStore, err := a.projectConfigStore()
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	config, rules, err := configStore.Load(current.ProjectID)
+	if err != nil || config.ProjectRoot != current.ProjectRoot || !projectconfig.Matches(config, rules, current) {
+		return policy.ProjectPolicy{}, fmt.Errorf("host Project configuration is not atomically synchronized with the effective policy; retry 'sunaba config apply'")
+	}
+	plan, err := policy.ClassifyApplication(vmPolicy, current)
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	if plan.Has(policy.ApplyAfterRecreate) {
+		return policy.ProjectPolicy{}, fmt.Errorf("current configuration changed VM-bound fields [%s]; export changes and run 'sunaba recreate'", strings.Join(plan.Paths(policy.ApplyAfterRecreate), ", "))
+	}
+	return current, nil
+}
+
+func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState, runtimeBase, vmID string, recorder *audit.Recorder) (managedActivation, error) {
+	upstreamBaseURL := "https://api.openai.com"
+	upstreamKey := ""
+	var oauthTokens modelgateway.OAuthTokenSource
+	if projectPolicy.Model.AuthMode == modelcatalog.AuthOAuth {
+		manager := openauth.NewManager()
+		if _, err := manager.AccessToken(ctx); err != nil {
+			return managedActivation{}, err
+		}
+		upstreamBaseURL = "https://chatgpt.com/backend-api/codex"
+		oauthTokens = manager
+	} else {
+		var err error
+		upstreamKey, err = secretstore.LoadOpenAIKey(ctx)
+		if err != nil {
+			return managedActivation{}, err
+		}
+	}
+	sessionID, err := newSessionID()
+	if err != nil {
+		return managedActivation{}, err
+	}
+	modelToken, err := session.NewSecret()
+	if err != nil {
+		return managedActivation{}, err
+	}
+	serverPassword, err := session.NewSecret()
+	if err != nil {
+		return managedActivation{}, err
+	}
+	expiresAt := time.Now().Add(time.Duration(projectPolicy.Session.TTLSeconds) * time.Second)
+	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, "sunaba-"+projectPolicy.ProjectID+"-"+vmID, sessionID, projectPolicy.Model.AllowedModels, expiresAt)
+	if err != nil {
+		return managedActivation{}, err
+	}
+	capability.MaxRequests = projectPolicy.Model.MaxRequests
+	capability.MaxConcurrent = projectPolicy.Model.MaxConcurrent
+	capability.MaxRequestBytes = projectPolicy.Model.MaxRequestBytes
+	capability.MaxResponseBytes = projectPolicy.Model.MaxResponseBytes
+	gateway, err := modelgateway.New(modelgateway.Config{
+		UpstreamBaseURL: upstreamBaseURL, UpstreamAPIKey: upstreamKey, AuthMode: projectPolicy.Model.AuthMode, OAuthTokens: oauthTokens, Capability: capability,
+		Audit: func(event modelgateway.AuditEvent) error {
+			return recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
+				"model": event.Model, "status": fmt.Sprint(event.Status), "request_bytes": fmt.Sprint(event.RequestBytes), "response_bytes": fmt.Sprint(event.ResponseBytes), "reason": event.Reason,
+			}})
+		},
+	})
+	if err != nil {
+		return managedActivation{}, err
+	}
+	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: projectPolicy.Model.AllowedModels,
+		DefaultModel: projectPolicy.Model.AllowedModels[0], TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", AuthMode: projectPolicy.Model.AuthMode,
+	})
+	if err != nil {
+		return managedActivation{}, err
+	}
+	vmName := "sunaba-" + projectPolicy.ProjectID + "-" + vmID
+	gateways, err := a.configureGateways(ctx, projectPolicy, projectState, runtimeBase, vmName, sessionID, expiresAt, recorder)
+	if err != nil {
+		return managedActivation{}, err
+	}
+	return managedActivation{activation: session.Activation{
+		SessionID: sessionID, ProviderConfig: provider, ModelGateway: gateway, ModelGatewayClose: func() error { gateway.Revoke(); return nil }, ModelToken: modelToken,
+		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
+		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
+		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second,
+	}, expiresAt: expiresAt, idleTimeout: time.Duration(projectPolicy.Session.IdleSeconds) * time.Second, gitBroker: gateways.gitBroker, modelUsage: gateway.Usage}, nil
 }
 
 func pruneProjectAudit(recorder *audit.Recorder, projectPolicy policy.ProjectPolicy, now time.Time) error {
@@ -250,16 +420,19 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
+	recoveryRetained := false
 	defer func() {
 		if !destroyed {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
 		}
-		_ = os.RemoveAll(managed.runtimeBase)
+		if !recoveryRetained {
+			_ = os.RemoveAll(managed.runtimeBase)
+		}
 	}()
-	idleTimeout := time.Duration(managed.projectPolicy.Session.IdleSeconds) * time.Second
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, idleTimeout)
+	idleTimeout := managed.initialActivation.idleTimeout
+	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -268,47 +441,43 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, control.Close()) }()
-	expiry := time.NewTimer(time.Until(managed.expiresAt))
-	defer expiry.Stop()
-	expiryChannel := expiry.C
-	idleTimer := time.NewTimer(controlled.idleDelay(time.Now()))
-	defer idleTimer.Stop()
-	resetIdle := func(delay time.Duration) {
-		if !idleTimer.Stop() {
-			select {
-			case <-idleTimer.C:
-			default:
-			}
-		}
-		idleTimer.Reset(delay)
+	deadlines := newSessionDeadlineTimers()
+	defer deadlines.disarm()
+	if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
+		return err
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-controlled.exit:
+			recoveryRetained = controlled.recoveryRetained()
 			destroyed = true
 			return nil
-		case <-expiryChannel:
+		case <-controlled.deadlineChanged:
+			if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
+				return err
+			}
+		case now := <-deadlines.expiryC:
 			pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			pauseErr := controlled.pause(pauseContext)
+			_, pauseErr := controlled.pauseIfExpired(pauseContext, deadlines.revision, now)
 			cancel()
 			if pauseErr != nil {
 				return fmt.Errorf("pause expired Agent Session: %w", pauseErr)
 			}
-			expiryChannel = nil
-		case <-controlled.activity:
-			resetIdle(controlled.idleDelay(time.Now()))
-		case now := <-idleTimer.C:
-			if controlled.idleExpired(now) {
-				pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				pauseErr := controlled.pause(pauseContext)
-				cancel()
-				if pauseErr != nil {
-					return fmt.Errorf("pause idle Agent Session: %w", pauseErr)
-				}
+			if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
+				return err
 			}
-			idleTimer.Reset(controlled.idleDelay(time.Now()))
+		case now := <-deadlines.idleC:
+			pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			_, pauseErr := controlled.pauseIfIdle(pauseContext, deadlines.revision, now)
+			cancel()
+			if pauseErr != nil {
+				return fmt.Errorf("pause idle Agent Session: %w", pauseErr)
+			}
+			if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -327,15 +496,18 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
+	recoveryRetained := false
 	defer func() {
 		if !destroyed {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
 		}
-		_ = os.RemoveAll(managed.runtimeBase)
+		if !recoveryRetained {
+			_ = os.RemoveAll(managed.runtimeBase)
+		}
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second)
+	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -348,21 +520,32 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 	if prepared.err != nil {
 		return prepared.err
 	}
+	tuiSessionRoot, err := createHostTUISessionRoot(managed.active.Root, managed.active.VMID, managed.initialActivation.activation.SessionID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, removeHostTUISessionRoot(managed.active.Root, managed.active.VMID, managed.initialActivation.activation.SessionID, tuiSessionRoot))
+	}()
 	tui, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
 		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
-		SessionRoot: managed.active.Root, ServerURL: managed.active.AttachURL,
-		GuestWorkspace: managed.active.WorkspacePath, Password: managed.serverPassword,
+		SessionRoot: tuiSessionRoot, ServerURL: managed.active.AttachURL,
+		GuestWorkspace: managed.active.WorkspacePath, Password: managed.initialActivation.activation.ServerPassword,
 		ExpectedExecutableSHA256: activeLock.Manifest.OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
 	if err != nil {
 		return err
 	}
 	tui.Stdin, tui.Stdout, tui.Stderr = a.input, a.output, a.errors
-	tuiErr := runHostTUIWithHeartbeat(ctx, tui, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second, func(context.Context) error { return controlled.heartbeat() })
+	tuiErr := runHostTUIWithHeartbeat(ctx, tui, managed.initialActivation.idleTimeout, func(context.Context) error { return controlled.heartbeat() })
 	exportContext, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	exportErr := controlled.exportAndDestroy(exportContext)
 	cancel()
-	destroyed = exportErr == nil
+	recoveryRetained = controlled.recoveryRetained()
+	destroyed = exportErr == nil || recoveryRetained
+	if recoveryRetained {
+		fmt.Fprintln(a.errors, "Dev export was refused. Direct egress and all session capabilities were revoked; the stopped VM was retained. Run 'sunaba status'; retry 'sunaba changes export', export the main workspace while explicitly discarding External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'.")
+	}
 	if exportErr == nil {
 		if pending, err := loadPending(projectState, projectPolicy); err == nil {
 			fmt.Fprintf(a.output, "Dev Agent Session ended; direct egress was quiesced and Change Set %s (%d changes) was exported.\n", pending.ChangeSet.Digest, len(pending.ChangeSet.Changes))
@@ -381,15 +564,18 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
+	recoveryRetained := false
 	defer func() {
 		if !destroyed {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
 		}
-		_ = os.RemoveAll(managed.runtimeBase)
+		if !recoveryRetained {
+			_ = os.RemoveAll(managed.runtimeBase)
+		}
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.serverPassword, managed.expiresAt, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second)
+	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -406,6 +592,10 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 	exportContext, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	err = controlled.exportAndDestroy(exportContext)
 	cancel()
-	destroyed = err == nil
+	recoveryRetained = controlled.recoveryRetained()
+	destroyed = err == nil || recoveryRetained
+	if recoveryRetained {
+		fmt.Fprintln(a.errors, "Dev export was refused. Direct egress and all session capabilities were revoked; the stopped VM was retained. Run 'sunaba status'; retry 'sunaba changes export', export the main workspace while explicitly discarding External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'.")
+	}
 	return err
 }

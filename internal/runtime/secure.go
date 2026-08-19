@@ -23,7 +23,7 @@ var secureIdentityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127
 
 type SecureSessionPolicy struct {
 	ProjectID   string `json:"project_id"`
-	SessionID   string `json:"session_id"`
+	VMID        string `json:"vm_id"`
 	Mode        string `json:"mode"`
 	NetworkName string `json:"network_name,omitempty"`
 	Image       string `json:"image"`
@@ -52,8 +52,8 @@ func (p SecureSessionPolicy) Digest() (string, error) {
 }
 
 func (p SecureSessionPolicy) canonical() (SecureSessionPolicy, error) {
-	if !secureIdentityPattern.MatchString(p.ProjectID) || !secureIdentityPattern.MatchString(p.SessionID) {
-		return SecureSessionPolicy{}, fmt.Errorf("secure Project and session identities must be explicit safe identifiers")
+	if !secureIdentityPattern.MatchString(p.ProjectID) || !secureIdentityPattern.MatchString(p.VMID) {
+		return SecureSessionPolicy{}, fmt.Errorf("secure Project and VM identities must be explicit safe identifiers")
 	}
 	if p.Image == "" {
 		return SecureSessionPolicy{}, fmt.Errorf("secure session image is required")
@@ -66,7 +66,7 @@ func (p SecureSessionPolicy) canonical() (SecureSessionPolicy, error) {
 	}
 	wantNetwork := ""
 	if p.Mode == "dev" {
-		wantNetwork = "sunaba-" + p.ProjectID + "-" + p.SessionID + "-net"
+		wantNetwork = "sunaba-" + p.ProjectID + "-" + p.VMID + "-net"
 	}
 	if p.NetworkName != wantNetwork {
 		return SecureSessionPolicy{}, fmt.Errorf("session network does not match mode and identity")
@@ -74,7 +74,7 @@ func (p SecureSessionPolicy) canonical() (SecureSessionPolicy, error) {
 	if p.CPUs <= 0 || p.Memory == "" || p.DiskBytes < 64<<20 || p.ProcessMax <= 0 || p.FileSizeMax != p.DiskBytes || p.OpenFileMax <= 0 {
 		return SecureSessionPolicy{}, fmt.Errorf("secure session resource policy is invalid")
 	}
-	if !filepath.IsAbs(p.SessionRoot) || filepath.Base(p.SessionRoot) != "sunaba-session-"+p.SessionID {
+	if !filepath.IsAbs(p.SessionRoot) || filepath.Base(p.SessionRoot) != "sunaba-vm-"+p.VMID {
 		return SecureSessionPolicy{}, fmt.Errorf("secure session root must be an absolute session-bound sunaba directory")
 	}
 	info, err := os.Lstat(p.SessionRoot)
@@ -103,6 +103,9 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	}
 	if !secureIdentityPattern.MatchString(spec.Name) || len(spec.Name) < len("sunaba-") || spec.Name[:len("sunaba-")] != "sunaba-" {
 		return fmt.Errorf("secure container name must be a safe sunaba-* identity")
+	}
+	if spec.Name != "sunaba-"+canonical.ProjectID+"-"+canonical.VMID {
+		return fmt.Errorf("secure container name must match the Project VM identity")
 	}
 	if spec.Image != canonical.Image || spec.CPUs != canonical.CPUs || spec.Memory != canonical.Memory {
 		return fmt.Errorf("secure image and resource limits must match host policy")
@@ -191,7 +194,7 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	requiredLabels := map[string]string{
 		"dev.sunaba.owner":         "sunaba-supervisor",
 		"dev.sunaba.project":       canonical.ProjectID,
-		"dev.sunaba.session":       canonical.SessionID,
+		"dev.sunaba.vm":            canonical.VMID,
 		"dev.sunaba.mode":          canonical.Mode,
 		"dev.sunaba.policy-digest": digest,
 	}

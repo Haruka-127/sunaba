@@ -91,13 +91,15 @@ Git GatewayやWeb Gatewayが不要なら、有効にする必要はありませ�
 ### 4. VMを準備してOpenCodeを起動する
 
 ```sh
+sunaba snapshot preview --dir "$PROJECT"
+sunaba snapshot approve --dir "$PROJECT" --digest <表示されたdigest>
 sunaba up --dir "$PROJECT"
 sunaba agent --dir "$PROJECT"
 ```
 
-`up`はhost ProjectのSnapshotからVMを作成し、分離とresourceを検証してpauseします。`agent`はそのVMを再開し、ホストのOpenCode TUIをVM内serverへ接続します。
+previewは内容を表示せず、件数、容量、大容量file、秘密らしいfile名とdigestを表示します。必要ならhost-onlyな`snapshot.exclude`を直して`config apply`し、再previewします。`up`は承認された同一digestのhost ProjectからSnapshotとVMを作成し、分離とresourceを検証してpauseします。`agent`は新しいAgent Session資格情報を発行してそのVMを再開し、ホストのOpenCode TUIをVM内serverへ接続します。
 
-TUIを終了するとsession用Gatewayとrelayが失効し、VMは再びpauseします。まだhost Projectに変更はありません。
+TUIを終了するとsession用Gateway、relay、lease、server passwordが不可逆に失効し、VMは再びpauseします。まだhost Projectに変更はありません。
 
 ### 5. 成果物をhostへ反映する
 
@@ -126,16 +128,22 @@ VM内の`.git/`はChange Setに含まれません。host repositoryへcommitす�
 sunaba status --dir "$PROJECT"
 ```
 
-既存VMがpausedで、session期限内ならそのまま再開できます。
+既存VMがpausedなら、前Sessionの期限にかかわらず新しいSession ID、token、password、TTLを発行し、同じVMとupperを再開できます。終了済みSessionの資格情報は再利用しません。
 
 ```sh
 sunaba agent --dir "$PROJECT"
 ```
 
-短いcommandで状態を確認したいときはsanitized shellを使います。
+複数のcommandを順に確認したいときはsanitized shellを使います。
 
 ```sh
 sunaba shell --dir "$PROJECT"
+```
+
+secure modeで単発commandだけを実行するときはargv-based `exec`を使います。stdout/stderr、exit code、timeout、truncationが分けて表示されます。
+
+```sh
+sunaba exec --dir "$PROJECT" --cwd . --timeout 2m -- go test ./...
 ```
 
 作業途中でTUIやshellを終了しても、すぐにexportする必要はありません。secure modeのVMはnetworkとsession capabilityを失ったpaused状態で、隔離された編集内容を保持します。次回の`agent`または`shell`で続きを行えます。
@@ -210,7 +218,20 @@ sunaba up --dir "$PROJECT"
 
 ## Project設定を変更する
 
-設定はactiveまたはpaused VM、pending Change Setがある間は変更できません。まず現在の作業を処理します。
+まず差分と適用時点を確認します。
+
+```sh
+sunaba config validate --dir "$PROJECT"
+sunaba config diff --dir "$PROJECT"
+```
+
+audit retentionは即時、Model/Git/Web、quota、session TTL/idle、blocklistは次のAgent Sessionから反映されます。active Sessionのauthorityは変更されず、pause後に新しい資格情報を発行するときにcurrent policyを読み直します。この種類はpaused VMやpending Change Setを保持したまま適用できます。
+
+```sh
+sunaba config apply --dir "$PROJECT"
+```
+
+mode、resource、dependency/image、Snapshot除外、export上限等が`recreate-required`と表示された場合だけ、既存VMを先に処理します。
 
 成果物を残す場合:
 
@@ -226,13 +247,13 @@ sunaba changes apply --dir "$PROJECT"
 sunaba recreate --dir "$PROJECT" --discard-pending
 ```
 
-状態が空になったら設定を変更します。
+VMを処理したら設定を変更・適用します。
 
 ```sh
 sunaba config edit --dir "$PROJECT"
 ```
 
-設定fileを直接編集した場合は、検証と差分確認をしてから適用します。
+設定fileを直接編集した場合も、同じ検証と三分類を確認してから適用します。
 
 ```sh
 sunaba config validate --dir "$PROJECT"
@@ -240,7 +261,7 @@ sunaba config diff --dir "$PROJECT"
 sunaba config apply --dir "$PROJECT"
 ```
 
-適用後に新しいVMを作ります。
+`recreate-required`の変更を適用した後は、新しいVMを作ります。
 
 ```sh
 sunaba up --dir "$PROJECT"
@@ -248,7 +269,7 @@ sunaba up --dir "$PROJECT"
 
 ## secure modeでWebを使う
 
-依存導入、Web検索、ドキュメント取得などが必要な場合は、許可するoriginをhost側で決めてWeb Gatewayを有効にします。既存VMとpending Change Setは先に処理してください。
+依存導入、Web検索、ドキュメント取得などが必要な場合は、許可するoriginをhost側で決めてWeb Gatewayを有効にします。設定はactive Sessionを変えず、次のAgent Sessionから有効になります。
 
 一般的な開発用originの組み込みpresetにProject固有originを追加する場合:
 
@@ -288,7 +309,7 @@ sunaba web refresh --dir "$PROJECT"
 
 ### 1. hostでremoteを登録する
 
-VMとpending Change Setがない状態で、credentialを含まない固定HTTPS `.git` URLを登録します。
+credentialを含まない固定HTTPS `.git` URLを登録します。active Sessionは変更されず、次のAgent Sessionから有効になります。
 
 ```sh
 sunaba git remote add \
@@ -299,37 +320,33 @@ sunaba git remote add \
 
 hostのGit credential helperが、このURLのcredentialを非対話で取得できることを確認してください。SSH remote、credential入りURL、Git LFS endpointは利用できません。
 
-### 2. VM内へcloneする
+### 2. 既定workspaceへhistoryを取得する
 
-`agent`または`shell`を開始すると、sunabaが固定Gateway URLをremoteとしてVMへ設定します。既定workspaceはhost Snapshot由来のsynthetic repositoryなので、外部historyが必要な場合は隔離領域の別directoryへcloneします。
+`agent`または`shell`を開始すると、sunabaが既定workspaceのguest-local gitdirへ固定Gateway URLをremoteとして設定します。別directoryへcloneせず、このrepositoryへhistoryを取得します。
 
 VM内で実行:
 
 ```sh
-REMOTE_URL=$(git remote get-url origin)
-env -u GIT_DIR -u GIT_WORK_TREE \
-  git clone "$REMOTE_URL" /var/lib/sunaba/overlay/origin-clone
+git fetch origin
+git log --oneline --decorate --all -n 20
 ```
 
-以後、そのcloneで通常のGit操作を行います。
+必要なbranchを確認して、既定workspaceへmergeまたはrebaseします。
 
 ```sh
-env -u GIT_DIR -u GIT_WORK_TREE \
-  git -C /var/lib/sunaba/overlay/origin-clone fetch origin
-env -u GIT_DIR -u GIT_WORK_TREE \
-  git -C /var/lib/sunaba/overlay/origin-clone pull --ff-only origin main
+git merge --ff-only origin/main
 ```
 
-clone、fetch、pullにはhost承認は不要です。固定remote、session、quotaの範囲はGatewayが強制します。
+fetch、pullにはhost承認は不要です。固定remote、session、quotaの範囲はGatewayが強制します。
+
+互換目的で別directoryへcloneしたrepositoryが残っている場合、dirty working treeまたは未push commitがある間はexportを拒否します。必要なworking fileを既定workspaceへ移し、commitをpushしてからexportしてください。dev foreground終了時に検出した場合、VMはcapabilityとnetworkを失った停止recovery状態で保持され、`status`に回収方法が表示されます。External Git状態を明示的に捨ててmain workspaceだけをexportする場合は`changes export --discard-external-git`を使います。
 
 ### 3. pushを承認する
 
 VM内でpushすると、最初の試行はpending approvalを作って拒否されます。
 
 ```sh
-env -u GIT_DIR -u GIT_WORK_TREE \
-  git -C /var/lib/sunaba/overlay/origin-clone \
-  push origin HEAD:refs/heads/main
+git push origin HEAD:refs/heads/main
 ```
 
 Agent Sessionを動かしたまま、別のhost terminalで承認requestを確認します。
@@ -338,7 +355,7 @@ Agent Sessionを動かしたまま、別のhost terminalで承認requestを確�
 sunaba approvals --dir "$PROJECT"
 ```
 
-remote、ref、old/new object ID、force/delete、nonceを確認して承認します。その後、VM内で変更を加えずに同じpushを期限内に再実行します。
+remote、ref、old/new object ID、force/delete、有効期限を確認し、`approve <番号またはID>`、`reject <番号またはID>`、`skip`を選びます。nonceはhost内部で選択対象へ束縛され、手入力しません。その後、承認した場合だけVM内で変更を加えずに同じpushを期限内に再実行します。
 
 承認はone-shotです。commit、ref、remote、force/deleteが変わった場合は、新しいrequestを確認してください。OpenCode TUI内の表示だけではhost承認は成立しません。
 
@@ -355,7 +372,22 @@ sunaba agent --dir "$PROJECT"
 
 dev modeでは、foregroundの`agent`または`shell`が動いている間だけ専用networkから直接egressできます。session中の情報流出防止は保証されません。Project内のsource、`.env`、生成物など、VMから読める情報は外部へ送信され得ます。
 
-session終了時、sunabaはegressをdeny-allへ切り替え、VMをexportして破棄します。dev VMをbackgroundで保持しません。同時にactiveにできるdev sessionは1つです。
+session終了時、sunabaはegressをdeny-allへ切り替え、VMをexportして破棄します。exportがExternal Git guardに拒否された場合だけ、自動破棄せず、VMを停止してcapability、pf state、専用networkを削除し、host-only recovery recordへ束縛します。これはbackground sessionではなく、通信不能な回収待ち資産です。同時にactiveにできるdev sessionは1つです。
+
+拒否後は次で状態と正確なVM identityを確認します。
+
+```sh
+sunaba status --dir "$PROJECT"
+sunaba changes export --dir "$PROJECT"
+```
+
+guard対象のExternal Git working tree/historyを捨て、main workspaceだけをChange Set化する場合に限り、明示的に実行します。
+
+```sh
+sunaba changes export --discard-external-git --dir "$PROJECT"
+```
+
+VM全体を破棄する場合は`recreate --discard-pending`または`destroy --yes --discard-pending`を使います。recovery recordのProject/VM ID、runtime path、停止VM labelが一致しない場合、sunabaは回収も破棄も拒否します。
 
 host worktreeの非mount、host credentialの非注入、host・LAN・private network・他VMへの拒否は維持されます。ただし、VM自身が用意したcredentialによるGit pushなど、直接egress上の外部書き込みをGit Gateway承認で止めることはできません。
 

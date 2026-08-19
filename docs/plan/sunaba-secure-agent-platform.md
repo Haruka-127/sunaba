@@ -231,7 +231,7 @@ flowchart LR
         GitGW["Git Gateway<br/>host Git credential"]
         WebGW["Web Gateway<br/>explicit forward proxy"]
         Quarantine["0700 Quarantine<br/>host-generated Change Set"]
-        Approval["Trusted Approval UI<br/>nonce + digest / object ID"]
+        Approval["Trusted Approval UI<br/>number/ID selection + bound nonce"]
         Apply["Transactional Apply"]
     end
 
@@ -277,7 +277,7 @@ flowchart LR
     Apply --> Project
 ```
 
-Agent VMはエージェントとコード実行環境の両方である。VM内部のshell/file/build操作はHost Supervisorを経由しない。Host Supervisorが仲介・監査するのは、VMライフサイクル、TUI attach、外部通信、認証、成果物の搬出、ホスト適用などの境界操作である。
+Agent VMはエージェントとコード実行環境の両方である。VM内部のshell/file/build操作はHost Supervisorを経由しない。利用者がhost CLIから明示的に開始するsanitized line shellと単発`exec`だけはSupervisorがbounded guest execへ変換する。Host Supervisorが仲介・監査するのは、VMライフサイクル、これらの明示的なhost CLI操作、TUI attach、外部通信、認証、成果物の搬出、ホスト適用などの境界操作である。
 
 Host TUIは利便性のためホストで動かすため、固定・検証されたtrusted dependencyとしてTCBへ入る。ただしserverから受け取る表示データは常にuntrustedであり、sunabaの承認経路としては使わない。
 
@@ -295,11 +295,13 @@ Host TUIは利便性のためホストで動かすため、固定・検証され
 6. Agent VM内でlowerを読み取り専用、upper/workをProject専用としてOverlayFSを構成する。
 7. merged workspaceをOpenCode serverの作業ディレクトリにする。
 
+Project VM作成時にはProject IDと別のVM IDを発行し、container名、runtime root、workspace、ownership label、live guardをそのVM IDへ固定する。Agent Session IDをVM名や不変なVM policy digestへ含めない。
+
 ### 8.2 セッション開始
 
 1. SupervisorがProject lockを取得し、VMと構成の同一性、ネットワークモード、resource limitsを確認する。
 2. secureモードでは任意の直接外向き通信が遮断されていることを検査する。
-3. セッションに必要なGateway capability、OpenCode server password、attach relay identityを発行する。
+3. 開始ごとに新しいAgent Session ID、Gateway capability、OpenCode server password、attach relay identity、絶対TTLを発行する。終了済みまたは期限切れSessionのIDと資格情報を再利用しない。
 4. Model Gatewayの接続先と短命tokenをVM内OpenCode serverのセッション環境へ注入する。
 5. VM内で固定バージョンの`opencode serve`を起動する。`--hostname`、`--port`、`--mdns=false`をSupervisorが明示し、guest loopbackまたはProject専用interfaceだけでlistenする。v1.18.18には`--no-mdns` flagが存在しないため使用しない。
 6. Local Attach Relayをhost loopbackのrandom portで起動し、Project/VM専用transportでserverへ接続する。
@@ -307,6 +309,8 @@ Host TUIは利便性のためホストで動かすため、固定・検証され
 8. host Project外のsunaba管理directoryをcwd/HOME/config rootにした、固定バージョンの`opencode attach`を`--pure`で起動する。
 
 OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能である。したがって秘密としてではなく、範囲と寿命を限定したcapabilityとして扱う。
+
+同じVMで次のAgent Sessionを開始するときは、保存済みのcurrent policyをhost-only stateから再読込する。Model/Git/Web、session TTL/idle、quota、blocklist等のSession authorityは新しいSessionへだけ反映し、実行中Sessionのhandler、token、allowlist、quota、期限を差し替えない。mode、dependency/image、resource、Snapshot/export/Protected Path等のVM-bound policyがVM作成時から変わっていればresumeをfail closedで拒否し、export後のclean recreationを案内する。
 
 起動待ちを抑えるため、固定Host TUIのdigest/version検証はVM再開と並列に実行してよい。ただし検証済み実行ファイルのidentityをTUI起動直前に再確認し、検証後の置換や変更を拒否する。Local Attach Relay経由のhealth確認は短いbounded backoffで行い、複数秒固定のpoll間隔を設けない。VM再開時の短命入力はmode `0700`の単一directoryへまとめて1回のcopyで復元し、guest service起動とresource probeは同じbounded exec transactionで行ってよい。並列化、copy/exec集約、poll短縮を理由に、VM identity、network、resource limit、Host TUI digest/version、server health/versionの検証を省略しない。
 
@@ -321,10 +325,16 @@ OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能で�
 
 1. Host TUIを終了する。
 2. Local Attach Relayを閉じ、VM内OpenCode serverを停止する。
-3. OpenCode server passwordとGateway capabilityを即時失効させる。
+3. OpenCode server password、Gateway capability、永続lease、各Gateway handlerを即時かつ不可逆に失効させる。listenerを閉じ、同じSessionをactiveへ戻さない。
 4. devモードでは直接外向き通信を無効化するか、無効化を確認してからVMを停止する。
 5. セッション後のバックグラウンドプロセスによるGateway操作を拒否し、直接インターネットへも到達できないことを保証する。
-6. Project lockを解放する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。
+6. Project lockはProject VMを管理するSupervisorが保持する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。次の`agent`、`shell`またはsecure modeの`exec`は同じVM/upperに対して新しいAgent Sessionを開始する。
+
+host CLIの`exec`はcommandと各argumentを別々のJSON fieldとしてSupervisorへ渡し、host shellへ再解釈させない。Supervisorは固定したguest wrapperとargvをApple Containerのexec境界へ直接渡し、stdout、stderr、exit code、timeout、各streamのtruncationを分離したbounded resultとして返す。cwdはProject workspaceからの正規化済み相対pathだけを受理する。対話TTY、raw `container exec`、host command実行へのfallbackは行わない。dev modeでは既存のforeground shell/agent以外に直接egress可能な入口を増やさず、`exec`を拒否する。
+
+dev foreground終了時にExternal Git guardが作業損失を検出した場合は、自動破棄へ進まない。Supervisorはdirect egressをquiesceし、relay、Gateway handler、lease、server passwordを失効し、VMを停止して専用networkとpf stateを削除する。その後、Project/VM ID、停止VMのownership label、固定runtime root、baseline、export policy digestをhost-onlyなrecovery recordへ束縛し、停止VMだけを明示的な復旧資産として保持する。recovery record保存または後処理が失敗しても、それをVM破棄の許可として扱わない。
+
+recovery状態は`status`で回収方法とともに表示し、通常のorphan cleanupは完全一致する停止VMを削除しない。`changes export`は同じVMをdeny-all network上で一時的に再所有してguardを再評価し、成功時だけChange Set化してVMを削除する。External Git状態を捨ててmain workspaceだけをexportする場合は`changes export --discard-external-git`、VM全体を捨てる場合は`recreate --discard-pending`または`destroy --yes --discard-pending`という明示操作を要求する。record、Project root、runtime path、VM labelのいずれかが一致しなければ回収も破棄も拒否する。
 
 secureモードではattach閉鎖とcapability失効を先に完了してから、signal forwardingとchild reapを行うApple Containerの固定init経由でSIGTERMを送り、1秒のbounded graceで停止し、停止状態を再確認する。正常系はinitがSIGTERMへ応答して速やかに終了させ、1秒を常時消費しない。既定の長いgraceを対話終了ごとに待たない一方、通常停止を省略して直接killする経路には変更しない。
 
@@ -442,6 +452,10 @@ SnapshotはcanonicalなProject rootをdirectory descriptorとして開き、そ�
 
 Snapshotへ含める対象はhost側Project policyで決め、Project内のfileがそのpolicyを広げられないようにする。
 
+`project.json`の`snapshot.exclude`はhost-onlyなroot-relative literal pathの集合とし、該当path以下をSnapshot対象から外す。Project内の`.gitignore`を暗黙のセキュリティ境界には使わない。利用者が明示的にimportした場合だけ、negationやglobを含まないliteral entryを除外候補へ取り込み、`config apply`前にhost-only設定として確認する。
+
+各VM作成前にSnapshot previewを生成し、entry/file数、総size、boundedな大容量file一覧、秘密らしいfile名だけを内容を表示せず提示する。利用者はpreviewのexact manifest digestをhost側で承認し、VM作成時は同じpolicy digestかつ同じmanifest digestでなければ拒否する。`project init`は登録とhost-only設定の作成だけを行い、未使用のSnapshotを作らない。
+
 - source、`opencode.json`、`.opencode/`、`.gitignore`、`.gitmodules`は通常のProject fileとして含められる。Project固有のOpenCode設定やpluginはVM内serverだけが読み込む
 - `.git/`はhostのcredential、hook、config、管理状態を含み得るためSnapshotへcopyしない
 - Phase 1ではVM内でsyntheticなbaseline commitを持つguest-local repositoryを作る。Phase 3で履歴が必要になったら、Git Gateway経由のclone/fetchまたはcredentialとhookを含まない検証済みbundleを使う
@@ -463,7 +477,7 @@ canonical manifestは、正規化済み相対path、file type、mode、size、co
 7. 利用者または後続の検査処理へ、制御文字をescapeしたChange Setを提示する。
 8. 承認されたChange Setだけをホスト作業ツリーへ適用する。
 
-pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みbaseline Snapshot、検証済みMerged View、両manifest、Change Setを自己完結した組として保存する。保存した両SnapshotとChange Setのdigestを再検証できた場合だけpendingを確定し、容量不足や保存失敗ではAgent VMを破棄しない。これによりexport後にhost worktreeが変化しても変更前後の内容を再現可能にする。ただしhost baselineが変化したpendingのapplyは9.5のとおり拒否する。
+pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みbaseline Snapshot、検証済みMerged View、両manifest、Change Set、作成時の正規化済みSnapshot/export policyとそのdigestを自己完結した組として保存する。保存した両Snapshot、policy、Change Setのdigestを再検証できた場合だけpendingを確定し、容量不足や保存失敗ではAgent VMを破棄しない。pending確定に失敗した場合はsecure/devのどちらでも、停止VM、固定runtime root、検証済みMerged ViewのdigestをProject-boundなhost-only recovery recordへ束縛し、`changes export`が同じfrozen成果物のpending確定を再試行できるようにする。通常cleanupはrecord保存失敗を削除許可とせず、guardlessな停止VMをfail closedで拒否する。これによりexport後にhost worktreeや無関係なcurrent Project policyが変化しても、作成時のpolicyで変更前後の内容をreview/applyできる。ただしhost baselineが変化したpendingのapplyは9.5のとおり拒否する。
 
 内容確認はhost側の`changes review`で行う。reviewはread-onlyであり、保存済みbaselineとMerged Viewをfd-relativeかつsymlink非追跡で再検証し、Change Set digestへ対応する追加、変更、削除、rename、type、mode、実行属性、symlink target、text差分を表示する。差分生成と表示ではProjectのGit設定、外部`diff`、pager、editor、syntax highlighter、MIME判定、preview helper、scriptを起動しない。text判定、1 file、総入力、行長、行数、diff出力へhost固定の上限を設け、binary、invalid UTF-8、巨大file等の内容を表示できない場合はsize、SHA-256、modeと未表示理由を明示する。path、symlink target、diff本文を含むすべてのuntrusted表示はterminal sanitizerを通す。
 
@@ -522,6 +536,8 @@ devモードでは、Agent VMからインターネットへの直接外向き通
 
 直接外向き通信を許可するのはactiveなAgent Session中だけとする。セッション終了時には接続を閉じ、新しいセッション開始時にモードを再確認して構成する。これはセッション中の情報流出を防ぐものではないが、状態保持されたVM内のマルウェアが利用者不在時に通信し続ける時間を限定する。
 
+export拒否後に保持するdev recovery VMはactive sessionではない。VMは停止し、専用network、pf state、Gateway capability、attach経路を持たない。後続exportのために一時起動する場合も、同じidentityの専用networkをVM停止中に再作成し、deny-allを適用してから起動する。
+
 ただし、devモードでも次は維持する。
 
 - VMによるホスト隔離
@@ -536,7 +552,7 @@ UIと監査ログにはdevモードであること、情報流出防止を保証
 
 devモードでは任意の直接通信を許すため、VMが自分で取得・生成したcredentialや認証不要のendpointを使うGit pushまで、Git Gatewayの承認で強制的に止めることはできない。sunabaが確実に管理するのはホストcredentialを利用するGit Gateway経由のpushである。すべての外向きGit書き込みを承認対象にする要件は、devモードの直接通信許可と両立しない。
 
-実装方式はProject/session専用のApple Container NAT networkと、割り当てられたsource IPv4/IPv6 subnetへ束縛したpf anchorを採用する。default networkを共有せず、networkの完全名、owner/project/session/mode label、NAT plugin、subnet/gatewayを開始・再開前に再検証する。pfはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、他VM private subnet、unsolicited inboundを拒否する。実装は同時active dev sessionをhost flockで1つへ制限し、VM削除後にanchorと専用networkを失効する。secure modeはこのpfへ依存せず`network none`を維持する。
+実装方式はProject/VM専用のApple Container NAT networkと、割り当てられたsource IPv4/IPv6 subnetへ束縛したpf anchorを採用する。default networkを共有せず、networkの完全名、owner/project/VM/mode label、NAT plugin、subnet/gatewayを開始前に再検証する。pfはDNS/DHCPとpublic egressのstateだけを許可し、host/self、RFC1918、CGNAT、link-local、metadata相当、documentation/benchmark、multicast、他VM private subnet、unsolicited inboundを拒否する。実装は同時active dev sessionをhost flockで1つへ制限し、VM削除後にanchorと専用networkを失効する。secure modeはこのpfへ依存せず`network none`を維持する。
 
 ### 10.3 モード遷移
 
@@ -763,6 +779,8 @@ Agent VM内のエージェントには通常のGit UXを提供しつつ、Git to
 
 VM内の`.git/`はguest-localな状態であり、Change Setを通じてhostの`.git/`へ上書きしない。local commit、branch、tagはVM内で自由に作成できるが、host worktreeへ昇格するのはworking treeのChange Setだけである。外部remoteへ反映する場合はGit Gatewayのpush承認を別に受ける。
 
+既定workspaceはSnapshot由来のworking treeと、overlay内のguest-local gitdirを組み合わせる。登録済みGateway remoteはこのgitdirへ設定し、外部historyが必要な場合は既定workspaceで`git fetch`して参照・mergeする。Change Set対象外の別directoryへcloneする通常導線は提供しない。互換上存在する別cloneは、dirty working treeまたはremoteへ存在しないlocal commitがあればexportをfail closedで拒否する。
+
 ### 13.2 操作ポリシー
 
 | 操作 | 方針 |
@@ -906,11 +924,17 @@ Phase 0のprobeで既存許可範囲にない操作が必要になった場合�
 
 利用者共通のversion宣言と適用済みlockは`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/versions.json`と`versions.lock.json`、Projectの利用者設定は同directoryの`projects/<ProjectID>/`を正本とし、Project worktree外のhost-only領域へ保存する。Project directory、Snapshot、VM、session input、exportへこの設定directoryをmountまたはcopyせず、VMから参照・変更できる経路を作らない。directoryはcurrent user所有のmode `0700`、設定とlockはmode `0600`の通常fileに限定し、symlink、未知field、trailing data、上限超過を拒否する。
 
-`project.json`にはmode、resource、session、Model、Git remote、Webの有効状態・`origin_presets`・quota、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、組み込みpreset内容/digest、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
+`project.json`にはmode、resource、session、Model、Git remote、Webの有効状態・`origin_presets`・quota、Snapshot除外、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、組み込みpreset内容/digest、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
 
 Project固有のWeb allowlist追加分は同じhost-only directoryの固定名`web-origins.txt`で管理する。組み込みpresetの内容をこのfileへ複製しない。空行と`#`で始まるcommentを除き、各行は`http://host`または`https://host`と、任意の第2token `include-subdomains`だけを受け付ける。path、query、fragment、userinfo、非標準port、IP literal、重複rule、未知optionを1件でも含む場合はfile全体を拒否する。sizeは64 KiB、Project固有ruleは1024件、preset展開後の実効ruleも1024件を上限とする。Web Gateway無効時もpreset選択とProject固有追加分はinactiveな宣言として保持できる。
 
-設定変更は`config validate`と`config diff`で検査し、active/paused Agent Session、pending Change Setがない状態で`config apply`により実効policyへ明示適用する。未適用または不正な設定がある場合、`up`、`agent`、`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
+設定変更は`config validate`と`config diff`で検査し、`config apply`により実効policyへ明示適用する。CLIは差分を次の適用classへ分類し、対象fieldと必要操作を表示する。
+
+- **即時反映**: audit retention等のhost-only運用policy。保存transaction完了後に直ちに実行する
+- **次Agent Sessionから反映**: Model allowlist/auth/quota、Git/Web Gateway、session TTL/idle、blocklist等。active Sessionのauthorityは不変とし、pause後の新しいSession ID/token/handler発行時にcurrent policyを再読込する。paused VMやpending Change Setがあっても安全に適用できる
+- **VM再作成が必要**: mode、dependency/image、resource、Snapshot除外、export上限、Protected Path等。既存VMへ暗黙反映せず、VMが存在する間はapplyを拒否して`changes export`と`recreate`を案内する
+
+host-only設定writerはProject VMが保持する長寿命Project lockとは別のProject設定lockで直列化し、宣言設定と実効policyをcrash-safe transactionで更新する。未適用または不正な設定がある場合、`up`、`agent`、`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
 
 `config edit`は同じhost-only宣言設定とcompile経路に対する対話frontendとする。候補は最終確認までmemoryだけに保持し、確定時に上記apply条件を再検証して宣言設定と実効policyを同期更新する。別schema、VM内設定、credential入力、生成fieldの上書き経路を作らない。
 
@@ -946,7 +970,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 - session開始・終了、capability発行・失効
 - Gatewayごとのrequest metadata、許可・拒否、利用量、error
 - Git push承認の対象object IDと結果
-- Trusted Approval UIが表示したnonce、対象digest、承認・拒否。guest由来の自由形式文字列はescapeする
+- Trusted Approval UIが表示した対象digest/object ID、内部で束縛したnonce、承認・拒否。利用者は番号またはdigest IDで対象とdecisionを選び、nonceを手入力しない。guest由来の自由形式文字列はescapeする
 - workspace freeze/exportとChange Set digest
 - Change Set承認・拒否・適用結果
 - resource limit超過と強制停止
@@ -958,6 +982,8 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 
 ## 18. 失敗時の原則
 
+`sunaba doctor`はhostを変更しないread-only診断とする。platform/architecture、固定helper、OpenCode v1 exact lockとdigest、Apple Container、active image、state/runtime directory、global/Project config、Web blocklistを項目別に`PASS` / `WARN` / `FAIL`で表示し、1件でも`FAIL`なら非zeroで終了する。診断のためにsetup、migration、transaction recovery、container起動、host設定変更を行わない。
+
 | 失敗 | 動作 |
 |---|---|
 | secure network isolationを構成・検証できない | Agent Sessionを開始しない |
@@ -965,6 +991,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 | capability期限切れ/identity不一致 | 拒否し、必要なら新しいsessionを開始する |
 | host baselineが変化 | Change Set適用を拒否する |
 | export検証失敗 | quarantineを保持し、host worktreeへ適用しない |
+| dev終了時にExternal Git guardが拒否 | egressとcapabilityを失効してVMを停止し、host-only recovery ownershipとして保持する。明示discardなしに破棄しない |
 | resource limit超過 | 記録し、対象processまたはVMを停止する |
 | VM侵害の疑い | capability失効後、必要ならquarantine exportしてクリーン再生成する |
 | cleanup失敗 | 対象Project/VM identityを表示し、他リソースを広く削除しない |
@@ -1149,18 +1176,21 @@ sunaba update apply                保存済みcandidateを明示適用
 sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登録・確認・削除
 sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
 sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
-sunaba project init [path]       Project登録と初期snapshot。path省略時はcurrent directory、Model認証はOAuthが既定
+sunaba project init [path]       Project登録。path省略時はcurrent directory、Model認証はOAuthが既定
+sunaba snapshot preview          Snapshot対象の件数、size、警告、digestを内容非表示で確認
+sunaba snapshot approve          previewのexact digestを次のVM作成へ束縛して承認
+sunaba snapshot exclude import-gitignore  literalな.gitignore entryをhost-only除外候補へ明示import
 sunaba project list [--active]   登録ProjectとSupervisor・VM状態をread-onlyで一覧
 sunaba config path               host-only Project設定fileのpath表示
 sunaba config edit               host上の対話ウィザードで宣言設定を編集・検証・適用
 sunaba config validate/diff      declarative設定の厳格検証と実効policyとの差分表示
-sunaba config apply              停止状態で設定を実効Project policyへcompile
+sunaba config apply              差分を即時・次Session・要再作成へ分類して実効Project policyへcompile
 sunaba config show [--effective] declarative設定または内部の実効policyを表示
 sunaba up [--mode secure|dev]    secure VMを作成してpause、devはforeground session用artifactだけ準備
 sunaba agent                     server、relay、Host TUIを起動してAgent Session開始
 sunaba shell                     bounded line commandをterminal sanitizer経由で実行
 sunaba status                    mode、VM、session、quota、未export変更を表示
-sunaba changes export            freeze/exportとChange Set作成
+sunaba changes export [--discard-external-git] freeze/exportとChange Set作成。flagはguard対象のExternal Git状態だけを明示破棄
 sunaba changes review            保存済みbaselineとMerged Viewから安全な内容差分を表示
 sunaba changes apply             同じChange Setを再reviewし、Trusted Approval UIで確認後にhost適用
 sunaba approvals                 pending push/apply requestをhost側で確認・処理
@@ -1177,18 +1207,19 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 - fresh hostでは最初に`sunaba setup`を実行する。初回からbootstrap以外を使う場合は`setup --config-only`、`versions set|track`、`update check`、macOS側OpenCodeの同一版への更新、`update apply`の順に行う。`project init`はsetup未完了ならProject stateを作らず拒否する。
 - `versions set|track`は宣言だけを変更し、VM、Project policy、active lockを変更しない。`update check`もcandidate作成までとし、`update apply`だけが停止済みProjectを新しいexact lockへ切り替える。channel追跡を選んでもsession開始時の自動更新は行わない。
 - `sunaba project init`はpathを省略した場合にcurrent directoryを登録し、相対pathも受け付ける。入力pathはsymlinkを解決したcanonical absolute pathへ変換してidentityを固定する。新規ProjectのModel認証はOAuthを既定とし、API keyを使う場合だけ`--model-auth api-key`を指定する。credentialの登録有無から認証方式を推測せず、既存Projectの認証方式は変更しない。
+- `project init`後およびhost Project変更後に新しいVMを作る前は、`snapshot preview`で対象を確認し、表示されたexact digestを`snapshot approve`へ渡す。digest不一致、除外policy変更、preview後のProject変更ではVMを作らない。
 - `sunaba project list`はhost-only stateの直接の子だけをboundedに列挙し、Project policy、owner-only Supervisor locator、sunaba所有labelが完全一致するVMから状態を判定する。一覧取得はpolicy migration、stale locator回収、orphan cleanup、VM lifecycle操作を行わない。`--active`は到達可能なSupervisorまたはrunning状態のowned VMがあるProjectだけを表示し、VMがpause中でもSupervisorがactiveなら除外しない。
 - 公開Project操作の`config`、`model`、`up`、`agent`、`git`、`web`、`shell`、`status`、`changes`、`approvals`、`recreate`、`down`、`destroy`は、`--dir <path>`または`--project-id <id>`で対象を選択できる。両方の同時指定を拒否し、どちらも未指定ならcurrent directoryを使う。Project IDは`project list`が表示した12桁の小文字16進IDとの完全一致だけを受け付け、prefix、部分一致、aliasを使わない。通常操作のID指定は、owner-only stateとpolicyをread-onlyで検証し、policyのProject IDが一致し、保存されたcanonical Project rootが現存する場合だけそのrootへ解決する。`project init`、`project list`、利用者共通の`credentials`、内部ホスト操作の`firewall`と`_supervisor`はこのselectorの対象外とする。
 - `down`と`destroy`のID指定は、元Project rootやpolicyを失った隔離stateを安全に回収する復旧経路とする。policy内のProject pathを対象解決の根拠にせず、host-only state直下にあるcurrent-user所有、mode `0700`、非symlinkの同名directoryだけを対象とし、到達可能なSupervisorがあればそのProject IDとの一致も要求する。`down`は隔離stateを保持し、`destroy`だけが隔離stateとhost-only Project設定を削除する。host Project fileは削除せず、`--yes`と、pendingまたは未export変更に対する`--discard-pending`の要件はpath指定時と同じとする。
-- secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後にVMを停止して返す。返却時はLocal Attach Relay、Gateway gate、永続leaseがinactiveであり、一般session channelは到達不能である。
-- secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway gate、leaseをinactiveへして同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineでも同じfail-closed pauseを行う。期限内の再実行は同じVM/upperをresumeするが、TTL到達後はresumeせずexportまたはrecreateを要求する。`changes export`またはdestroyでcapability、listener、credentialを最終失効する。
-- VM再開時はtmpfsであるguestの`/run/sunaba`が空になることを前提とし、relay、provider設定、session capabilityをHost上のsession memoryからmode `0700`の単一directoryへ再生成し、1回のcopyで復元してからserverを起動する。session capabilityをVMの永続root filesystemへ退避せず、copyに使うHost runtime内一時directoryは成功・失敗を問わず直後に削除する。
-- devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。background supervisorへdirect egressを残さない。
+- secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後に初期Sessionを完全失効してVMを停止して返す。返却時はLocal Attach Relay、Gateway listener、activeな永続lease、server passwordがなく、一般session channelは到達不能である。
+- secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway handler、lease、server passwordを不可逆に失効して同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineや絶対TTLでも同じfail-closed pauseを行う。次回は同じVM/upperへ新しいSession ID、token、password、TTLを発行するため、TTL到達後も作業状態を保持したまま継続できる。
+- VM再開時はtmpfsであるguestの`/run/sunaba`が空になることを前提とし、relay、provider設定、新規session capabilityをmode `0700`の単一directoryへ生成し、1回のcopyで復元してからserverを起動する。終了済みSessionの入力を再利用せず、session capabilityをVMの永続root filesystemへ退避しない。copyに使うHost runtime内一時directoryは成功・失敗を問わず直後に削除する。
+- devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。export拒否時だけ、capability、pf、networkを全て失効した停止VMをhost-only recovery recordへ束縛して保持し、通常cleanupから保護する。background supervisorやdirect egressは残さない。
 - `sunaba shell`はraw execや未検証PTYではなく、bounded line commandの全出力をhost terminal sanitizerへ通す。
 - Model Gatewayの存在を会話やツール選択で意識する必要はない。
 - `sunaba config edit`はHost CLIだけで動くboundedな行入力式ウィザードとし、VM、OpenCode server、Host TUIへ設定入力を委ねない。既存のhost-only宣言設定を候補としてmemory上で編集し、最終確認まではfileや実効policyを変更しない。cancel、EOF、入力上限超過では変更を残さない。
 - 対話設定も手編集と同じ厳格validatorとcompile経路を使い、dependency、credential、capability、blocklist binding、push承認必須、Protected Pathを入力項目にしない。Projectのlocal Git configはinclude、system/global config、promptを無効にしたboundedなread-only probeだけで候補を得て、検証済み固定HTTPS remoteを人間が明示選択した場合だけ登録する。dev modeとWeb Gatewayの残余リスクを選択時に表示し、固定catalog外model、credential付きGit URL、曖昧なWeb origin、上限外quotaを保存前に拒否する。
-- 対話設定の適用は既存の`config apply`と同じ停止状態、owned VM、pending Change Set、blocklist条件を満たす場合だけ行う。対話中に宣言設定または実効policyが変化した場合は競合として拒否し、別processの変更を上書きしない。
+- 対話設定の適用は既存の`config apply`と同じ三分類、owned VM、blocklist条件を使う。次Session/即時classはpaused VMやpending Change Setを保持したまま適用でき、VM再作成classだけは既存VMがある間拒否する。対話中に宣言設定または実効policyが変化した場合は競合として拒否し、別processの変更を上書きしない。
 - secureで一般Webが未提供なら、コマンドが明確なnetwork policy errorで失敗する。
 - devへ切り替える場合は、情報流出防止を保証しない旨を明示する。
 - Git Gateway実装後も通常のGitコマンドを使う。push requestはhost側のpending approvalとなり、OpenCode TUIと分離したTrusted Approval UIで確認する。

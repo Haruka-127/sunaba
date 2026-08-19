@@ -106,7 +106,8 @@ func TestPhase4MeasureWebClients(t *testing.T) {
 	runID := randomID(t)
 	projectID := state.ProjectID(project)
 	sessionID := "p4m" + runID
-	vmID := "sunaba-" + projectID + "-" + sessionID
+	vmIdentity := "vm" + sessionID
+	vmID := "sunaba-" + projectID + "-" + vmIdentity
 	modelToken, _ := session.NewSecret()
 	serverPassword, _ := session.NewSecret()
 	proxyToken, _ := session.NewSecret()
@@ -132,10 +133,10 @@ func TestPhase4MeasureWebClients(t *testing.T) {
 	relay := buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
 	cfg := session.Config{
 		Store: &state.Store{Root: filepath.Join(runtimeBase, "state")}, Runtime: sunabaruntime.NewAppleContainer(false),
-		ProjectRoot: project, RuntimeBase: runtimeBase, SessionID: sessionID,
+		ProjectRoot: project, RuntimeBase: runtimeBase, VMID: vmIdentity, SessionID: sessionID,
 		Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", DiskBytes: 128 << 20,
 		ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
-		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelToken: modelToken,
+		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelGatewayClose: func() error { modelHandler.Revoke(); return nil }, ModelToken: modelToken,
 		GitGateway: proxy, GitRemotes: []session.GitRemote{{Name: "origin", Token: proxyToken}}, GitGatewayClose: func() error { return nil },
 		ServerPassword: serverPassword, LeaseTTL: 4 * time.Minute, Audit: auditRecorder,
 		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),

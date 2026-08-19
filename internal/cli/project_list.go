@@ -154,8 +154,8 @@ func ownedProjectVMs(containers []runtime.Info) map[string][]runtime.Info {
 	owned := make(map[string][]runtime.Info)
 	for _, item := range containers {
 		projectID := item.Labels["dev.sunaba.project"]
-		sessionID := item.Labels["dev.sunaba.session"]
-		if item.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || projectID == "" || sessionID == "" || item.Name != "sunaba-"+projectID+"-"+sessionID {
+		vmID := item.Labels["dev.sunaba.vm"]
+		if item.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || projectID == "" || vmID == "" || item.Name != "sunaba-"+projectID+"-"+vmID {
 			continue
 		}
 		owned[projectID] = append(owned[projectID], item)
@@ -203,7 +203,7 @@ func pendingInventoryState(projectState, projectID string) string {
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(io.LimitReader(file, 16<<20))
-	if decoder.Decode(&identity) != nil || (identity.Version != pendingChangeVersion && identity.Version != legacyPendingChangeVersion) || identity.ProjectID != projectID {
+	if decoder.Decode(&identity) != nil || (identity.Version != pendingChangeVersion && identity.Version != selfContainedPendingChangeVersion && identity.Version != legacyPendingChangeVersion) || identity.ProjectID != projectID {
 		return "invalid"
 	}
 	return "yes"

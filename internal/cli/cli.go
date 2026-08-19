@@ -24,13 +24,16 @@ import (
 	"sunaba/internal/dependency"
 	"sunaba/internal/firewall"
 	"sunaba/internal/image"
+	"sunaba/internal/lease"
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
+	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/trustedui"
+	"sunaba/internal/webgateway"
 	"sunaba/internal/workspace"
 )
 
@@ -149,38 +152,41 @@ func (a *app) projectInit(ctx context.Context, projectArgument, mode, modelAuth 
 	if err := persistConfigAndPolicy(configStore, projectState, policyPath, projectConfig, originRules, projectPolicy); err != nil {
 		return err
 	}
-	initialRoot := filepath.Join(projectState, "initial-snapshot")
-	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
-	if err != nil {
-		return err
-	}
-	initial, err := workspace.CreateProjectSnapshot(root, initialRoot, exportPolicy.Snapshot)
-	if err != nil {
-		return err
-	}
-	if err := writePrivateJSON(filepath.Join(projectState, "initial-snapshot.json"), initial); err != nil {
-		return err
-	}
 	createdState = false
 	createdConfig = false
-	fmt.Fprintf(a.output, "Registered Project %s (%s) in %s mode. Host configuration: %s\n", projectPolicy.ProjectID, root, projectPolicy.Mode, configPaths.Project)
+	fmt.Fprintf(a.output, "Registered Project %s (%s) in %s mode. Host configuration: %s\nRun 'sunaba snapshot preview' and approve its digest before the first VM is created.\n", projectPolicy.ProjectID, root, projectPolicy.Mode, configPaths.Project)
 	return nil
 }
 
 func (a *app) up(ctx context.Context, dir, mode string) error {
+	if mode != "" && mode != "secure" && mode != "dev" {
+		return fmt.Errorf("mode must be secure or dev")
+	}
 	projectPolicy, path, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
-	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
-	if err != nil {
-		return err
-	}
 	if mode != "" {
-		if mode != "secure" && mode != "dev" {
-			return fmt.Errorf("mode must be secure or dev")
-		}
-		if projectPolicy.Mode != mode {
+		// Re-read, check the runtime boundary, and persist while holding the
+		// same writer lock used by VM creation. Otherwise a stale `up --mode`
+		// can overwrite a concurrent config apply or race an old-policy VM.
+		err = func() error {
+			configLock, lockErr := a.store.AcquireConfigLock(projectPolicy.ProjectID)
+			if lockErr != nil {
+				return lockErr
+			}
+			defer configLock.Close()
+			current, currentPath, currentState, loadErr := a.loadPolicyLocked(dir)
+			if loadErr != nil {
+				return loadErr
+			}
+			if current.ProjectID != projectPolicy.ProjectID || current.ProjectRoot != projectPolicy.ProjectRoot || currentPath != path || currentState != projectState {
+				return fmt.Errorf("Project policy identity changed during mode update")
+			}
+			projectPolicy = current
+			if projectPolicy.Mode == mode {
+				return nil
+			}
 			if err := refuseActivePolicyChange(projectState); err != nil {
 				return err
 			}
@@ -195,10 +201,15 @@ func (a *app) up(ctx context.Context, dir, mode string) error {
 			}
 			projectPolicy.Mode = mode
 			projectPolicy.UpdatedAt = time.Now().UTC()
-			if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
-				return err
-			}
+			return a.savePolicyAndConfigLocked(path, projectPolicy)
+		}()
+		if err != nil {
+			return err
 		}
+	}
+	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
+	if err != nil {
+		return err
 	}
 	if projectPolicy.Mode == "dev" {
 		fmt.Fprintln(a.errors, "WARNING: dev mode permits direct Internet egress during the active Agent Session and does not provide exfiltration prevention.")
@@ -258,10 +269,17 @@ func (a *app) agent(ctx context.Context, dir string) (returnErr error) {
 	if info.ProjectID != projectPolicy.ProjectID {
 		return fmt.Errorf("active supervisor Project identity does not match policy")
 	}
-	if !time.Now().Before(info.ExpiresAt) {
+	if info.State == "running" && !time.Now().Before(info.ExpiresAt) {
 		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		return errors.Join(fmt.Errorf("Agent Session capability expired; export or recreate the stopped VM"), client.operation(pauseContext, "pause"))
+		err = client.operation(pauseContext, "pause")
+		cancel()
+		if err != nil {
+			return fmt.Errorf("revoke expired Agent Session: %w", err)
+		}
+		info, err = client.info(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	managedOpenCode := a.prepareManagedOpenCodeAsync(ctx)
 	if info.State == "paused" {
@@ -287,9 +305,18 @@ func (a *app) agent(ctx context.Context, dir string) (returnErr error) {
 		defer cancel()
 		return errors.Join(prepared.err, client.operation(pauseContext, "pause"))
 	}
+	tuiSessionRoot, err := createHostTUISessionRoot(info.RuntimeRoot, info.VMID, info.SessionID)
+	if err != nil {
+		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		return errors.Join(err, client.operation(pauseContext, "pause"))
+	}
+	defer func() {
+		returnErr = errors.Join(returnErr, removeHostTUISessionRoot(info.RuntimeRoot, info.VMID, info.SessionID, tuiSessionRoot))
+	}()
 	tui, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
 		Binary: prepared.binary, ManagedToolDir: prepared.dir, VerifiedExecutable: prepared.verified,
-		SessionRoot: info.RuntimeRoot, ServerURL: info.AttachURL,
+		SessionRoot: tuiSessionRoot, ServerURL: info.AttachURL,
 		GuestWorkspace: info.WorkspacePath, Password: info.ServerPassword,
 		ExpectedExecutableSHA256: activeLock.Manifest.OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
@@ -412,6 +439,66 @@ func (a *app) runSanitizedShell(ctx context.Context, execute func(context.Contex
 	return scanner.Err()
 }
 
+func (a *app) execGuest(ctx context.Context, dir, guestDirectory string, timeout time.Duration, arguments []string) (returnErr error) {
+	if len(arguments) == 0 {
+		return fmt.Errorf("sunaba exec requires a command after --")
+	}
+	if timeout < time.Second || timeout > 10*time.Minute {
+		return fmt.Errorf("exec timeout must be between 1s and 10m")
+	}
+	projectPolicy, _, projectState, err := a.loadPolicy(dir)
+	if err != nil {
+		return err
+	}
+	if _, err := a.requireActiveProjectDependency(projectPolicy); err != nil {
+		return err
+	}
+	if projectPolicy.Mode == "dev" {
+		return fmt.Errorf("sunaba exec currently requires secure mode; use the foreground sanitized shell for dev mode")
+	}
+	client, info, err := a.ensureSupervisor(ctx, projectPolicy.ProjectRoot, projectState)
+	if err != nil {
+		return err
+	}
+	defer client.close()
+	if info.State == "paused" {
+		if err := client.operation(ctx, "resume"); err != nil {
+			return err
+		}
+	}
+	defer func() {
+		pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		returnErr = errors.Join(returnErr, client.operation(pauseContext, "pause"))
+	}()
+	commandContext, cancel := context.WithTimeout(ctx, timeout)
+	result, err := client.exec(commandContext, guestDirectory, arguments)
+	cancel()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.output, "Command: argv (%d arguments)\nWorking directory: %s\nExit code: %d\nTimed out: %t\nStdout truncated: %t\nStderr truncated: %t\n", len(arguments), trustedui.SanitizeTerminal(guestDirectory), result.ExitCode, result.TimedOut, result.StdoutTruncated, result.StderrTruncated)
+	if result.Stdout != "" {
+		fmt.Fprintf(a.output, "Stdout:\n%s", result.Stdout)
+		if !strings.HasSuffix(result.Stdout, "\n") {
+			fmt.Fprintln(a.output)
+		}
+	}
+	if result.Stderr != "" {
+		fmt.Fprintf(a.output, "Stderr:\n%s", result.Stderr)
+		if !strings.HasSuffix(result.Stderr, "\n") {
+			fmt.Fprintln(a.output)
+		}
+	}
+	if result.TimedOut {
+		return fmt.Errorf("guest command timed out")
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("guest command exited with status %d", result.ExitCode)
+	}
+	return nil
+}
+
 func (a *app) status(ctx context.Context, dir string) error {
 	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
@@ -419,14 +506,28 @@ func (a *app) status(ctx context.Context, dir string) error {
 	}
 	states := make([]string, 0)
 	sessionExpiry := "none"
+	sessionRemaining := "not active"
 	idleDeadline := "none"
+	modelUsage := "unavailable (no active Agent Session)"
 	unexported := "none"
 	listErr := error(nil)
 	if client, clientErr := openSupervisorClient(projectState); clientErr == nil {
 		if info, infoErr := client.info(ctx); infoErr == nil && info.ProjectID == projectPolicy.ProjectID {
 			states = append(states, info.Container+"="+info.State+"/"+projectPolicy.Mode)
-			sessionExpiry = info.ExpiresAt.UTC().Format(time.RFC3339)
-			idleDeadline = info.IdleDeadline.UTC().Format(time.RFC3339)
+			if info.State == "running" {
+				sessionExpiry = info.ExpiresAt.UTC().Format(time.RFC3339)
+				idleDeadline = info.IdleDeadline.UTC().Format(time.RFC3339)
+				remaining := time.Until(info.ExpiresAt)
+				if remaining < 0 {
+					remaining = 0
+				}
+				sessionRemaining = remaining.Round(time.Second).String()
+				if info.ModelLimit > 0 {
+					modelUsage = fmt.Sprintf("%d/%d requests", info.ModelUsed, info.ModelLimit)
+				} else {
+					modelUsage = "unavailable (Supervisor did not expose a quota)"
+				}
+			}
 			unexported = "possible (run 'sunaba changes export' to compute the trusted Change Set)"
 		} else if infoErr != nil {
 			listErr = infoErr
@@ -455,13 +556,47 @@ func (a *app) status(ctx context.Context, dir string) error {
 	if change, pendingErr := loadPending(projectState, projectPolicy); pendingErr == nil {
 		pending = fmt.Sprintf("%s (%d changes)", change.ChangeSet.Digest, len(change.ChangeSet.Changes))
 	}
+	recoveryState := "none"
+	if retained, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
+		if retained.ProjectID != projectPolicy.ProjectID || retained.ProjectRoot != projectPolicy.ProjectRoot {
+			listErr = errors.Join(listErr, fmt.Errorf("export recovery identity does not match Project policy"))
+		} else {
+			info, inspectErr := a.runtime.Inspect(ctx, retained.Container)
+			if inspectErr != nil || info.Name != retained.Container || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != retained.ProjectID || info.Labels["dev.sunaba.vm"] != retained.VMID || info.Labels["dev.sunaba.mode"] != retained.RuntimeMode() {
+				listErr = errors.Join(listErr, fmt.Errorf("export recovery VM does not match its host ownership record"))
+			} else {
+				recoveryState = fmt.Sprintf("stopped VM %s retained after refused export; retry 'sunaba changes export', explicitly discard only External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'", retained.Container)
+			}
+		}
+	} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		listErr = errors.Join(listErr, fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr))
+	}
 	gitState := "disabled"
 	if len(projectPolicy.Git.Remotes) > 0 {
 		gitState = fmt.Sprintf("enabled (%d fixed HTTPS remotes)", len(projectPolicy.Git.Remotes))
 	}
 	webState := "disabled"
 	if projectPolicy.Web.Enabled {
-		webState = fmt.Sprintf("enabled (%d origin rules, pinned blocklist %s)", len(projectPolicy.Web.Rules), projectPolicy.Web.BlocklistSHA256)
+		webState = fmt.Sprintf("enabled (%d origin rules, blocklist unavailable)", len(projectPolicy.Web.Rules))
+		manifestData, manifestErr := readOwnedPrivateFile(filepath.Join(projectState, "web", "blocklist.json"), 64<<10)
+		if manifestErr == nil {
+			if manifest, decodeErr := webgateway.ParseBlocklistManifest(manifestData); decodeErr == nil && manifest.SHA256 == projectPolicy.Web.BlocklistSHA256 {
+				state := "valid"
+				blocklistData, dataErr := readOwnedPrivateFile(filepath.Join(projectState, "web", "blocklist.hosts"), 8<<20)
+				if dataErr != nil {
+					state = "invalid/unavailable: " + dataErr.Error()
+				} else if _, loadErr := webgateway.LoadBlocklist(manifest, blocklistData, time.Now()); loadErr != nil {
+					state = "invalid or expired (Web Gateway fails closed): " + loadErr.Error()
+				}
+				webState = fmt.Sprintf("enabled (%d origin rules, blocklist %s, expires %s, %s)", len(projectPolicy.Web.Rules), manifest.SHA256, manifest.ExpiresAt.UTC().Format(time.RFC3339), state)
+			} else if decodeErr != nil {
+				webState = fmt.Sprintf("enabled (%d origin rules, invalid blocklist: %s)", len(projectPolicy.Web.Rules), decodeErr)
+			} else {
+				webState = fmt.Sprintf("enabled (%d origin rules, blocklist digest mismatch)", len(projectPolicy.Web.Rules))
+			}
+		} else {
+			webState = fmt.Sprintf("enabled (%d origin rules, blocklist unavailable: %s)", len(projectPolicy.Web.Rules), manifestErr)
+		}
 	}
 	configState := "invalid"
 	configPath := "unavailable"
@@ -486,25 +621,34 @@ func (a *app) status(ctx context.Context, dir string) error {
 	if _, err := a.requireActiveProjectDependency(projectPolicy); err != nil {
 		dependencyState = "not active: " + err.Error()
 	}
-	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nDependency lock: %s\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nGit Gateway: %s\nWeb Gateway: %s\n",
+	fmt.Fprintf(a.output, "Project: %s\nProject ID: %s\nMode: %s\nPolicy schema: %d\nHost configuration: %s (%s)\nDependency lock: %s\nOpenCode: %s\nApple Container: %s\nAgent image: %s\nSession VMs: %s\nSession expiry: %s\nSession remaining: %s\nIdle deadline: %s\nSession policy: ttl_seconds=%d idle_seconds=%d\nUnexported VM changes: %s\nDev export recovery: %s\nPending Change Set: %s\nResources: cpus=%d memory=%s disk_bytes=%d nproc=%d fsize=%d nofile=%d\nModel authentication: %s\nModel allowlist: %s\nModel quota policy: requests=%d concurrent=%d request_bytes=%d response_bytes=%d\nModel quota usage: %s\nGit Gateway: %s\nWeb Gateway: %s\n",
 		projectPolicy.ProjectRoot, projectPolicy.ProjectID, projectPolicy.Mode, projectPolicy.SchemaVersion,
 		configPath, configState, dependencyState,
 		projectPolicy.Dependency.OpenCode, projectPolicy.Dependency.AppleContainer, projectPolicy.Dependency.AgentImage,
-		sessionVMs, sessionExpiry, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, pending,
+		sessionVMs, sessionExpiry, sessionRemaining, idleDeadline, projectPolicy.Session.TTLSeconds, projectPolicy.Session.IdleSeconds, unexported, recoveryState, pending,
 		projectPolicy.Resources.CPUs, projectPolicy.Resources.Memory, projectPolicy.Resources.DiskBytes, projectPolicy.Resources.ProcessMax, projectPolicy.Resources.FileSizeMax, projectPolicy.Resources.OpenFileMax,
 		projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","),
-		projectPolicy.Model.MaxRequests, projectPolicy.Model.MaxConcurrent, projectPolicy.Model.MaxRequestBytes, projectPolicy.Model.MaxResponseBytes,
-		gitState, webState)
+		projectPolicy.Model.MaxRequests, projectPolicy.Model.MaxConcurrent, projectPolicy.Model.MaxRequestBytes, projectPolicy.Model.MaxResponseBytes, modelUsage,
+		gitState, trustedui.SanitizeTerminal(webState))
 	return listErr
 }
 
-func (a *app) changes(ctx context.Context, action, dir string, reviewOptions workspace.ReviewOptions) error {
+func (a *app) changes(ctx context.Context, action, dir string, reviewOptions workspace.ReviewOptions, discardExternalGit bool) error {
 	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
 		return err
 	}
 	switch action {
 	case "export":
+		recoveryExported := false
+		if _, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
+			if err := a.exportDevRecovery(ctx, projectPolicy, projectState, discardExternalGit); err != nil {
+				return err
+			}
+			recoveryExported = true
+		} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
+		}
 		pending, pendingErr := loadPending(projectState, projectPolicy)
 		if pendingErr != nil {
 			pendingPath := filepath.Join(projectState, "pending", "change.json")
@@ -512,6 +656,10 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 				return pendingErr
 			} else if !errors.Is(err, os.ErrNotExist) {
 				return err
+			}
+			if recoveryExported {
+				fmt.Fprintln(a.output, "Recovery export completed with no Project changes; the retained VM was removed.")
+				return nil
 			}
 			client, err := openSupervisorClient(projectState)
 			if err != nil {
@@ -521,7 +669,7 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 				return err
 			}
 			exportContext, cancel := context.WithTimeout(ctx, 12*time.Minute)
-			err = client.operation(exportContext, "export")
+			err = client.export(exportContext, discardExternalGit)
 			cancel()
 			client.close()
 			if err != nil {
@@ -583,11 +731,11 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 		if err != nil {
 			return err
 		}
-		compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+		snapshotPolicy, err := pendingSnapshotPolicy(pending, projectPolicy)
 		if err != nil {
 			return err
 		}
-		applied, err := hostapply.Apply(hostapply.Config{Store: a.store, ProjectRoot: pending.ProjectRoot, ProjectID: pending.ProjectID, MergedRoot: pending.MergedRoot, Baseline: pending.Baseline, Merged: pending.Merged, ChangeSet: pending.ChangeSet, Approvals: approvals, Grant: grant, Audit: recorder, SnapshotPolicy: compiled.Snapshot})
+		applied, err := hostapply.Apply(hostapply.Config{Store: a.store, ProjectRoot: pending.ProjectRoot, ProjectID: pending.ProjectID, MergedRoot: pending.MergedRoot, Baseline: pending.Baseline, Merged: pending.Merged, ChangeSet: pending.ChangeSet, Approvals: approvals, Grant: grant, Audit: recorder, SnapshotPolicy: snapshotPolicy})
 		if err != nil {
 			return err
 		}
@@ -605,7 +753,7 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 }
 
 func buildPendingReview(pending pendingChange, projectPolicy policy.ProjectPolicy, options workspace.ReviewOptions, allowLegacyMetadata bool) (workspace.Review, error) {
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	snapshotPolicy, err := pendingSnapshotPolicy(pending, projectPolicy)
 	if err != nil {
 		return workspace.Review{}, err
 	}
@@ -613,13 +761,28 @@ func buildPendingReview(pending pendingChange, projectPolicy policy.ProjectPolic
 	if pending.Version == legacyPendingChangeVersion {
 		baselineRoot = pending.ProjectRoot
 		if allowLegacyMetadata {
-			current, currentErr := workspace.BuildSnapshotManifest(baselineRoot, compiled.Snapshot)
+			current, currentErr := workspace.BuildSnapshotManifest(baselineRoot, snapshotPolicy)
 			if currentErr != nil || current.Digest != pending.Baseline.Digest {
-				return workspace.BuildMetadataOnlyReview(pending.Baseline, pending.Merged, pending.ChangeSet, compiled.Snapshot, options)
+				return workspace.BuildMetadataOnlyReview(pending.Baseline, pending.Merged, pending.ChangeSet, snapshotPolicy, options)
 			}
 		}
 	}
-	return workspace.BuildReview(baselineRoot, pending.MergedRoot, pending.Baseline, pending.Merged, pending.ChangeSet, compiled.Snapshot, options)
+	return workspace.BuildReview(baselineRoot, pending.MergedRoot, pending.Baseline, pending.Merged, pending.ChangeSet, snapshotPolicy, options)
+}
+
+func pendingSnapshotPolicy(pending pendingChange, projectPolicy policy.ProjectPolicy) (workspace.SnapshotPolicy, error) {
+	if pending.Version == pendingChangeVersion {
+		compiled, err := policy.ValidateCompiledExportPolicy(pending.SnapshotPolicy, pending.ExportPolicy)
+		if err != nil || compiled.Digest != pending.ExportPolicyDigest {
+			return workspace.SnapshotPolicy{}, fmt.Errorf("pending Change Set saved export policy is invalid")
+		}
+		return compiled.Snapshot, nil
+	}
+	compiled, err := policy.CompileLegacyExportPolicyV1(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	if err != nil {
+		return workspace.SnapshotPolicy{}, err
+	}
+	return compiled.Snapshot, nil
 }
 
 func (a *app) approvals(ctx context.Context, dir string) error {
@@ -658,6 +821,19 @@ func (a *app) recreate(ctx context.Context, dir string, discard bool) error {
 			return err
 		}
 	}
+	if _, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
+		if !discard {
+			return fmt.Errorf("a stopped VM is retained after an incomplete export; retry 'sunaba changes export' or pass --discard-pending explicitly")
+		}
+		if err := removeRecoverySupervisorLocator(projectState); err != nil {
+			return err
+		}
+		if err := a.discardDevRecovery(ctx, projectPolicy.ProjectID, projectState); err != nil {
+			return err
+		}
+	} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
+	}
 	if client, err := openSupervisorClient(projectState); err == nil {
 		operation := "export"
 		if discard {
@@ -682,7 +858,13 @@ func (a *app) recreate(ctx context.Context, dir string, discard bool) error {
 		}
 	} else if !errors.Is(err, errNoSupervisor) {
 		return err
-	} else if err := a.cleanupOrphans(ctx); err != nil {
+	}
+	if discard {
+		if err := a.discardUnrecordedStoppedVMs(ctx, projectPolicy.ProjectID); err != nil {
+			return err
+		}
+	}
+	if err := a.cleanupOrphans(ctx); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.output, "Project %s will start its next Agent Session from a clean host snapshot after any pending Change Set is applied or discarded.\n", projectPolicy.ProjectID)
@@ -719,8 +901,20 @@ func (a *app) down(ctx context.Context, selector projectSelector) error {
 		}
 	} else if !errors.Is(err, errNoSupervisor) {
 		return err
-	} else if err := a.cleanupOrphans(ctx); err != nil {
-		return err
+	} else {
+		if retained, recoveryErr := recovery.Load(target.ProjectState); recoveryErr == nil {
+			info, inspectErr := a.runtime.Inspect(ctx, retained.Container)
+			if retained.ProjectID != target.ProjectID || inspectErr != nil || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != retained.ProjectID || info.Labels["dev.sunaba.vm"] != retained.VMID || info.Labels["dev.sunaba.mode"] != retained.RuntimeMode() {
+				return fmt.Errorf("export recovery VM does not match its host ownership record")
+			}
+			fmt.Fprintln(a.output, "Export recovery VM is already stopped with session capabilities revoked; retry 'sunaba changes export' or explicitly discard the VM. For a dev External Git refusal, '--discard-external-git' keeps only the main workspace.")
+			return nil
+		} else if _, statErr := os.Lstat(recovery.Path(target.ProjectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
+		}
+		if err := a.cleanupOrphans(ctx); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintln(a.output, "No managed persistent Agent VM was active; guardless owned resources were recovered.")
 	return nil
@@ -740,6 +934,19 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect pending Change Set: %w", err)
+	}
+	if _, recoveryErr := recovery.Load(target.ProjectState); recoveryErr == nil {
+		if !discard {
+			return fmt.Errorf("a stopped VM contains unexported changes; run 'sunaba changes export' or pass --discard-pending")
+		}
+		if err := removeRecoverySupervisorLocator(target.ProjectState); err != nil {
+			return err
+		}
+		if err := a.discardDevRecovery(ctx, target.ProjectID, target.ProjectState); err != nil {
+			return err
+		}
+	} else if _, statErr := os.Lstat(recovery.Path(target.ProjectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
 	}
 	if client, err := openSupervisorClient(target.ProjectState); err == nil {
 		info, infoErr := client.info(ctx)
@@ -774,6 +981,11 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 		}
 	} else if !errors.Is(err, errNoSupervisor) {
 		return err
+	}
+	if discard {
+		if err := a.discardUnrecordedStoppedVMs(ctx, target.ProjectID); err != nil {
+			return err
+		}
 	}
 	if err := a.cleanupOrphans(ctx); err != nil {
 		return err
@@ -810,6 +1022,72 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 	return nil
 }
 
+func (a *app) discardUnrecordedStoppedVMs(ctx context.Context, projectID string) error {
+	items, err := a.runtime.List(ctx)
+	if err != nil {
+		return err
+	}
+	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
+	if err != nil {
+		return err
+	}
+	registry := &lease.Registry{Root: filepath.Join(a.store.Root, "leases")}
+	for _, listed := range items {
+		if listed.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || listed.Labels["dev.sunaba.project"] != projectID {
+			continue
+		}
+		info, err := a.runtime.Inspect(ctx, listed.Name)
+		if err != nil {
+			return err
+		}
+		if info.State != runtime.StateStopped {
+			continue
+		}
+		vmID, mode := info.Labels["dev.sunaba.vm"], info.Labels["dev.sunaba.mode"]
+		if vmID == "" || (mode != "secure" && mode != "dev") || info.Name != "sunaba-"+projectID+"-"+vmID || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != projectID {
+			return fmt.Errorf("refusing to discard stopped VM without exact Project ownership: %s", listed.Name)
+		}
+		guard, err := registry.AcquireGuard(vmID)
+		if errors.Is(err, lease.ErrGuardHeld) {
+			return fmt.Errorf("refusing to discard stopped VM still owned by a live Supervisor: %s", info.Name)
+		}
+		if err != nil {
+			return err
+		}
+		event := audit.BoundaryEvent{Category: "recovery", Action: "stopped_vm.discard", Outcome: "started", ProjectID: projectID, VMID: info.Name}
+		if err := recorder.Append(event); err != nil {
+			_ = guard.Close()
+			return err
+		}
+		removeErr := a.runtime.Remove(ctx, info.Name)
+		if removeErr == nil {
+			runtimeBase := recovery.RuntimeBase(filepath.Join(a.store.Root, "projects", projectID), vmID)
+			if mode == "secure" {
+				runtimeBase = recovery.SecureRuntimeBase(projectID, vmID)
+			}
+			if _, statErr := os.Lstat(runtimeBase); statErr == nil {
+				if verifyPrivateDirectory(runtimeBase) != nil {
+					removeErr = fmt.Errorf("refusing to remove unsafe stopped VM runtime: %s", runtimeBase)
+				} else {
+					removeErr = os.RemoveAll(runtimeBase)
+				}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				removeErr = statErr
+			}
+		}
+		event.Outcome = "allowed"
+		if removeErr != nil {
+			event.Outcome = "failed"
+		}
+		auditErr := recorder.Append(event)
+		closeErr := guard.Close()
+		if removeErr != nil || auditErr != nil || closeErr != nil {
+			return errors.Join(removeErr, auditErr, closeErr)
+		}
+	}
+	return nil
+}
+
 func (a *app) firewall(ctx context.Context, action, subnet, gateway, ipv6 string) error {
 	switch action {
 	case "disable":
@@ -838,6 +1116,18 @@ func (a *app) loadPolicy(directory string) (policy.ProjectPolicy, string, string
 	if err != nil {
 		return policy.ProjectPolicy{}, "", "", err
 	}
+	return a.validateDeclarativePolicy(loaded, path, projectState)
+}
+
+func (a *app) loadPolicyLocked(directory string) (policy.ProjectPolicy, string, string, error) {
+	loaded, path, projectState, err := a.loadEffectivePolicyLocked(directory)
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", err
+	}
+	return a.validateDeclarativePolicy(loaded, path, projectState)
+}
+
+func (a *app) validateDeclarativePolicy(loaded policy.ProjectPolicy, path, projectState string) (policy.ProjectPolicy, string, string, error) {
 	configStore, err := a.projectConfigStore()
 	if err != nil {
 		return policy.ProjectPolicy{}, "", "", err
@@ -857,6 +1147,23 @@ func (a *app) loadEffectivePolicy(directory string) (policy.ProjectPolicy, strin
 	if err != nil {
 		return policy.ProjectPolicy{}, "", "", err
 	}
+	configLock, err := a.store.AcquireConfigLock(state.ProjectID(root))
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", err
+	}
+	defer configLock.Close()
+	return a.loadEffectivePolicyRootLocked(root)
+}
+
+func (a *app) loadEffectivePolicyLocked(directory string) (policy.ProjectPolicy, string, string, error) {
+	root, err := state.ResolveProjectPath(directory)
+	if err != nil {
+		return policy.ProjectPolicy{}, "", "", err
+	}
+	return a.loadEffectivePolicyRootLocked(root)
+}
+
+func (a *app) loadEffectivePolicyRootLocked(root string) (policy.ProjectPolicy, string, string, error) {
 	projectState := a.projectState(root)
 	path := filepath.Join(projectState, "policy.json")
 	if err := recoverConfigPolicyTransaction(projectState); err != nil {
@@ -892,6 +1199,15 @@ func (a *app) projectConfigStore() (*projectconfig.Store, error) {
 }
 
 func (a *app) savePolicyAndConfig(policyPath string, effective policy.ProjectPolicy) error {
+	configLock, err := a.store.AcquireConfigLock(effective.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer configLock.Close()
+	return a.savePolicyAndConfigLocked(policyPath, effective)
+}
+
+func (a *app) savePolicyAndConfigLocked(policyPath string, effective policy.ProjectPolicy) error {
 	operationLock, err := a.store.AcquireOperationReadLock()
 	if err != nil {
 		return err
@@ -1044,6 +1360,14 @@ func newSessionID() (string, error) {
 		return "", err
 	}
 	return "s" + hex.EncodeToString(raw), nil
+}
+
+func newVMID() (string, error) {
+	raw := make([]byte, 12)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return "v" + hex.EncodeToString(raw), nil
 }
 
 func makeRuntimeBase() (string, error) {

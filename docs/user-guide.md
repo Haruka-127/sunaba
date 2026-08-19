@@ -215,6 +215,15 @@ sunaba project list
 
 登録後の通常手順は[「初めてのプロジェクト」ワークフロー](./workflows.md#初めてのプロジェクト)を参照してください。
 
+`project init`はSnapshotを作りません。VM作成前に対象をpreviewし、件数、容量、大容量file、秘密らしいfile名を確認してexact digestを承認します。内容や秘密の値はpreviewへ表示されません。
+
+```sh
+sunaba snapshot preview --dir /path/to/project
+sunaba snapshot approve --dir /path/to/project --digest <表示されたdigest>
+```
+
+Projectが変わった後に新しいVMを作る場合は、再度previewと承認が必要です。
+
 ## Project設定
 
 Project設定は作業ツリー内ではなく、ホスト専用の次のdirectoryへ保存されます。
@@ -245,9 +254,19 @@ sunaba config diff --dir /path/to/project
 sunaba config apply --dir /path/to/project
 ```
 
-設定変更は、activeまたはpaused VMとpending Change Setがないときだけ適用できます。先に`changes export`、`changes review`、`changes apply`、`recreate --discard-pending`などで現在の状態を処理してください。未適用または不正な設定がある間、`up`、`agent`、`shell`はfail closedで拒否されます。
+`config diff`と`config apply`は変更を適用時点ごとに表示します。audit retentionは即時、Model/Git/Web、quota、session TTL/idle、blocklistは次のAgent Sessionから有効です。active Sessionのauthorityは変わらず、pause後の新しいSession ID、token、handlerへだけ反映されます。この2種類はpaused VMやpending Change Setを保持したまま変更できます。
 
-`project.json`には利用者が選ぶmode、resource、session、Model、Git、Web、export、auditの設定だけを記述します。dependency digest、credential、capability、push承認方針、Protected Pathなど、sunabaが強制する値は変更できません。内部の実効policyは手作業で編集しないでください。
+mode、resource、dependency/image、Snapshot除外、export上限、Protected PathはVM再作成が必要です。既存VMがある場合はapplyを拒否するため、先に`changes export`し、必要に応じてpendingをreview/applyしてから`recreate`してください。pending Change Setは作成時のexport policyを自己完結して保持するため、後続の無関係な設定変更後もreview/applyできます。未適用または不正な設定がある間、`up`、`agent`、`shell`はfail closedで拒否されます。
+
+`project.json`には利用者が選ぶmode、resource、session、Model、Git、Web、Snapshot除外、export、auditの設定だけを記述します。dependency digest、credential、capability、push承認方針、Protected Pathなど、sunabaが強制する値は変更できません。内部の実効policyは手作業で編集しないでください。
+
+Snapshotから外すroot-relative literal pathは`snapshot.exclude`へ記述します。`.gitignore`は自動適用されません。literal entryだけを候補として明示importできます。import後は`project.json`を確認し、`config apply`します。
+
+```sh
+sunaba snapshot exclude import-gitignore --dir /path/to/project
+sunaba config diff --dir /path/to/project
+sunaba config apply --dir /path/to/project
+```
 
 ## Modelを選ぶ
 
@@ -266,7 +285,7 @@ sunaba model set \
   --dir /path/to/project
 ```
 
-既存Projectの認証方式を変更するには、VMとpending Change Setを処理したあとで次を実行します。
+既存Projectの認証方式は次のコマンドで変更できます。実行中Sessionは変更されず、pause後に発行する次のSessionから有効です。
 
 ```sh
 sunaba model auth oauth --dir /path/to/project
@@ -287,7 +306,7 @@ Model Gatewayは常に必要です。Git GatewayとWeb Gatewayは、Projectで�
 
 dev modeは、foregroundの`agent`または`shell`が動いている間だけpublic Internetへの直接接続を許可します。この間の情報流出防止は保証しません。
 
-host、LAN、private/link-local/metadata、他VM、unsolicited inbound、host credential、host worktreeとの境界は維持します。session終了時はegressをdeny-allへ切り替えてからVMをexport・破棄します。同時にactiveにできるdev sessionは1つです。
+host、LAN、private/link-local/metadata、他VM、unsolicited inbound、host credential、host worktreeとの境界は維持します。session終了時はegressをdeny-allへ切り替えてからVMをexport・破棄します。exportが作業損失防止guardに拒否された場合は、capabilityと専用networkを削除した停止VMとして保持します。同時にactiveにできるdev sessionは1つです。
 
 dev modeのpf操作は、[ホスト操作の許可範囲](./plan/allowed-host-operations.md)に記載された`sunaba firewall`操作だけに限定されます。一般的なpf変更や`pfctl -d`は使用しないでください。
 
@@ -300,15 +319,23 @@ sunaba up --dir /path/to/project
 sunaba agent --dir /path/to/project
 ```
 
-secure modeの`up`はVMを作成・検証してpaused状態にします。`agent`はVM内のOpenCode serverと、ホスト上の隔離されたOpenCode TUIを同時に管理します。TUIを終了するとGatewayを失効させ、VMをpauseします。session期限内であれば、次の`agent`で同じVMと編集状態を再利用できます。
+secure modeの`up`はVMを作成・検証してpaused状態にします。`agent`は開始ごとに新しいSession ID、Gateway token、server password、TTLを発行し、VM内のOpenCode serverとホスト上の隔離されたOpenCode TUIを同時に管理します。TUIを終了するとそのSessionの資格情報を不可逆に失効させ、VMをpauseします。次の`agent`は新しい資格情報で同じVMと編集状態を再利用でき、前SessionのTTL到達後もVMの再作成は不要です。
 
-単発のcommandを確認したい場合は、sanitized shellを使います。
+複数のcommandを順に試す場合は、sanitized shellを使います。
 
 ```sh
 sunaba shell --dir /path/to/project
 ```
 
 shellは1行ずつcommandを受け付け、Ctrl-Dで終了します。command、時間、出力量には上限があり、出力はhost terminal sanitizerを通ります。interactive TTY、raw `container exec`、未検証PTYの代替ではありません。
+
+secure modeで1回だけcommandを実行する場合は`exec`を使います。`--`以後はhost shell文字列ではなくargvとしてguestへ渡され、`--cwd`はProject workspaceからの相対pathです。
+
+```sh
+sunaba exec --dir /path/to/project --cwd . --timeout 2m -- go test ./...
+```
+
+結果はstdout、stderr、exit code、timeout、各streamのtruncationを分けて表示します。非zero exitまたはtimeoutでは`sunaba`も非zeroで終了します。host shellのglob、pipe、redirect、command substitutionをsunabaが実行することはありません。shell自身が`--`より前に展開しないよう、必要ならargumentをquoteしてください。dev modeの単発`exec`は直接egress入口を増やさないため拒否され、対話`sunaba shell`を使用します。
 
 ## 変更をホストへ反映する
 
@@ -319,6 +346,18 @@ sunaba changes export --dir /path/to/project
 ```
 
 exportはVMをfreeze・破棄し、追加、変更、削除、renameをホスト側で再構成します。unsafeなpath、symlink、hardlink、special file、`.git/`、sunaba管理領域、上限超過はホスト作業ツリーへ到達する前に拒否されます。
+
+検証済みChange Setをhost-only stateへ保存できなかった場合は、secure/devのどちらでも停止VMとfrozen成果物を保持します。容量や権限の問題を解消してから同じ`changes export`を再実行すると、同一成果物のpending確定を再試行します。明示的なdiscardなしに通常cleanupが停止VMを削除することはありません。
+
+既定workspace以外に作ったGit cloneにdirty fileまたは未push commitがある場合、exportは作業損失を避けるため拒否します。dev foreground終了時に拒否された場合もVMは削除されず、direct egress、capability、専用networkを失った停止recovery状態になります。`sunaba status`で対象VMと回収コマンドを確認してください。
+
+状態を整理した後の通常exportは`changes export`で再試行します。External Gitのworking tree/historyは捨て、main workspaceだけをChange Set化する場合に限り、損失を理解したうえで明示します。
+
+```sh
+sunaba changes export --discard-external-git --dir /path/to/project
+```
+
+VM全体を破棄する場合は`sunaba recreate --discard-pending`または`sunaba destroy --yes --discard-pending`を使います。これらのflagがない操作や通常cleanupはrecovery VMを削除しません。
 
 exportされたbaselineとMerged Viewはhost-only stateへ固定されます。次に、host worktreeへ書き込まずに内容差分を確認します。
 
@@ -340,7 +379,7 @@ apply後はホスト上で通常どおりdiff、test、code reviewを行い、�
 
 ## Git Gateway
 
-Git Gatewayを使う場合は、VMとpending Change Setがない状態で、credentialを含まない固定HTTPS `.git` URLを登録します。SSH transportとGit LFS endpointは対象外です。
+Git Gatewayを使う場合は、credentialを含まない固定HTTPS `.git` URLを登録します。設定は次のAgent Sessionから有効で、実行中Sessionのremoteやcredential境界は変更しません。SSH transportとGit LFS endpointは対象外です。
 
 ```sh
 sunaba git remote add \
@@ -352,15 +391,17 @@ sunaba git remote list --dir /path/to/project
 
 hostのGit credential helperが、このURLのcredentialを非対話で取得できるようにしておいてください。tokenやpasswordをURLへ埋め込まないでください。
 
-VM内では通常の`git fetch`、`git pull`、`git push`を使えます。clone、fetch、pullは固定remoteとquotaの範囲で承認なしに利用できます。pushの初回はpending approvalを作って拒否されます。別のhost terminalで次を実行し、remote、ref、old/new object ID、force/delete、nonceを確認してください。
+VM内では通常の`git fetch`、`git pull`、`git push`を使えます。clone、fetch、pullは固定remoteとquotaの範囲で承認なしに利用できます。pushの初回はpending approvalを作って拒否されます。別のhost terminalで次を実行し、一覧のremote、ref、old/new object ID、force/delete、有効期限を確認してください。
 
 ```sh
 sunaba approvals --dir /path/to/project
 ```
 
+`approve <番号またはID>`、`reject <番号またはID>`、`skip`から選びます。nonceはhost内部で選択対象とdecisionへ束縛されるため、表示された長いnonceを手入力する必要はありません。
+
 承認後、VM内で内容が変わっていない同じpushを期限内に再実行します。承認はone-shotで、remote、object、ref、force/deleteのいずれかが変わると再承認が必要です。
 
-VMの既定workspaceはhost Snapshotから作るsynthetic Git repositoryです。外部repositoryのhistoryが必要な作業は、登録済みGateway remoteからVM内の別directoryへcloneしてください。詳細な手順は[「外部Git履歴を使う」ワークフロー](./workflows.md#外部git履歴を使う)を参照してください。
+VMの既定workspaceはhost Snapshotとguest-local gitdirを組み合わせたsynthetic Git repositoryです。登録remoteはこのrepositoryへ設定されるため、外部historyは既定workspaceで`git fetch origin`して参照します。Change Set対象外の別directoryへcloneしないでください。詳細な手順は[「外部Git履歴を使う」ワークフロー](./workflows.md#外部git履歴を使う)を参照してください。
 
 ```sh
 sunaba git remote remove --name origin --dir /path/to/project
@@ -425,10 +466,12 @@ Projectを対象にするcommandは、通常次のいずれかで対象を選び
 | `sunaba project list` | 登録済みProjectを一覧表示する |
 | `sunaba project list --active` | 到達可能なSupervisorまたはrunning VMがあるProjectだけを表示する |
 | `sunaba status` | mode、VM、session、quota、Gateway、pending Change Setを確認する |
+| `sunaba doctor` | hostとProjectのread-only診断を項目別に実行する |
 | `sunaba changes review` | pending Change Setの内容とriskをhostへ適用せず確認する |
 | `sunaba up` | secure VMを準備してpauseする。devではforeground session用artifactだけを準備する |
 | `sunaba agent` | OpenCode sessionを開始する |
 | `sunaba shell` | sanitized shellを開始する |
+| `sunaba exec` | secure VM内でargv指定の単発commandを実行する |
 | `sunaba down` | secure VMを停止し、隔離された状態を保持する |
 | `sunaba recreate` | 現在のVMを処理し、次回をclean Snapshotから開始する |
 | `sunaba destroy` | sunabaのProject stateとhost-only設定を削除する |
@@ -468,6 +511,7 @@ sunaba destroy \
 まず次を確認します。
 
 ```sh
+sunaba doctor --dir /path/to/project
 container system version
 sunaba versions show
 sunaba project list
@@ -477,13 +521,15 @@ sunaba credentials openai oauth status
 sunaba credentials openai api-key status
 ```
 
+`doctor`はplatform/architecture、helper binary、固定OpenCode v1、Apple Container、active image/version lock、state/runtime directory、global/Project config、blocklistを変更せず検査します。各項目を`PASS` / `WARN` / `FAIL`で示し、`FAIL`があれば非zeroで終了します。診断中にsetup、設定migration、container起動、host設定変更は行いません。`status`はactive Sessionの残り時間とModel request使用量/上限、blocklistの状態と期限を表示し、取得できない値は`unavailable`と明示します。tokenやpasswordは表示しません。
+
 よくある状態と対応:
 
 - `credential is unavailable`: Projectの認証方式に合わせて`oauth login`または`api-key set`をやり直す
 - `credential helper`: hostのGit credential helperが登録済みHTTPS URLを非対話で解決できるか確認する
-- `cannot change ... active`: 先に`changes export`または`recreate`でVMを処理する
+- `require VM recreation`: mode、resource、Snapshot/export等のVM-bound変更です。先に`changes export`して`recreate`する
 - pending Change Setがある: `changes apply`で反映するか、破棄を明示して`recreate`または`destroy`する
-- `capability expired`: `changes export`で成果物を保存するか、`recreate`でclean環境へ移る
+- `capability expired`: 現Sessionをfail closedでpauseする。次の`agent`または`shell`で同じVMへ新しいSessionを開始する
 - baseline競合: host側の変更を整理し、新しいSnapshotから作業をやり直す
 - OpenCode versionまたはdigest不一致: `sunaba versions show`でactive lockのexact versionを確認し、そのversionの公式Apple silicon artifactをmacOSへ再インストールする
 - Web blocklist期限切れ: VMがない状態で`web refresh`を実行する

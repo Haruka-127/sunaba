@@ -18,6 +18,10 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"sunaba/internal/audit"
+	"sunaba/internal/cleanup"
+	"sunaba/internal/lease"
+	"sunaba/internal/recovery"
 	"sunaba/internal/trustedui"
 )
 
@@ -52,6 +56,11 @@ func openSupervisorClient(projectState string) (*supervisorClient, error) {
 	if err != nil || unix.Lstat(locator.Socket, &stat) != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) {
 		return nil, fmt.Errorf("active supervisor socket is unavailable or unsafe")
 	}
+	probe, err := net.DialTimeout("unix", locator.Socket, 250*time.Millisecond)
+	if err != nil {
+		return nil, errStaleSupervisor
+	}
+	_ = probe.Close()
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", locator.Socket)
 	}}
@@ -76,8 +85,17 @@ func (c *supervisorClient) info(ctx context.Context) (supervisorInfo, error) {
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	var info supervisorInfo
-	if decoder.Decode(&info) != nil || decoder.Decode(&struct{}{}) != io.EOF || info.Version != 1 || info.ProjectID == "" || info.SessionID == "" || info.Container != "sunaba-"+info.ProjectID+"-"+info.SessionID || !filepath.IsAbs(info.RuntimeRoot) || filepath.Dir(info.RuntimeRoot) != filepath.Dir(c.socket) || !filepath.IsAbs(info.WorkspacePath) || info.AttachURL == "" || len(info.ServerPassword) < 32 || info.ExpiresAt.IsZero() || info.IdleSeconds < 1 || info.IdleDeadline.IsZero() {
+	if decoder.Decode(&info) != nil || decoder.Decode(&struct{}{}) != io.EOF || info.Version != 2 || info.ProjectID == "" || info.VMID == "" || info.Container != "sunaba-"+info.ProjectID+"-"+info.VMID || !filepath.IsAbs(info.RuntimeRoot) || filepath.Base(info.RuntimeRoot) != "sunaba-vm-"+info.VMID || filepath.Dir(info.RuntimeRoot) != filepath.Dir(c.socket) || !filepath.IsAbs(info.WorkspacePath) || info.IdleSeconds < 1 || info.IdleDeadline.IsZero() {
 		return supervisorInfo{}, fmt.Errorf("active supervisor returned invalid session identity")
+	}
+	if info.State == "running" && (info.SessionID == "" || info.AttachURL == "" || len(info.ServerPassword) < 32 || info.ExpiresAt.IsZero()) {
+		return supervisorInfo{}, fmt.Errorf("active supervisor returned incomplete Agent Session authority")
+	}
+	if info.ModelUsed < 0 || info.ModelLimit < 0 || info.ModelUsed > info.ModelLimit {
+		return supervisorInfo{}, fmt.Errorf("active supervisor returned invalid model quota usage")
+	}
+	if info.State == "paused" && (info.SessionID != "" || info.AttachURL != "" || info.ServerPassword != "" || !info.ExpiresAt.IsZero()) {
+		return supervisorInfo{}, fmt.Errorf("paused Project VM exposed revoked Agent Session authority")
 	}
 	return info, nil
 }
@@ -88,7 +106,22 @@ func (c *supervisorClient) operation(ctx context.Context, operation string) erro
 	default:
 		return fmt.Errorf("invalid supervisor operation")
 	}
+	if operation == "export" {
+		return c.export(ctx, false)
+	}
 	response, err := c.request(ctx, http.MethodPost, "/v1/session/"+operation, http.NoBody)
+	if err != nil {
+		return err
+	}
+	return response.Body.Close()
+}
+
+func (c *supervisorClient) export(ctx context.Context, discardExternalGit bool) error {
+	encoded, err := json.Marshal(exportRequest{DiscardExternalGit: discardExternalGit})
+	if err != nil {
+		return err
+	}
+	response, err := c.request(ctx, http.MethodPost, "/v1/session/export", bytes.NewReader(encoded))
 	if err != nil {
 		return err
 	}
@@ -112,6 +145,27 @@ func (c *supervisorClient) shell(ctx context.Context, command string) (string, e
 		return "", fmt.Errorf("active supervisor returned invalid shell output")
 	}
 	return trustedui.SanitizeTerminal(shell.Output), nil
+}
+
+func (c *supervisorClient) exec(ctx context.Context, directory string, arguments []string) (execResponse, error) {
+	encoded, err := json.Marshal(execRequest{Directory: directory, Arguments: arguments})
+	if err != nil {
+		return execResponse{}, err
+	}
+	response, err := c.request(ctx, http.MethodPost, "/v1/session/exec", bytes.NewReader(encoded))
+	if err != nil {
+		return execResponse{}, err
+	}
+	defer response.Body.Close()
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 16<<20))
+	decoder.DisallowUnknownFields()
+	var result execResponse
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.ExitCode < -1 || len(result.Stdout) > 1<<20 || len(result.Stderr) > 1<<20 {
+		return execResponse{}, fmt.Errorf("active supervisor returned invalid exec result")
+	}
+	result.Stdout = trustedui.SanitizeTerminal(result.Stdout)
+	result.Stderr = trustedui.SanitizeTerminal(result.Stderr)
+	return result, nil
 }
 
 func (c *supervisorClient) request(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
@@ -143,6 +197,11 @@ func (a *app) ensureSupervisor(ctx context.Context, projectRoot, projectState st
 		client.close()
 		return nil, supervisorInfo{}, infoErr
 	} else if errors.Is(err, errStaleSupervisor) {
+		if retained, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
+			return nil, supervisorInfo{}, fmt.Errorf("stopped %s VM requires recovery before Supervisor restart", retained.RuntimeMode())
+		} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			return nil, supervisorInfo{}, fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
+		}
 		if err := a.cleanupOrphans(ctx); err != nil {
 			return nil, supervisorInfo{}, err
 		}
@@ -203,35 +262,119 @@ func (a *app) ensureSupervisor(ctx context.Context, projectRoot, projectState st
 }
 
 func removeStaleSupervisor(projectState string) error {
-	locatorPath := filepath.Join(projectState, approvalControlLocator)
-	data, err := readOwnedPrivateFile(locatorPath, 4096)
+	return removeStaleSupervisorWithPreserve(projectState, false)
+}
+
+func removeRecoverySupervisorLocator(projectState string) error {
+	if _, err := os.Lstat(filepath.Join(projectState, approvalControlLocator)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return removeStaleSupervisorWithPreserve(projectState, true)
+}
+
+func removeStaleSupervisorWithPreserve(projectState string, preserveRuntime bool) error {
+	locatorPath, runtimeBase, _, err := staleSupervisorPaths(projectState)
 	if err != nil {
 		return err
+	}
+	if err := os.Remove(locatorPath); err != nil {
+		return err
+	}
+	if preserveRuntime {
+		return nil
+	}
+	return os.RemoveAll(runtimeBase)
+}
+
+func staleSupervisorPaths(projectState string) (locatorPath, runtimeBase, vmID string, _ error) {
+	locatorPath = filepath.Join(projectState, approvalControlLocator)
+	data, err := readOwnedPrivateFile(locatorPath, 4096)
+	if err != nil {
+		return "", "", "", err
 	}
 	var locator approvalLocator
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&locator) != nil || decoder.Decode(&struct{}{}) != io.EOF || locator.Version != 1 || filepath.Base(locator.Socket) != approvalControlSocket || !filepath.IsAbs(locator.Socket) || filepath.Clean(locator.Socket) != locator.Socket {
-		return fmt.Errorf("stale supervisor locator is unsafe")
+		return "", "", "", fmt.Errorf("stale supervisor locator is unsafe")
 	}
-	if _, err := os.Lstat(locator.Socket); !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("refusing to recover a supervisor whose control socket still exists")
+	if info, socketErr := os.Lstat(locator.Socket); socketErr == nil {
+		var stat unix.Stat_t
+		if unix.Lstat(locator.Socket, &stat) != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) {
+			return "", "", "", fmt.Errorf("stale supervisor socket is unsafe")
+		}
+		probe, dialErr := net.DialTimeout("unix", locator.Socket, 250*time.Millisecond)
+		if dialErr == nil {
+			_ = probe.Close()
+			return "", "", "", fmt.Errorf("refusing to recover a supervisor whose control socket is still active")
+		}
+	} else if !errors.Is(socketErr, os.ErrNotExist) {
+		return "", "", "", socketErr
 	}
-	runtimeBase := filepath.Dir(locator.Socket)
-	if !strings.HasPrefix(filepath.Base(runtimeBase), "sunaba-runtime-") || verifyPrivateDirectory(runtimeBase) != nil {
-		return fmt.Errorf("stale supervisor runtime directory is unsafe")
+	runtimeBase = filepath.Dir(locator.Socket)
+	projectID := filepath.Base(projectState)
+	devPrefix := "dev-recovery-"
+	securePrefix := "sunaba-recovery-" + projectID + "-"
+	baseName := filepath.Base(runtimeBase)
+	vmID = strings.TrimPrefix(baseName, devPrefix)
+	expected := recovery.RuntimeBase(projectState, vmID)
+	if vmID == baseName {
+		vmID = strings.TrimPrefix(baseName, securePrefix)
+		expected = recovery.SecureRuntimeBase(projectID, vmID)
 	}
-	if err := os.Remove(locatorPath); err != nil {
-		return err
+	if vmID == baseName || vmID == "" || runtimeBase != expected || verifyPrivateDirectory(runtimeBase) != nil {
+		return "", "", "", fmt.Errorf("stale supervisor runtime directory is unsafe")
 	}
-	return os.RemoveAll(runtimeBase)
+	return locatorPath, runtimeBase, vmID, nil
 }
 
 func (a *app) recoverStaleSupervisor(ctx context.Context, projectState string) error {
-	if err := a.cleanupOrphans(ctx); err != nil {
+	_, _, vmID, err := staleSupervisorPaths(projectState)
+	if err != nil {
 		return err
 	}
-	return removeStaleSupervisor(projectState)
+	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
+	if err != nil {
+		return err
+	}
+	result, err := cleanup.Run(ctx, cleanup.Config{Store: a.store, Runtime: a.runtime, Audit: recorder})
+	if err != nil {
+		return err
+	}
+	projectID := filepath.Base(projectState)
+	expectedContainer := "sunaba-" + projectID + "-" + vmID
+	for _, kept := range result.Kept {
+		if kept != expectedContainer {
+			continue
+		}
+		guard, guardErr := (&lease.Registry{Root: filepath.Join(a.store.Root, "leases")}).AcquireGuard(vmID)
+		if errors.Is(guardErr, lease.ErrGuardHeld) {
+			return fmt.Errorf("refusing stale Supervisor recovery while the exact VM still has a live owner")
+		}
+		if guardErr != nil {
+			return guardErr
+		}
+		_ = guard.Close()
+	}
+	for _, refused := range result.Refused {
+		if refused != expectedContainer {
+			return fmt.Errorf("refused to mutate unrelated resource while recovering stale Supervisor: %s", refused)
+		}
+	}
+	preserveRuntime := false
+	items, err := a.runtime.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == projectID && item.Labels["dev.sunaba.vm"] == vmID {
+			preserveRuntime = true
+			break
+		}
+	}
+	return removeStaleSupervisorWithPreserve(projectState, preserveRuntime)
 }
 
 func waitSupervisorGone(ctx context.Context, projectState string) error {

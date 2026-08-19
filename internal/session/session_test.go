@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -18,7 +19,9 @@ import (
 
 	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
+	"sunaba/internal/lease"
 	"sunaba/internal/opencode"
+	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/testutil"
@@ -50,6 +53,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 		t.Fatal("OpenCode server was not started as VM root")
 	}
 	shellWrapper := fake.copies["/run/sunaba/shell-wrapper"]
+	execWrapper := fake.copies["/run/sunaba/exec-wrapper"]
 	for _, expected := range []string{"/run/sunaba/session.env", "cd " + s.WorkspacePath, "GIT_DIR=/var/lib/sunaba/repository", `/bin/bash -lc "$1"`} {
 		if !strings.Contains(string(shellWrapper), expected) {
 			t.Fatalf("guest shell wrapper missing %q: %s", expected, shellWrapper)
@@ -58,6 +62,11 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if strings.Contains(string(shellWrapper), cfg.ModelToken) || strings.Contains(string(shellWrapper), cfg.ServerPassword) {
 		t.Fatal("guest shell wrapper contained a concrete capability")
 	}
+	for _, expected := range []string{"/run/sunaba/session.env", "relative=$1", `exec env`, `"$@"`} {
+		if !strings.Contains(string(execWrapper), expected) {
+			t.Fatalf("guest exec wrapper missing %q: %s", expected, execWrapper)
+		}
+	}
 	wrapper := filepath.Join(t.TempDir(), "shell-wrapper")
 	if err := os.WriteFile(wrapper, shellWrapper, 0500); err != nil {
 		t.Fatal(err)
@@ -65,7 +74,14 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if output, err := exec.Command("/bin/bash", "-n", wrapper).CombinedOutput(); err != nil {
 		t.Fatalf("guest shell wrapper syntax: %v: %s", err, output)
 	}
-	for _, name := range []string{"session.env", "opencode.json", "shell-wrapper", "session-input-bundle"} {
+	execWrapperPath := filepath.Join(t.TempDir(), "exec-wrapper")
+	if err := os.WriteFile(execWrapperPath, execWrapper, 0500); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("/bin/bash", "-n", execWrapperPath).CombinedOutput(); err != nil {
+		t.Fatalf("guest exec wrapper syntax: %v: %s", err, output)
+	}
+	for _, name := range []string{"session.env", "opencode.json", "shell-wrapper", "exec-wrapper", "session-input-bundle"} {
 		if _, err := os.Lstat(filepath.Join(s.Root, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("copied host session input %s remained: %v", name, err)
 		}
@@ -85,7 +101,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if _, err := Start(context.Background(), cfg); !errors.Is(err, state.ErrProjectLocked) {
 		t.Fatalf("pause released Project lock: %v", err)
 	}
-	if err := s.Resume(context.Background()); err != nil {
+	if err := s.ResumeWith(context.Background(), rotatedActivation(cfg, "resume1")); err != nil {
 		t.Fatal(err)
 	}
 	if fake.copyCount["/run/"] != 2 {
@@ -115,7 +131,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, action := range []string{"capability.issued", "snapshot.created", "vm.created", "session.ready", "session.paused", "session.resumed", "capability.revoked", "vm.destroyed"} {
+	for _, action := range []string{"capability.issued", "snapshot.created", "vm.created", "session.ready", "session.paused", "session.started", "capability.revoked", "vm.destroyed"} {
 		if !strings.Contains(string(encodedAudit), `"action":"`+action+`"`) {
 			t.Fatalf("audit missing action %q: %s", action, encodedAudit)
 		}
@@ -132,9 +148,9 @@ func assertGuestRuntimeInputPermissions(t *testing.T, command string) {
 		"chmod 0710 /run/sunaba",
 		"chown 0:0 /run/sunaba/guest-relay",
 		"chmod 0700 /run/sunaba/guest-relay",
-		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper",
+		"chown 1000:1000 /run/sunaba/session.env /run/sunaba/opencode.json /run/sunaba/shell-wrapper /run/sunaba/exec-wrapper",
 		"chmod 0400 /run/sunaba/session.env /run/sunaba/opencode.json",
-		"chmod 0500 /run/sunaba/shell-wrapper",
+		"chmod 0500 /run/sunaba/shell-wrapper /run/sunaba/exec-wrapper",
 	} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("guest session input permissions missing %q: %s", expected, command)
@@ -152,6 +168,31 @@ func TestStartEnforcesConfiguredExportFileLimit(t *testing.T) {
 	}
 }
 
+func TestRecoverySessionRetainsSelfContainedExportPolicy(t *testing.T) {
+	exportPolicy := workspace.DefaultExportPolicy()
+	snapshotPolicy := workspace.DefaultSnapshotPolicy()
+	s := newRecoverySession(context.Background(), RecoveryConfig{
+		Record: recovery.State{
+			ProjectID: "0123456789ab", ProjectRoot: "/project", VMID: "vm123456", SessionID: "session1",
+			RuntimeBase: "/runtime", RuntimeRoot: "/runtime/sunaba-vm-vm123456", Container: "sunaba-0123456789ab-vm123456",
+			WorkspacePath: "/workspace/sunaba-vm123456",
+		},
+		SnapshotPolicy: snapshotPolicy, ExportPolicy: exportPolicy, ExportPolicyDigest: strings.Repeat("a", 64),
+	}, nil)
+	if !reflect.DeepEqual(s.ExportPolicy, exportPolicy) || !reflect.DeepEqual(s.SnapshotPolicy, snapshotPolicy) || s.ExportPolicyDigest != strings.Repeat("a", 64) {
+		t.Fatalf("recovery Session lost its self-contained export contract: %+v", s)
+	}
+}
+
+func TestRecoveryStateRetainsOriginalGatewayMountTopology(t *testing.T) {
+	rejected := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	s := &Session{cfg: Config{GitGateway: rejected, WebGateway: rejected}}
+	record := s.RecoveryState("test")
+	if !record.GitGateway || !record.WebGateway {
+		t.Fatalf("recovery record lost gateway mount topology: %+v", record)
+	}
+}
+
 func TestResumeKeepsAttachRelayAliveAfterOperationContextEnds(t *testing.T) {
 	lifecycleContext, cancelLifecycle := context.WithCancel(context.Background())
 	defer cancelLifecycle()
@@ -164,7 +205,8 @@ func TestResumeKeepsAttachRelayAliveAfterOperationContextEnds(t *testing.T) {
 		t.Fatal(err)
 	}
 	operationContext, cancelOperation := context.WithCancel(context.Background())
-	if err := s.Resume(operationContext); err != nil {
+	activation := rotatedActivation(cfg, "resume2")
+	if err := s.ResumeWith(operationContext, activation); err != nil {
 		cancelOperation()
 		t.Fatal(err)
 	}
@@ -174,12 +216,122 @@ func TestResumeKeepsAttachRelayAliveAfterOperationContextEnds(t *testing.T) {
 		t.Fatalf("resume operation context stopped the session attach relay: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	if _, err := opencode.GetHealth(context.Background(), s.AttachURL, cfg.ServerPassword); err != nil {
+	if _, err := opencode.GetHealth(context.Background(), s.AttachURL, activation.ServerPassword); err != nil {
 		t.Fatalf("resumed attach relay is unavailable after operation completion: %v", err)
 	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestResumeWithRotatesSessionAuthorityAfterExpiryAndRejectsOldToken(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	oldSessionID, oldToken := cfg.SessionID, cfg.ModelToken
+	closed := 0
+	cfg.LeaseTTL = 250 * time.Millisecond
+	cfg.ModelGateway = tokenHandler(oldToken)
+	cfg.ModelGatewayClose = func() error { closed++; return nil }
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := s.Container
+	time.Sleep(300 * time.Millisecond)
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if closed != 1 {
+		t.Fatalf("old Model Gateway authority was not revoked: closes=%d", closed)
+	}
+	activation := rotatedActivation(cfg, "rotated1")
+	activation.LeaseTTL = time.Minute
+	activation.ModelGateway = tokenHandler(activation.ModelToken)
+	if err := s.ResumeWith(context.Background(), activation); err != nil {
+		t.Fatal(err)
+	}
+	if s.Container != container || fake.spec.Name != container || s.SessionID != activation.SessionID {
+		t.Fatalf("VM identity changed across rotation: container=%q spec=%q session=%q", s.Container, fake.spec.Name, s.SessionID)
+	}
+	registry := &lease.Registry{Root: filepath.Join(cfg.Store.Root, "leases")}
+	oldLease, err := registry.Load(oldSessionID)
+	if err != nil || oldLease.State != lease.Revoked {
+		t.Fatalf("old lease=%+v error=%v", oldLease, err)
+	}
+	if err := registry.ValidateActive(s.ProjectID, s.Container, activation.SessionID, "model"); err != nil {
+		t.Fatalf("new lease is inactive: %v", err)
+	}
+	client := sessionUnixHTTPClient(filepath.Join(s.Root, "model-gateway.sock"))
+	request, _ := http.NewRequest(http.MethodGet, "http://sunaba/test", nil)
+	request.Header.Set("Authorization", "Bearer "+oldToken)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old token status=%d", response.StatusCode)
+	}
+	request.Header.Set("Authorization", "Bearer "+activation.ModelToken)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("new token status=%d", response.StatusCode)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResumeWithFailureRevokesPartialActivationAndAllowsFreshRetry(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(s.Root, "model-gateway.sock")
+	if err := os.WriteFile(blocked, []byte("not a socket"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	failed := rotatedActivation(cfg, "failed1")
+	failedClosed := 0
+	failed.ModelGatewayClose = func() error { failedClosed++; return nil }
+	if err := s.ResumeWith(context.Background(), failed); err == nil {
+		t.Fatal("unsafe Gateway path did not fail activation")
+	}
+	registry := &lease.Registry{Root: filepath.Join(cfg.Store.Root, "leases")}
+	record, err := registry.Load(failed.SessionID)
+	if err != nil || record.State != lease.Revoked || failedClosed != 1 || fake.state != runtime.StateStopped {
+		t.Fatalf("failed activation lease=%+v closes=%d VM=%s error=%v", record, failedClosed, fake.state, err)
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	retry := rotatedActivation(cfg, "retry01")
+	if err := s.ResumeWith(context.Background(), retry); err != nil {
+		t.Fatalf("fresh activation retry failed: %v", err)
+	}
+	if s.SessionID != retry.SessionID {
+		t.Fatalf("retry Session ID=%q", s.SessionID)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func tokenHandler(token string) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(response, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+	})
 }
 
 func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testing.T) {
@@ -189,7 +341,7 @@ func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.VMID + "-net"
 	verified, closed := 0, 0
 	cfg.DevNetworkVerify = func(context.Context) error { verified++; return nil }
 	quiesced := 0
@@ -205,7 +357,7 @@ func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testin
 	if err := s.Pause(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Resume(context.Background()); err != nil {
+	if err := s.ResumeWith(context.Background(), rotatedActivation(cfg, "resume3")); err != nil {
 		t.Fatal(err)
 	}
 	if verified != 2 {
@@ -232,7 +384,7 @@ func TestDevSessionFailsClosedWhenBoundaryVerificationFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.VMID + "-net"
 	closed := 0
 	cfg.DevNetworkVerify = func(context.Context) error { return errors.New("injected firewall mismatch") }
 	cfg.DevNetworkQuiesce = func(context.Context) error { return nil }
@@ -253,7 +405,7 @@ func TestDevExportQuiesceFailureStopsVMAndCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.VMID + "-net"
 	cfg.DevNetworkVerify = func(context.Context) error { return nil }
 	cfg.DevNetworkQuiesce = func(context.Context) error { return errors.New("injected quiesce failure") }
 	cfg.DevNetworkClose = func(context.Context) error { return nil }
@@ -269,6 +421,39 @@ func TestDevExportQuiesceFailureStopsVMAndCapabilities(t *testing.T) {
 	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDevExternalGitRefusalStopsVMRevokesCapabilitiesAndClosesNetwork(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	cfg.Mode = "dev"
+	canonical, err := state.ResolveProjectPath(cfg.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.VMID + "-net"
+	cfg.DevNetworkVerify = func(context.Context) error { return nil }
+	quiesced, closed := 0, 0
+	cfg.DevNetworkQuiesce = func(context.Context) error { quiesced++; return nil }
+	cfg.DevNetworkClose = func(context.Context) error { closed++; return nil }
+	fake.externalGitUnsafe = true
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.StopAndExport(context.Background())
+	var recoveryErr *RecoveryRequiredError
+	if !errors.As(err, &recoveryErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if fake.state != runtime.StateStopped || fake.removed || quiesced != 1 || closed != 1 || s.gatewayActive.Load() || s.leaseCreated {
+		t.Fatalf("state=%s removed=%t quiesced=%d closed=%d gateway=%t lease=%t", fake.state, fake.removed, quiesced, closed, s.gatewayActive.Load(), s.leaseCreated)
+	}
+	if err := s.DetachForRecovery(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fake.removed {
+		t.Fatal("detaching recovery removed the stopped VM")
 	}
 }
 
@@ -321,17 +506,34 @@ func TestPausedExportRemountsWorkspaceBeforeFreeze(t *testing.T) {
 		t.Fatalf("export error=%v", err)
 	}
 	commands := fake.commands[before:]
-	if len(commands) < 2 || !strings.Contains(commands[0], "test -f /var/lib/sunaba/overlay.img") || !strings.Contains(commands[0], "mount -t overlay overlay") || strings.Contains(commands[0], "nohup") {
+	if len(commands) < 3 || !strings.Contains(commands[0], "test -f /var/lib/sunaba/overlay.img") || !strings.Contains(commands[0], "mount -t overlay overlay") || strings.Contains(commands[0], "nohup") {
 		t.Fatalf("paused export remount command=%q", commands)
 	}
-	if !strings.Contains(commands[1], "/var/lib/sunaba/merged-export") {
+	if !strings.Contains(commands[1], "SUNABA_EXTERNAL_GIT_SAFE") || !strings.Contains(commands[2], "/var/lib/sunaba/merged-export") {
 		t.Fatalf("workspace freeze did not follow remount: %q", commands)
 	}
-	if strings.Contains(commands[1], "/var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/") {
-		t.Fatalf("workspace freeze copied both merged and upper trees: %q", commands[1])
+	if strings.Contains(commands[2], "/var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/") {
+		t.Fatalf("workspace freeze copied both merged and upper trees: %q", commands[2])
 	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDestroyBypassesExportGuardForExplicitDiscard(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(fake.commands)
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range fake.commands[before:] {
+		if strings.Contains(command, "SUNABA_EXTERNAL_GIT_SAFE") {
+			t.Fatalf("explicit destroy unexpectedly ran export guard: %q", command)
+		}
 	}
 }
 
@@ -393,12 +595,11 @@ func TestSessionBindsOptionalGitGatewayToLifecycle(t *testing.T) {
 	if err := s.Pause(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	response, err = client.Do(request.Clone(context.Background()))
-	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("paused Git Gateway response=%v error=%v", response, err)
+	if response, err = client.Do(request.Clone(context.Background())); err == nil {
+		_ = response.Body.Close()
+		t.Fatalf("paused Git Gateway remained reachable: status=%d", response.StatusCode)
 	}
-	_ = response.Body.Close()
-	if err := s.Resume(context.Background()); err != nil {
+	if err := s.ResumeWith(context.Background(), rotatedActivation(cfg, "resume4")); err != nil {
 		t.Fatal(err)
 	}
 	response, err = client.Do(request.Clone(context.Background()))
@@ -455,12 +656,11 @@ func TestSessionBindsOptionalWebGatewayAndProxyEnvironmentToLifecycle(t *testing
 	if err := s.Pause(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	response, err = client.Do(request.Clone(context.Background()))
-	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("paused Web Gateway response=%v error=%v", response, err)
+	if response, err = client.Do(request.Clone(context.Background())); err == nil {
+		_ = response.Body.Close()
+		t.Fatalf("paused Web Gateway remained reachable: status=%d", response.StatusCode)
 	}
-	_ = response.Body.Close()
-	if err := s.Resume(context.Background()); err != nil {
+	if err := s.ResumeWith(context.Background(), rotatedActivation(cfg, "resume5")); err != nil {
 		t.Fatal(err)
 	}
 	assertGuestWebRuntimeInputPermissions(t, fake.setup)
@@ -580,31 +780,47 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 	runtimeBase := testutil.PrivateTempDir(t, "sunaba-runtime-test-")
 	return Config{
 		Store: &state.Store{Root: filepath.Join(root, "state")}, Runtime: fake,
-		ProjectRoot: project, RuntimeBase: runtimeBase, SessionID: "phase1test", Image: dependency.MustPinned().AgentImage.Tag,
+		ProjectRoot: project, RuntimeBase: runtimeBase, VMID: "vmphase1test", SessionID: "phase1test", Image: dependency.MustPinned().AgentImage.Tag,
 		CPUs: 2, Memory: "2G", GuestRelayBinary: relay, ProviderConfig: []byte(`{"provider":{}}`),
 		DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
-		ModelGateway: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
-		ModelToken:   strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
+		ModelGateway:      http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
+		ModelGatewayClose: func() error { return nil },
+		ModelToken:        strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
 		LeaseTTL: time.Minute, Audit: auditRecorder,
 		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 		OnEvent: func(Event) {},
 	}, fake
 }
 
+func rotatedActivation(cfg Config, sessionID string) Activation {
+	activation := activationFromConfig(cfg)
+	activation.SessionID = sessionID
+	activation.ModelToken = strings.Repeat("n", 42) + sessionID[len(sessionID)-1:]
+	activation.ServerPassword = strings.Repeat("q", 42) + sessionID[len(sessionID)-1:]
+	for index := range activation.GitRemotes {
+		activation.GitRemotes[index].Token = strings.Repeat(string(rune('r'+index)), 42) + sessionID[len(sessionID)-1:]
+	}
+	if activation.WebGateway != nil {
+		activation.WebToken = strings.Repeat("z", 42) + sessionID[len(sessionID)-1:]
+	}
+	return activation
+}
+
 type fakeRuntime struct {
-	mu         sync.Mutex
-	spec       runtime.ContainerSpec
-	state      runtime.State
-	setup      string
-	setupError error
-	listener   net.Listener
-	server     *http.Server
-	removed    bool
-	copies     map[string][]byte
-	copyCount  map[string]int
-	commands   []string
-	startHook  func()
-	startError error
+	mu                sync.Mutex
+	spec              runtime.ContainerSpec
+	state             runtime.State
+	setup             string
+	externalGitUnsafe bool
+	setupError        error
+	listener          net.Listener
+	server            *http.Server
+	removed           bool
+	copies            map[string][]byte
+	copyCount         map[string]int
+	commands          []string
+	startHook         func()
+	startError        error
 }
 
 func (f *fakeRuntime) ImageExists(context.Context, string) (bool, error) { return true, nil }
@@ -669,6 +885,12 @@ func (f *fakeRuntime) Exec(context.Context, string, bool, []string) error { retu
 func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) (string, error) {
 	joined := strings.Join(command, " ")
 	f.commands = append(f.commands, joined)
+	if strings.Contains(joined, "SUNABA_EXTERNAL_GIT_SAFE") {
+		if f.externalGitUnsafe {
+			return "SUNABA_EXTERNAL_GIT_UNSAFE", nil
+		}
+		return "SUNABA_EXTERNAL_GIT_SAFE", nil
+	}
 	if strings.Contains(joined, "opencode serve") {
 		f.setup = joined
 		if f.setupError != nil {

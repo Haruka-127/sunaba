@@ -40,14 +40,15 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	runID := randomID(t)
-	name := "sunaba-phase0-network-" + runID
+	vmID := "phase0" + runID
+	name := "sunaba-phase0-project-a-" + vmID
 	manifest := dependency.MustPinned()
 	rt := sunabaruntime.NewAppleContainer(false)
 	if state, err := rt.ContainerState(ctx, name); err != nil || state != sunabaruntime.StateNotFound {
 		t.Fatalf("probe resource name is not unused: state=%s error=%v", state, err)
 	}
 
-	tempDir := filepath.Join("/private/tmp", "sunaba-session-"+runID)
+	tempDir := filepath.Join("/private/tmp", "sunaba-vm-"+vmID)
 	if err := os.Mkdir(tempDir, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +118,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy := sunabaruntime.SecureSessionPolicy{
-		ProjectID: "phase0-project-a", SessionID: runID,
+		ProjectID: "phase0-project-a", VMID: vmID,
 		Image: manifest.AgentImage.Tag, SessionRoot: tempDir,
 		CPUs: 1, Memory: "2G", DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
 	}
@@ -152,7 +153,7 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 			"dev.sunaba.run-id":        runID,
 			"dev.sunaba.version":       manifest.AppleContainer.Version,
 			"dev.sunaba.project":       policy.ProjectID,
-			"dev.sunaba.session":       policy.SessionID,
+			"dev.sunaba.vm":            policy.VMID,
 			"dev.sunaba.mode":          "secure",
 			"dev.sunaba.policy-digest": policyDigest,
 		},

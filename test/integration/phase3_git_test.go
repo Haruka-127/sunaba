@@ -83,7 +83,8 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	caPath := integrationServerCertificate(t, runtimeBase, upstreamServer.Certificate())
 	projectID := state.ProjectID(project)
 	sessionID := "p3a" + runID
-	vmID := "sunaba-" + projectID + "-" + sessionID
+	vmIdentity := "vm" + sessionID
+	vmID := "sunaba-" + projectID + "-" + vmIdentity
 	auditRecorder, err := audit.NewRecorder(filepath.Join(runtimeBase, "state", "audit"))
 	if err != nil {
 		t.Fatal(err)
@@ -206,10 +207,10 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	relay := buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
 	cfg := session.Config{
 		Store: &state.Store{Root: filepath.Join(runtimeBase, "state")}, Runtime: sunabaruntime.NewAppleContainer(false),
-		ProjectRoot: project, RuntimeBase: runtimeBase, SessionID: sessionID,
+		ProjectRoot: project, RuntimeBase: runtimeBase, VMID: vmIdentity, SessionID: sessionID,
 		Image: dependency.MustPinned().AgentImage.Tag, CPUs: 1, Memory: "2G", DiskBytes: 128 << 20,
 		ProcessMax: 512, FileSizeMax: 128 << 20, OpenFileMax: 4096,
-		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelToken: modelToken,
+		GuestRelayBinary: relay, ProviderConfig: provider, ModelGateway: modelHandler, ModelGatewayClose: func() error { modelHandler.Revoke(); return nil }, ModelToken: modelToken,
 		GitGateway: gitHandler, GitRemotes: []session.GitRemote{{Name: "origin", Token: gitToken}, {Name: "upstream", Token: gitToken2}}, GitGatewayClose: broker.Close,
 		ServerPassword: serverPassword, LeaseTTL: 5 * time.Minute, Audit: auditRecorder,
 		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
@@ -245,22 +246,6 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 	if crossTokenResponse.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("cross-remote capability status=%d", crossTokenResponse.StatusCode)
 	}
-	if err := active.Pause(ctx); err != nil {
-		t.Fatal(err)
-	}
-	pausedRequest, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://sunaba/origin.git/info/refs?service=git-upload-pack", nil)
-	pausedRequest.Header.Set("Authorization", "Bearer "+gitToken)
-	pausedResponse, err := unixHTTPClient(filepath.Join(active.Root, "git-gateway.sock")).Do(pausedRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = pausedResponse.Body.Close()
-	if pausedResponse.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("paused Git Gateway status=%d", pausedResponse.StatusCode)
-	}
-	if err := active.Resume(ctx); err != nil {
-		t.Fatal(err)
-	}
 	writeIntegrationFile(t, filepath.Join(source, "project.txt"), "fetched\n")
 	integrationGit(t, gitPath, source, "commit", "-am", "host update")
 	integrationGit(t, gitPath, source, "push", upstream, "HEAD:refs/heads/master")
@@ -281,8 +266,9 @@ func TestPhase3GitGatewayInAgentVM(t *testing.T) {
 		t.Fatalf("guest push pending=%+v", pending)
 	}
 	var trusted bytes.Buffer
-	if err := trustedui.ConfirmPush(strings.NewReader(pending[0].Nonce+"\n"), &trusted, pending[0]); err != nil {
-		t.Fatal(err)
+	selected, decision, err := trustedui.SelectPush(strings.NewReader("approve 1\n"), &trusted, pending)
+	if err != nil || selected != 0 || decision != "approve" || strings.Contains(trusted.String(), pending[0].Nonce) {
+		t.Fatalf("trusted selection index=%d decision=%q error=%v output=%s", selected, decision, err, trusted.String())
 	}
 	if err := broker.Confirm(pending[0].Nonce, pending[0].Binding); err != nil {
 		t.Fatal(err)

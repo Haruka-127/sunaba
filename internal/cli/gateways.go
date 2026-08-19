@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sunaba/internal/audit"
@@ -47,6 +48,47 @@ type multiPushBroker struct {
 	brokers []*gitgateway.HookBroker
 }
 
+type rotatingPushBroker struct {
+	mu      sync.RWMutex
+	current pushApprovalBroker
+}
+
+func (b *rotatingPushBroker) Set(current pushApprovalBroker) {
+	b.mu.Lock()
+	b.current = current
+	b.mu.Unlock()
+}
+
+func (b *rotatingPushBroker) Pending() []gitgateway.PushRequest {
+	b.mu.RLock()
+	current := b.current
+	b.mu.RUnlock()
+	if current == nil {
+		return nil
+	}
+	return current.Pending()
+}
+
+func (b *rotatingPushBroker) Confirm(nonce string, binding gitgateway.PushBinding) error {
+	b.mu.RLock()
+	current := b.current
+	b.mu.RUnlock()
+	if current == nil {
+		return fmt.Errorf("Git push approval is not pending")
+	}
+	return current.Confirm(nonce, binding)
+}
+
+func (b *rotatingPushBroker) Reject(nonce string, binding gitgateway.PushBinding) error {
+	b.mu.RLock()
+	current := b.current
+	b.mu.RUnlock()
+	if current == nil {
+		return fmt.Errorf("Git push approval is not pending")
+	}
+	return current.Reject(nonce, binding)
+}
+
 func (b *multiPushBroker) Pending() []gitgateway.PushRequest {
 	var pending []gitgateway.PushRequest
 	for _, broker := range b.brokers {
@@ -60,6 +102,17 @@ func (b *multiPushBroker) Confirm(nonce string, binding gitgateway.PushBinding) 
 		for _, pending := range broker.Pending() {
 			if pending.Nonce == nonce {
 				return broker.Confirm(nonce, binding)
+			}
+		}
+	}
+	return fmt.Errorf("Git push approval is not pending")
+}
+
+func (b *multiPushBroker) Reject(nonce string, binding gitgateway.PushBinding) error {
+	for _, broker := range b.brokers {
+		for _, pending := range broker.Pending() {
+			if pending.Nonce == nonce {
+				return broker.Reject(nonce, binding)
 			}
 		}
 	}
@@ -229,6 +282,11 @@ func (a *app) configureGitRemoteGateway(ctx context.Context, projectPolicy polic
 		_ = closeBroker()
 		return configuredGitRemote{}, err
 	}
+	closeGateway := func() error {
+		readGateway.Revoke()
+		receiveGateway.Revoke()
+		return closeBroker()
+	}
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if strings.Contains(request.URL.RawQuery, "git-receive-pack") || strings.HasSuffix(request.URL.Path, "/git-receive-pack") {
 			receiveGateway.ServeHTTP(response, request)
@@ -238,7 +296,7 @@ func (a *app) configureGitRemoteGateway(ctx context.Context, projectPolicy polic
 	})
 	return configuredGitRemote{
 		handler: handler, remote: session.GitRemote{Name: remote.Name, Token: gitToken},
-		close: closeBroker, broker: broker,
+		close: closeGateway, broker: broker,
 	}, nil
 }
 

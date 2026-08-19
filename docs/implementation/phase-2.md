@@ -38,7 +38,9 @@ unit/race testはadd、modify、delete、rename、Protected Path保持、承認�
 
 ## pause / resume
 
-同じsession objectとProject lockを保持したままVMをpause/resumeできる。Apple Containerのsocket mountはVM作成時のhost Unix listenerへ結び付くため、Model Gateway listenerはVM寿命中固定する。pauseはLocal Attach Relayを閉じ、host側atomic gateと永続leaseをinactiveにしてからVMを停止する。このため、停止処理が途中で失敗しても正しいtokenのrequestを含めてfail closedで`503`にする。resumeはVMとguest serviceを再開し、Local Attach Relay経由のhealth/version完全一致を確認してからleaseとgateをactiveへ戻す。pause中もProject lockを解放せず、attach capabilityは到達不能である。
+Project VM objectとProject lockを保持したままVMをpauseし、別のAgent Sessionで再開できる。VM名、runtime root、workspace、ownership label、live guardは永続VM IDへ固定する。pauseはLocal Attach Relayと全Gateway listenerを閉じ、永続leaseと各handlerをrevokedにしてからVMを停止する。次の開始では新しいSession ID、token、server password、絶対TTL、Gateway handlerを生成し、health/version一致後だけ新leaseとgateをactiveにする。pause中もProject lockを解放せず、終了済みSessionのattach/Gateway capabilityは到達不能である。
+
+2026-08-20のidle timer回帰修正では、Supervisor event loopをidle/TTL timerの単一ownerとし、running状態だけで両deadlineをarmするstate-driven schedulerへ変更した。pause、failed、recovery、exported、destroyedではtimerをstop/drainして受信channelをnil化し、resumeとheartbeatでcurrent deadlineを再armする。各状態・activity更新へrevisionを付け、旧Sessionまたは更新前deadlineの発火が新しいSessionをpauseできないよう、停止直前にcurrent revisionとdeadlineをmutex下で再検証する。明示pause後の無再発火、resume後の再arm、stale event拒否、idle/TTL各1回だけのpauseをunit testで固定し、`./scripts/verify.sh`と`./scripts/verify-race.sh`を通過した。Apple Container実機gateはこの修正では実行していない。
 
 ## 永続session lease
 
@@ -48,11 +50,11 @@ Model Gateway capabilityはmode `0700`のhost state directoryに、mode `0600`�
 
 旧prototypeのguest OpenCode SSE収集とは別に、Supervisorが信頼境界eventをhost state配下のProject別JSONLへ直接追記する。directoryはmode `0700`、logはmode `0600`かつcurrent user所有のregular fileに限定し、`O_NOFOLLOW`、process間排他、1 event 1 JSON line、`fsync`を強制する。symlink・mode・owner不一致、64 KiB超のevent、token/password/API key/body/prompt/content等の機密keyを拒否し、guest由来文字列のterminal制御文字を可視化する。
 
-secure sessionはこのrecorderを必須とし、Project/VM/Session identity、snapshot、VM lifecycle、attach relay、Model Gateway lifecycleとrequest metadata、capability、pause/resume、export後のChange Set digest、cleanupを記録する。本文、upstream key、capability token、OpenCode server passwordは記録しない。audit追記不能時のpause/cleanupは、先にGateway gateと永続leaseをinactiveにしてVM停止・所有VM cleanupを継続し、操作自体はerrorとして返す。
+secure sessionはこのrecorderを必須とし、Project/VM/Session identity、snapshot、VM lifecycle、attach relay、Model Gateway lifecycleとrequest metadata、capability、pause/新Session開始、export後のChange Set digest、cleanupを記録する。本文、upstream key、capability token、OpenCode server passwordは記録しない。audit追記不能時のpause/cleanupは、先にGateway handlerと永続leaseをrevokeしてVM停止・所有VM cleanupを継続し、操作自体はerrorとして返す。
 
 ## orphan cleanup
 
-sessionは永続leaseに加え、Supervisor process寿命中だけOSが保持するsession別file guardを取得する。pause中もguardを保持し、process crashではkernelが自動解放する。orphan cleanupはApple Containerの一覧を読むだけでは削除せず、個別inspectを行い、`sunaba-<ProjectID>-<SessionID>`の完全名、owner/project/session/mode label、永続leaseのProject/VM/Session/用途identityをすべて完全一致させる。live guardがあればactive/paused sessionとして維持する。guardがなく、identityが完全一致する管理VMだけをauditへ事前記録し、leaseをrevokeし、再inspectしてから停止・削除し、結果を追記する。label欠落、名前差し替え、lease欠落・破損・identity不一致、audit障害では削除を拒否し、他resourceへ範囲を広げない。
+Project VMは永続Session leaseに加え、Supervisor process寿命中だけOSが保持するVM ID別file guardを取得する。pause中もVM guardを保持し、process crashではkernelが自動解放する。orphan cleanupはApple Containerの一覧を読むだけでは削除せず、個別inspectを行い、`sunaba-<ProjectID>-<VMID>`の完全名、owner/project/VM/mode label、最新永続leaseのProject/VM/Session/用途identityをすべて完全一致させる。live VM guardがあればactive/paused VMとして維持する。guardがなく、identityが完全一致する管理VMだけをauditへ事前記録し、leaseをrevokeし、再inspectしてから停止・削除し、結果を追記する。label欠落、名前差し替え、lease欠落・破損・identity不一致、audit障害では削除を拒否し、他resourceへ範囲を広げない。
 
 ## resource limits
 
@@ -76,9 +78,9 @@ SUNABA_PHASE2_INTEGRATION=1 go test -tags=integration -run TestPhase2ActualOrpha
 
 ## 公開CLI lifecycle
 
-secureの`sunaba up`はowner-only detached supervisorを起動し、VMを作成後にGateway/leaseをinactiveへしてpausedで返す。`agent`/`shell`は期限内の同じVMとupperをresumeし、終了時に再びpauseする。`changes export`は停止VMをexportしてChange Setを永続化し、ownership再検証後にVMをdestroyする。`down`、`recreate`、`destroy`も同じcontrol socketを使い、stale locatorはexact ownership/lease orphan cleanup後だけ除去する。
+secureの`sunaba up`はowner-only detached supervisorを起動し、VM作成時の初期Sessionを完全失効してpausedで返す。`agent`/`shell`は毎回新しいAgent Session資格情報で同じVMとupperを再開し、終了時にそのSessionをrevokeしてpauseする。`changes export`は停止VMをexportしてChange Setを永続化し、ownership再検証後にVMをdestroyする。`down`、`recreate`、`destroy`も同じcontrol socketを使い、stale locatorはexact ownership/lease orphan cleanup後だけ除去する。
 
-control locator、Unix socket、startup logはcurrent user所有のprivate directoryへ置き、locator/socketはmode `0600`で検証する。OpenCode server passwordとGateway capabilityを含むcopy元はmode `0600`で作り、guest `/run/sunaba/session.env`へcopy完了直後にhost filesystemから削除する。passwordをhost clientへ渡す経路はowner-only control socket応答だけとし、guest credential fileはexport前に削除する。TTL到達時はVMをpauseし、それ以降のresume/shellを拒否する。active Host TUIはpolicyのidle timeoutより短い間隔でowner-only heartbeatを送り、client消失後にidle deadlineへ到達するとSupervisorがGatewayをinactive化してVMをpauseする。Git push承認も同じowner-only control socket上のhost Trusted UIからだけ処理する。
+control locator、Unix socket、startup logはcurrent user所有のprivate directoryへ置き、locator/socketはmode `0600`で検証する。OpenCode server passwordとGateway capabilityを含むcopy元はmode `0600`で作り、guest `/run/sunaba/session.env`へcopy完了直後にhost filesystemから削除する。passwordをhost clientへ渡す経路はowner-only control socket応答だけとし、paused応答にはSession ID、password、attach URL、expiryを含めない。TTL到達時は現SessionをrevokeしてVMをpauseし、次回は新しいSession資格情報で同じVMを再開する。active Host TUIはpolicyのidle timeoutより短い間隔でowner-only heartbeatを送り、client消失後にidle deadlineへ到達すると同じ失効処理を行う。Git push承認も同じowner-only control socket上のhost Trusted UIからだけ処理する。
 
 `sunaba shell`は16 KiB以下の1行command、commandごとの2分timeout、1 MiB出力上限を持つ。guestのUID 1000、Overlay workspace、同じGateway policyで実行し、host表示前にESC/OSC/BEL/C0/C1/bidi/invalid UTF-8を必ずescapeする。未検証PTYとraw `container exec`は公開しない。
 
@@ -89,3 +91,5 @@ SUNABA_CLI_INTEGRATION=1 go test -tags=integration ./test/integration -run 'Test
 ```
 
 このgateは公開`project init`/`up`からpaused VMを作成し、shellで作ったfileがpause/resume後も残ること、悪意あるOSC/BELが可視化されること、停止VMのOverlayFSを再構成したexport後に正しいChange Setが得られ、supervisor/VM/Project stateをexact cleanupできることを検証する。OpenAI credential取得はlink-time fakeのlogin Keychainへ差し替えるため、実credentialや環境変数へ依存しない。2026-08-11の最新HEAD実機再実行で44.42秒でPASSした。
+
+2026-08-20のSession分離更新では、VM IDをSession IDから分離し、pause/idle/TTLでlease、listener、Model/Git/Web handlerを不可逆に失効し、次回開始時に全資格情報を再発行するよう変更した。期限切れ後の同一VM継続、旧token拒否、partial activation失敗時のrevokeとretry、paused control応答のcredential非公開、orphan cleanupのVM guard bindingをunit testで確認し、`go test ./...`を通過した。`integration` build tagの全testはcompileを確認したが、この更新後のApple Container実機gateは未実行である。

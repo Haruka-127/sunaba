@@ -45,6 +45,12 @@ type ReceiveGateway struct {
 	beforeAdvertise  func(context.Context) error
 }
 
+func (g *ReceiveGateway) Revoke() {
+	if g != nil && g.gate != nil {
+		g.gate.Revoke()
+	}
+}
+
 func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
 	repository, err := secureRepositoryPath(config.RepositoryPath)
 	if err != nil {

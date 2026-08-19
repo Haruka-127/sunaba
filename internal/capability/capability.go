@@ -102,6 +102,18 @@ func (gate *Gate) Revoke() {
 	}
 }
 
+// Usage returns admitted/request-quota attempts and the configured ceiling.
+func (gate *Gate) Usage() (int64, int64) {
+	if gate == nil {
+		return 0, 0
+	}
+	used := gate.requests.Load()
+	if used > gate.maxRequests {
+		used = gate.maxRequests
+	}
+	return used, gate.maxRequests
+}
+
 type Lease struct {
 	once    sync.Once
 	release func()

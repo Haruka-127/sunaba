@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion          = 6
+	CurrentSchemaVersion          = 7
 	MaximumExportEntries          = 1_000_000
 	MaximumExportFileBytes  int64 = 8 << 30
 	MaximumExportTotalBytes int64 = 8 << 30
@@ -46,6 +46,7 @@ type ProjectPolicy struct {
 	Git            GitPolicy        `json:"git"`
 	Web            WebPolicy        `json:"web"`
 	Export         ExportPolicy     `json:"export"`
+	Snapshot       SnapshotPolicy   `json:"snapshot"`
 	Audit          AuditPolicy      `json:"audit"`
 	ProtectedPaths []string         `json:"protected_paths"`
 	CreatedAt      time.Time        `json:"created_at"`
@@ -114,6 +115,10 @@ type ExportPolicy struct {
 	MaxTotalBytes int64 `json:"max_total_bytes"`
 }
 
+type SnapshotPolicy struct {
+	Exclude []string `json:"exclude"`
+}
+
 type AuditPolicy struct {
 	RetentionDays int `json:"retention_days"`
 }
@@ -124,7 +129,18 @@ type CompiledExportPolicy struct {
 	Digest   string
 }
 
-func CompileExportPolicy(config ExportPolicy, protectedPaths []string) (CompiledExportPolicy, error) {
+func CompileExportPolicy(config ExportPolicy, protectedPaths []string, excludedPaths ...[]string) (CompiledExportPolicy, error) {
+	return compileExportPolicy(config, protectedPaths, excludedPaths, 2)
+}
+
+// CompileLegacyExportPolicyV1 reproduces the exact export contract used by
+// pending Change Set schemas 2 and 3 before host-only Snapshot exclusions
+// existed. It is only for validating already persisted artifacts.
+func CompileLegacyExportPolicyV1(config ExportPolicy, protectedPaths []string) (CompiledExportPolicy, error) {
+	return compileExportPolicy(config, protectedPaths, nil, 1)
+}
+
+func compileExportPolicy(config ExportPolicy, protectedPaths []string, excludedPaths [][]string, digestVersion int) (CompiledExportPolicy, error) {
 	if config.MaxEntries <= 0 || config.MaxEntries > MaximumExportEntries ||
 		config.MaxFileBytes <= 0 || config.MaxFileBytes > MaximumExportFileBytes ||
 		config.MaxTotalBytes < config.MaxFileBytes || config.MaxTotalBytes > MaximumExportTotalBytes {
@@ -133,15 +149,24 @@ func CompileExportPolicy(config ExportPolicy, protectedPaths []string) (Compiled
 	protected := append([]string{".git", ".sunaba"}, protectedPaths...)
 	sort.Slice(protected, func(i, j int) bool { return strings.ToLower(protected[i]) < strings.ToLower(protected[j]) })
 	protected = slices.CompactFunc(protected, strings.EqualFold)
+	var excluded []string
+	if len(excludedPaths) > 1 {
+		return CompiledExportPolicy{}, fmt.Errorf("Project snapshot policy is invalid")
+	}
+	if len(excludedPaths) == 1 {
+		excluded = append([]string(nil), excludedPaths[0]...)
+	}
+	sort.Slice(excluded, func(i, j int) bool { return strings.ToLower(excluded[i]) < strings.ToLower(excluded[j]) })
+	excluded = slices.CompactFunc(excluded, strings.EqualFold)
 	snapshot := workspace.SnapshotPolicy{
 		MaxDepth: 64, MaxEntries: config.MaxEntries, MaxFileSize: config.MaxFileBytes,
-		MaxTotalSize: config.MaxTotalBytes, MaxSymlinkSize: 4096, ProtectedPaths: protected,
+		MaxTotalSize: config.MaxTotalBytes, MaxSymlinkSize: 4096, ProtectedPaths: protected, ExcludedPaths: excluded,
 	}
 	export := workspace.ExportPolicy{
 		Workspace: snapshot, MaxArchiveEntries: workspace.MaximumArchiveEntries,
 		MaxArchiveSize: workspace.MaximumArchiveSize,
 	}
-	digestInput := struct {
+	legacyDigestInput := struct {
 		Version        int      `json:"version"`
 		MaxEntries     int      `json:"max_entries"`
 		MaxFileBytes   int64    `json:"max_file_bytes"`
@@ -150,12 +175,43 @@ func CompileExportPolicy(config ExportPolicy, protectedPaths []string) (Compiled
 		MaxSymlinkSize int      `json:"max_symlink_size"`
 		ProtectedPaths []string `json:"protected_paths"`
 	}{1, snapshot.MaxEntries, snapshot.MaxFileSize, snapshot.MaxTotalSize, snapshot.MaxDepth, snapshot.MaxSymlinkSize, snapshot.ProtectedPaths}
+	currentDigestInput := struct {
+		Version        int      `json:"version"`
+		MaxEntries     int      `json:"max_entries"`
+		MaxFileBytes   int64    `json:"max_file_bytes"`
+		MaxTotalBytes  int64    `json:"max_total_bytes"`
+		MaxDepth       int      `json:"max_depth"`
+		MaxSymlinkSize int      `json:"max_symlink_size"`
+		ProtectedPaths []string `json:"protected_paths"`
+		ExcludedPaths  []string `json:"excluded_paths"`
+	}{2, snapshot.MaxEntries, snapshot.MaxFileSize, snapshot.MaxTotalSize, snapshot.MaxDepth, snapshot.MaxSymlinkSize, snapshot.ProtectedPaths, snapshot.ExcludedPaths}
+	var digestInput any = currentDigestInput
+	if digestVersion == 1 {
+		digestInput = legacyDigestInput
+	} else if digestVersion != 2 {
+		return CompiledExportPolicy{}, fmt.Errorf("Project export policy digest version is invalid")
+	}
 	encoded, err := json.Marshal(digestInput)
 	if err != nil {
 		return CompiledExportPolicy{}, err
 	}
 	digest := sha256.Sum256(encoded)
 	return CompiledExportPolicy{Snapshot: snapshot, Export: export, Digest: hex.EncodeToString(digest[:])}, nil
+}
+
+// ValidateCompiledExportPolicy verifies a self-contained runtime policy and
+// reproduces its digest without consulting the current Project policy.
+func ValidateCompiledExportPolicy(snapshot workspace.SnapshotPolicy, export workspace.ExportPolicy) (CompiledExportPolicy, error) {
+	compiled, err := CompileExportPolicy(ExportPolicy{
+		MaxEntries: snapshot.MaxEntries, MaxFileBytes: snapshot.MaxFileSize, MaxTotalBytes: snapshot.MaxTotalSize,
+	}, snapshot.ProtectedPaths, snapshot.ExcludedPaths)
+	if err != nil {
+		return CompiledExportPolicy{}, err
+	}
+	if !reflect.DeepEqual(compiled.Snapshot, snapshot) || !reflect.DeepEqual(compiled.Export, export) {
+		return CompiledExportPolicy{}, fmt.Errorf("compiled export policy is not canonical")
+	}
+	return compiled, nil
 }
 
 func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentImage, mode string, now time.Time) (ProjectPolicy, error) {
@@ -184,8 +240,8 @@ func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentIm
 			MaxRequests: webgateway.DefaultMaxRequests, MaxConcurrent: webgateway.DefaultMaxConcurrent, MaxConnectSeconds: int64(webgateway.DefaultMaxConnectTime / time.Second), MaxUploadBytes: webgateway.DefaultMaxUploadBytes,
 			MaxDownloadBytes: webgateway.DefaultMaxDownloadBytes, MaxTotalBytes: webgateway.DefaultMaxTotalBytes,
 		},
-		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30},
-		Audit:  AuditPolicy{RetentionDays: 30}, ProtectedPaths: []string{".git"}, CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
+		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}, Snapshot: SnapshotPolicy{},
+		Audit: AuditPolicy{RetentionDays: 30}, ProtectedPaths: []string{".git"}, CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
 	}
 	return policy, policy.Validate()
 }
@@ -248,7 +304,8 @@ func (p ProjectPolicy) Validate() error {
 	} else if len(p.Web.Rules) != 0 || p.Web.BlocklistManifest != "" || p.Web.BlocklistSHA256 != "" {
 		return fmt.Errorf("disabled Web Gateway must not retain active rules")
 	}
-	if _, err := CompileExportPolicy(p.Export, p.ProtectedPaths); err != nil || p.Audit.RetentionDays < 1 || p.Audit.RetentionDays > 365 {
+	compiledExport, exportErr := CompileExportPolicy(p.Export, p.ProtectedPaths, p.Snapshot.Exclude)
+	if exportErr != nil || !slices.Equal(p.Snapshot.Exclude, compiledExport.Snapshot.ExcludedPaths) || p.Audit.RetentionDays < 1 || p.Audit.RetentionDays > 365 {
 		return fmt.Errorf("Project export or audit policy is invalid")
 	}
 	if !uniqueRelativePaths(p.ProtectedPaths) || p.CreatedAt.IsZero() || p.UpdatedAt.Before(p.CreatedAt) {
