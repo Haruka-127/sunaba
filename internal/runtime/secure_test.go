@@ -21,7 +21,7 @@ func TestValidateDevSessionSpecUsesExactDedicatedNetwork(t *testing.T) {
 	policy, spec, closeSocket := secureFixture(t)
 	defer closeSocket()
 	policy.Mode = "dev"
-	policy.NetworkName = "sunaba-project-test-net"
+	policy.NetworkName = "sunaba-project-testvm-net"
 	spec.Networks = []string{policy.NetworkName}
 	spec.NoDNS = false
 	spec.Labels["dev.sunaba.mode"] = "dev"
@@ -33,7 +33,7 @@ func TestValidateDevSessionSpecUsesExactDedicatedNetwork(t *testing.T) {
 	if err := ValidateSecureSessionSpec(spec, policy); err != nil {
 		t.Fatal(err)
 	}
-	for _, network := range []string{"default", "sunaba-other-test-net", "none"} {
+	for _, network := range []string{"default", "sunaba-other-testvm-net", "none"} {
 		mutated := cloneContainerSpec(spec)
 		mutated.Networks = []string{network}
 		if err := ValidateSecureSessionSpec(mutated, policy); err == nil {
@@ -89,15 +89,15 @@ func TestValidateSecureSessionSpecFailsClosed(t *testing.T) {
 
 func TestSecureSessionPolicyRejectsSymlinkRoot(t *testing.T) {
 	root := t.TempDir()
-	target := filepath.Join(root, "sunaba-session-test")
+	target := filepath.Join(root, "sunaba-vm-testvm")
 	if err := os.Mkdir(target, 0700); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(t.TempDir(), "sunaba-session-test")
+	link := filepath.Join(t.TempDir(), "sunaba-vm-testvm")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	policy := SecureSessionPolicy{ProjectID: "project", SessionID: "test", Image: "image", SessionRoot: link}
+	policy := SecureSessionPolicy{ProjectID: "project", VMID: "testvm", Image: "image", SessionRoot: link}
 	if _, err := policy.Digest(); err == nil {
 		t.Fatal("symlink session root was accepted")
 	}
@@ -134,7 +134,7 @@ func TestValidateSecureSessionSpecBindsOptionalWebGateway(t *testing.T) {
 func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 	t.Helper()
 	parent := testutil.PrivateTempDir(t, "sunaba-secure-test-")
-	sessionRoot := filepath.Join(parent, "sunaba-session-test")
+	sessionRoot := filepath.Join(parent, "sunaba-vm-testvm")
 	if err := os.Mkdir(sessionRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 		t.Fatal(err)
 	}
 	policy := SecureSessionPolicy{
-		ProjectID: "project", SessionID: "test", Image: "sunaba-base:test", SessionRoot: canonicalRoot,
+		ProjectID: "project", VMID: "testvm", Image: "sunaba-base:test", SessionRoot: canonicalRoot,
 		CPUs: 1, Memory: "2G", DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
 	}
 	digest, err := policy.Digest()
@@ -169,7 +169,7 @@ func secureFixture(t *testing.T) (SecureSessionPolicy, ContainerSpec, func()) {
 		Sockets: []PublishedSocket{{HostPath: filepath.Join(canonicalRoot, "attach.sock"), GuestPath: SecureAttachGuestPath}},
 		Labels: map[string]string{
 			"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": policy.ProjectID,
-			"dev.sunaba.session": policy.SessionID, "dev.sunaba.mode": "secure",
+			"dev.sunaba.vm": policy.VMID, "dev.sunaba.mode": "secure",
 			"dev.sunaba.policy-digest": digest,
 		},
 	}

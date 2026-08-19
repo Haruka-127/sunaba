@@ -18,6 +18,7 @@ import (
 
 	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
+	"sunaba/internal/lease"
 	"sunaba/internal/opencode"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
@@ -85,7 +86,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if _, err := Start(context.Background(), cfg); !errors.Is(err, state.ErrProjectLocked) {
 		t.Fatalf("pause released Project lock: %v", err)
 	}
-	if err := s.Resume(context.Background()); err != nil {
+	if err := s.ResumeWith(context.Background(), rotatedActivation(cfg, "resume1")); err != nil {
 		t.Fatal(err)
 	}
 	if fake.copyCount["/run/"] != 2 {
@@ -115,7 +116,7 @@ func TestStartBuildsIsolatedVerticalSliceAndSerializesProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, action := range []string{"capability.issued", "snapshot.created", "vm.created", "session.ready", "session.paused", "session.resumed", "capability.revoked", "vm.destroyed"} {
+	for _, action := range []string{"capability.issued", "snapshot.created", "vm.created", "session.ready", "session.paused", "session.started", "capability.revoked", "vm.destroyed"} {
 		if !strings.Contains(string(encodedAudit), `"action":"`+action+`"`) {
 			t.Fatalf("audit missing action %q: %s", action, encodedAudit)
 		}
@@ -164,7 +165,8 @@ func TestResumeKeepsAttachRelayAliveAfterOperationContextEnds(t *testing.T) {
 		t.Fatal(err)
 	}
 	operationContext, cancelOperation := context.WithCancel(context.Background())
-	if err := s.Resume(operationContext); err != nil {
+	activation := rotatedActivation(cfg, "resume2")
+	if err := s.ResumeWith(operationContext, activation); err != nil {
 		cancelOperation()
 		t.Fatal(err)
 	}
@@ -174,12 +176,78 @@ func TestResumeKeepsAttachRelayAliveAfterOperationContextEnds(t *testing.T) {
 		t.Fatalf("resume operation context stopped the session attach relay: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	if _, err := opencode.GetHealth(context.Background(), s.AttachURL, cfg.ServerPassword); err != nil {
+	if _, err := opencode.GetHealth(context.Background(), s.AttachURL, activation.ServerPassword); err != nil {
 		t.Fatalf("resumed attach relay is unavailable after operation completion: %v", err)
 	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestResumeWithRotatesSessionAuthorityAfterExpiryAndRejectsOldToken(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	oldSessionID, oldToken := cfg.SessionID, cfg.ModelToken
+	cfg.LeaseTTL = 20 * time.Millisecond
+	cfg.ModelGateway = tokenHandler(oldToken)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := s.Container
+	time.Sleep(25 * time.Millisecond)
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	activation := rotatedActivation(cfg, "rotated1")
+	activation.LeaseTTL = time.Minute
+	activation.ModelGateway = tokenHandler(activation.ModelToken)
+	if err := s.ResumeWith(context.Background(), activation); err != nil {
+		t.Fatal(err)
+	}
+	if s.Container != container || fake.spec.Name != container || s.SessionID != activation.SessionID {
+		t.Fatalf("VM identity changed across rotation: container=%q spec=%q session=%q", s.Container, fake.spec.Name, s.SessionID)
+	}
+	registry := &lease.Registry{Root: filepath.Join(cfg.Store.Root, "leases")}
+	oldLease, err := registry.Load(oldSessionID)
+	if err != nil || oldLease.State != lease.Revoked {
+		t.Fatalf("old lease=%+v error=%v", oldLease, err)
+	}
+	if err := registry.ValidateActive(s.ProjectID, s.Container, activation.SessionID, "model"); err != nil {
+		t.Fatalf("new lease is inactive: %v", err)
+	}
+	client := sessionUnixHTTPClient(filepath.Join(s.Root, "model-gateway.sock"))
+	request, _ := http.NewRequest(http.MethodGet, "http://sunaba/test", nil)
+	request.Header.Set("Authorization", "Bearer "+oldToken)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old token status=%d", response.StatusCode)
+	}
+	request.Header.Set("Authorization", "Bearer "+activation.ModelToken)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("new token status=%d", response.StatusCode)
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func tokenHandler(token string) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(response, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
+		}
+		response.WriteHeader(http.StatusOK)
+	})
 }
 
 func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testing.T) {
@@ -189,7 +257,7 @@ func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.VMID + "-net"
 	verified, closed := 0, 0
 	cfg.DevNetworkVerify = func(context.Context) error { verified++; return nil }
 	quiesced := 0
@@ -205,7 +273,7 @@ func TestDevSessionVerifiesBoundaryOnStartAndResumeAndRevokesOnDestroy(t *testin
 	if err := s.Pause(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Resume(context.Background()); err != nil {
+	if err := s.ResumeWith(context.Background(), rotatedActivation(cfg, "resume3")); err != nil {
 		t.Fatal(err)
 	}
 	if verified != 2 {
@@ -232,7 +300,7 @@ func TestDevSessionFailsClosedWhenBoundaryVerificationFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.VMID + "-net"
 	closed := 0
 	cfg.DevNetworkVerify = func(context.Context) error { return errors.New("injected firewall mismatch") }
 	cfg.DevNetworkQuiesce = func(context.Context) error { return nil }
@@ -253,7 +321,7 @@ func TestDevExportQuiesceFailureStopsVMAndCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.SessionID + "-net"
+	cfg.DevNetworkName = "sunaba-" + state.ProjectID(canonical) + "-" + cfg.VMID + "-net"
 	cfg.DevNetworkVerify = func(context.Context) error { return nil }
 	cfg.DevNetworkQuiesce = func(context.Context) error { return errors.New("injected quiesce failure") }
 	cfg.DevNetworkClose = func(context.Context) error { return nil }
@@ -410,12 +478,11 @@ func TestSessionBindsOptionalGitGatewayToLifecycle(t *testing.T) {
 	if err := s.Pause(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	response, err = client.Do(request.Clone(context.Background()))
-	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("paused Git Gateway response=%v error=%v", response, err)
+	if response, err = client.Do(request.Clone(context.Background())); err == nil {
+		_ = response.Body.Close()
+		t.Fatalf("paused Git Gateway remained reachable: status=%d", response.StatusCode)
 	}
-	_ = response.Body.Close()
-	if err := s.Resume(context.Background()); err != nil {
+	if err := s.ResumeWith(context.Background(), rotatedActivation(cfg, "resume4")); err != nil {
 		t.Fatal(err)
 	}
 	response, err = client.Do(request.Clone(context.Background()))
@@ -472,12 +539,11 @@ func TestSessionBindsOptionalWebGatewayAndProxyEnvironmentToLifecycle(t *testing
 	if err := s.Pause(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	response, err = client.Do(request.Clone(context.Background()))
-	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("paused Web Gateway response=%v error=%v", response, err)
+	if response, err = client.Do(request.Clone(context.Background())); err == nil {
+		_ = response.Body.Close()
+		t.Fatalf("paused Web Gateway remained reachable: status=%d", response.StatusCode)
 	}
-	_ = response.Body.Close()
-	if err := s.Resume(context.Background()); err != nil {
+	if err := s.ResumeWith(context.Background(), rotatedActivation(cfg, "resume5")); err != nil {
 		t.Fatal(err)
 	}
 	assertGuestWebRuntimeInputPermissions(t, fake.setup)
@@ -597,7 +663,7 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 	runtimeBase := testutil.PrivateTempDir(t, "sunaba-runtime-test-")
 	return Config{
 		Store: &state.Store{Root: filepath.Join(root, "state")}, Runtime: fake,
-		ProjectRoot: project, RuntimeBase: runtimeBase, SessionID: "phase1test", Image: dependency.MustPinned().AgentImage.Tag,
+		ProjectRoot: project, RuntimeBase: runtimeBase, VMID: "vmphase1test", SessionID: "phase1test", Image: dependency.MustPinned().AgentImage.Tag,
 		CPUs: 2, Memory: "2G", GuestRelayBinary: relay, ProviderConfig: []byte(`{"provider":{}}`),
 		DiskBytes: 128 << 20, ProcessMax: 64, FileSizeMax: 128 << 20, OpenFileMax: 1024,
 		ModelGateway: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
@@ -606,6 +672,20 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 		OnEvent: func(Event) {},
 	}, fake
+}
+
+func rotatedActivation(cfg Config, sessionID string) Activation {
+	activation := activationFromConfig(cfg)
+	activation.SessionID = sessionID
+	activation.ModelToken = strings.Repeat("n", 42) + sessionID[len(sessionID)-1:]
+	activation.ServerPassword = strings.Repeat("q", 42) + sessionID[len(sessionID)-1:]
+	for index := range activation.GitRemotes {
+		activation.GitRemotes[index].Token = strings.Repeat(string(rune('r'+index)), 42) + sessionID[len(sessionID)-1:]
+	}
+	if activation.WebGateway != nil {
+		activation.WebToken = strings.Repeat("z", 42) + sessionID[len(sessionID)-1:]
+	}
+	return activation
 }
 
 type fakeRuntime struct {

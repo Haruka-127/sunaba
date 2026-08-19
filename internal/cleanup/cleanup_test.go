@@ -116,8 +116,8 @@ func TestCleanupDoesNotMutateWhenAuditIsUnsafe(t *testing.T) {
 	}
 }
 
-func ownedLabels(projectID, sessionID string) map[string]string {
-	return map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.session": sessionID, "dev.sunaba.mode": "secure"}
+func ownedLabels(projectID, vmID string) map[string]string {
+	return map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": vmID, "dev.sunaba.mode": "secure"}
 }
 
 type cleanupRuntime struct {

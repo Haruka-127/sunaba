@@ -43,23 +43,24 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		if err != nil {
 			return result, fmt.Errorf("inspect cleanup candidate %s: %w", listed.Name, err)
 		}
-		projectID, sessionID, owned := ownedIdentity(info)
+		projectID, vmID, owned := ownedIdentity(info)
 		if !owned {
 			result.Refused = append(result.Refused, listed.Name)
 			continue
 		}
-		record, err := registry.Load(sessionID)
-		if err != nil || record.ProjectID != projectID || record.VMID != info.Name || record.SessionID != sessionID || record.Use != "model" {
-			result.Refused = append(result.Refused, info.Name)
-			continue
-		}
-		guard, err := registry.AcquireGuard(sessionID)
+		guard, err := registry.AcquireGuard(vmID)
 		if errors.Is(err, lease.ErrGuardHeld) {
 			result.Kept = append(result.Kept, info.Name)
 			continue
 		}
 		if err != nil {
 			return result, fmt.Errorf("acquire cleanup guard for %s: %w", info.Name, err)
+		}
+		record, err := registry.FindLatestForVM(projectID, info.Name)
+		if err != nil || record.ProjectID != projectID || record.VMID != info.Name || record.Use != "model" {
+			_ = guard.Close()
+			result.Refused = append(result.Refused, info.Name)
+			continue
 		}
 		removeErr := removeOwned(ctx, cfg, registry, info, record)
 		closeErr := guard.Close()
@@ -71,17 +72,17 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	return result, nil
 }
 
-func ownedIdentity(info runtime.Info) (projectID, sessionID string, ok bool) {
+func ownedIdentity(info runtime.Info) (projectID, vmID string, ok bool) {
 	projectID = info.Labels["dev.sunaba.project"]
-	sessionID = info.Labels["dev.sunaba.session"]
+	vmID = info.Labels["dev.sunaba.vm"]
 	mode := info.Labels["dev.sunaba.mode"]
-	if info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || (mode != "secure" && mode != "dev") || projectID == "" || sessionID == "" {
+	if info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || (mode != "secure" && mode != "dev") || projectID == "" || vmID == "" {
 		return "", "", false
 	}
-	if info.Name != "sunaba-"+projectID+"-"+sessionID {
+	if info.Name != "sunaba-"+projectID+"-"+vmID {
 		return "", "", false
 	}
-	return projectID, sessionID, true
+	return projectID, vmID, true
 }
 
 func removeOwned(ctx context.Context, cfg Config, registry *lease.Registry, info runtime.Info, record lease.Record) error {
@@ -99,8 +100,8 @@ func removeOwned(ctx context.Context, cfg Config, registry *lease.Registry, info
 	if err != nil {
 		return err
 	}
-	projectID, sessionID, owned := ownedIdentity(current)
-	if !owned || projectID != record.ProjectID || sessionID != record.SessionID {
+	projectID, vmID, owned := ownedIdentity(current)
+	if !owned || projectID != record.ProjectID || vmID != strings.TrimPrefix(record.VMID, "sunaba-"+record.ProjectID+"-") || current.Name != record.VMID {
 		return fmt.Errorf("cleanup candidate identity changed before removal")
 	}
 	if current.State == runtime.StateRunning {

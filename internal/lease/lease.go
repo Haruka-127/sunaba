@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -134,6 +135,46 @@ func (r *Registry) Load(sessionID string) (Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.load(sessionID)
+}
+
+// FindLatestForVM returns the newest persisted Session lease bound to a VM.
+// It is used only after the VM guard is known to be unheld during orphan
+// recovery; revoked records remain authoritative ownership evidence.
+func (r *Registry) FindLatestForVM(projectID, vmID string) (Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.validate(); err != nil || !validIdentity(projectID) || !validIdentity(vmID) {
+		return Record{}, fmt.Errorf("invalid lease registry or VM identity")
+	}
+	entries, err := os.ReadDir(r.Root)
+	if err != nil {
+		return Record{}, err
+	}
+	if len(entries) > 4096 {
+		return Record{}, fmt.Errorf("lease registry exceeds bounded entry count")
+	}
+	var latest Record
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() || filepath.Ext(name) != ".json" {
+			continue
+		}
+		sessionID := strings.TrimSuffix(name, ".json")
+		if !validIdentity(sessionID) {
+			return Record{}, fmt.Errorf("invalid lease filename")
+		}
+		record, loadErr := r.load(sessionID)
+		if loadErr != nil {
+			return Record{}, loadErr
+		}
+		if record.ProjectID == projectID && record.VMID == vmID && (latest.SessionID == "" || record.UpdatedAt.After(latest.UpdatedAt)) {
+			latest = record
+		}
+	}
+	if latest.SessionID == "" {
+		return Record{}, fmt.Errorf("no Session lease is bound to VM")
+	}
+	return latest, nil
 }
 
 func (r *Registry) ValidateActive(projectID, vmID, sessionID, use string) error {

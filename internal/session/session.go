@@ -58,6 +58,7 @@ type Config struct {
 	Runtime            runtime.Runtime
 	ProjectRoot        string
 	RuntimeBase        string
+	VMID               string
 	SessionID          string
 	Mode               string
 	DevNetworkName     string
@@ -91,9 +92,28 @@ type Config struct {
 	ExportPolicyDigest string
 }
 
+// Activation contains authority that is valid for exactly one Agent Session.
+// A Project VM may outlive many Activations, but a revoked Activation is never
+// resumed.
+type Activation struct {
+	SessionID       string
+	ProviderConfig  []byte
+	ModelGateway    http.Handler
+	ModelToken      string
+	GitGateway      http.Handler
+	GitRemotes      []GitRemote
+	GitGatewayClose func() error
+	WebGateway      http.Handler
+	WebToken        string
+	WebGatewayClose func() error
+	ServerPassword  string
+	LeaseTTL        time.Duration
+}
+
 type Session struct {
 	ProjectID          string
 	ProjectRoot        string
+	VMID               string
 	SessionID          string
 	Root               string
 	Container          string
@@ -108,7 +128,7 @@ type Session struct {
 	lifecycleContext context.Context
 	projectLock      *state.ProjectLock
 	leaseRegistry    *lease.Registry
-	leaseGuard       *lease.Guard
+	vmGuard          *lease.Guard
 	leaseCreated     bool
 	gatewayServer    *http.Server
 	gatewayDone      chan error
@@ -148,7 +168,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	}
 	s := &Session{
 		ProjectID: projectLock.ProjectID, ProjectRoot: projectLock.ProjectRoot,
-		SessionID: cfg.SessionID, cfg: cfg, lifecycleContext: ctx, projectLock: projectLock,
+		VMID: cfg.VMID, SessionID: cfg.SessionID, cfg: cfg, lifecycleContext: ctx, projectLock: projectLock,
 		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
 	}
 	defer func() {
@@ -163,18 +183,18 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 			_ = s.removeFailedRoot()
 		}
 	}()
-	s.Root = filepath.Join(cfg.RuntimeBase, "sunaba-session-"+cfg.SessionID)
-	s.Container = "sunaba-" + s.ProjectID + "-" + cfg.SessionID
-	s.WorkspacePath = "/workspace/sunaba-" + cfg.SessionID
+	s.Root = filepath.Join(cfg.RuntimeBase, "sunaba-vm-"+cfg.VMID)
+	s.Container = "sunaba-" + s.ProjectID + "-" + cfg.VMID
+	s.WorkspacePath = "/workspace/sunaba-" + cfg.VMID
 	s.leaseRegistry = &lease.Registry{Root: filepath.Join(cfg.Store.Root, "leases")}
+	s.vmGuard, err = s.leaseRegistry.AcquireGuard(cfg.VMID)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := s.leaseRegistry.RegisterPaused(s.ProjectID, s.Container, s.SessionID, "model", cfg.LeaseTTL); err != nil {
 		return nil, err
 	}
 	s.leaseCreated = true
-	s.leaseGuard, err = s.leaseRegistry.AcquireGuard(s.SessionID)
-	if err != nil {
-		return nil, err
-	}
 	if err := s.emit("capability.issued", "paused"); err != nil {
 		return nil, err
 	}
@@ -197,7 +217,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		return nil, err
 	}
 	policy := runtime.SecureSessionPolicy{
-		ProjectID: s.ProjectID, SessionID: s.SessionID, Mode: cfg.Mode, NetworkName: cfg.DevNetworkName, Image: cfg.Image, SessionRoot: s.Root,
+		ProjectID: s.ProjectID, VMID: s.VMID, Mode: cfg.Mode, NetworkName: cfg.DevNetworkName, Image: cfg.Image, SessionRoot: s.Root,
 		CPUs: cfg.CPUs, Memory: cfg.Memory, DiskBytes: cfg.DiskBytes,
 		ProcessMax: cfg.ProcessMax, FileSizeMax: cfg.FileSizeMax, OpenFileMax: cfg.OpenFileMax,
 		GitGateway: cfg.GitGateway != nil, WebGateway: cfg.WebGateway != nil,
@@ -233,7 +253,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		Sockets: []runtime.PublishedSocket{{HostPath: filepath.Join(s.Root, "attach.sock"), GuestPath: runtime.SecureAttachGuestPath}},
 		Labels: map[string]string{
 			"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": s.ProjectID,
-			"dev.sunaba.session": s.SessionID, "dev.sunaba.mode": cfg.Mode,
+			"dev.sunaba.vm": s.VMID, "dev.sunaba.mode": cfg.Mode,
 			"dev.sunaba.policy-digest": policyDigest,
 		},
 	}
@@ -292,7 +312,7 @@ func validateConfig(cfg Config) error {
 	if err != nil || !runtimeBase.IsDir() || runtimeBase.Mode().Perm() != 0700 {
 		return fmt.Errorf("secure session runtime base must be a mode 0700 directory")
 	}
-	if !sessionIDPattern.MatchString(cfg.SessionID) || cfg.Image != dependency.MustPinned().AgentImage.Tag || cfg.CPUs <= 0 || cfg.Memory == "" {
+	if !sessionIDPattern.MatchString(cfg.VMID) || !sessionIDPattern.MatchString(cfg.SessionID) || cfg.VMID == cfg.SessionID || cfg.Image != dependency.MustPinned().AgentImage.Tag || cfg.CPUs <= 0 || cfg.Memory == "" {
 		return fmt.Errorf("secure session identity, pinned image, and resources are required")
 	}
 	if cfg.Mode != "secure" && cfg.Mode != "dev" {
@@ -339,6 +359,34 @@ func validateConfig(cfg Config) error {
 		cfg.ExportPolicy.Workspace.MaxEntries != cfg.SnapshotPolicy.MaxEntries ||
 		!exportPolicyDigestPattern.MatchString(cfg.ExportPolicyDigest) {
 		return fmt.Errorf("secure session requires a compiled export policy")
+	}
+	return nil
+}
+
+func activationFromConfig(cfg Config) Activation {
+	return Activation{
+		SessionID: cfg.SessionID, ProviderConfig: cfg.ProviderConfig, ModelGateway: cfg.ModelGateway,
+		ModelToken: cfg.ModelToken, GitGateway: cfg.GitGateway, GitRemotes: cfg.GitRemotes,
+		GitGatewayClose: cfg.GitGatewayClose, WebGateway: cfg.WebGateway, WebToken: cfg.WebToken,
+		WebGatewayClose: cfg.WebGatewayClose, ServerPassword: cfg.ServerPassword, LeaseTTL: cfg.LeaseTTL,
+	}
+}
+
+func validateActivation(activation Activation) error {
+	if !sessionIDPattern.MatchString(activation.SessionID) || len(activation.ProviderConfig) == 0 || !json.Valid(activation.ProviderConfig) || activation.ModelGateway == nil {
+		return fmt.Errorf("Agent Session activation identity and Model Gateway are required")
+	}
+	if !secretPattern.MatchString(activation.ModelToken) || !secretPattern.MatchString(activation.ServerPassword) || activation.ModelToken == activation.ServerPassword {
+		return fmt.Errorf("Agent Session secrets must be distinct high-entropy URL-safe values")
+	}
+	if (activation.GitGateway == nil) != (len(activation.GitRemotes) == 0) || (activation.GitGateway == nil) != (activation.GitGatewayClose == nil) || !validGitRemoteConfig(activation.GitRemotes, activation.ModelToken, activation.ServerPassword) {
+		return fmt.Errorf("optional Git Gateway requires a distinct high-entropy capability")
+	}
+	if (activation.WebGateway == nil) != (activation.WebToken == "") || (activation.WebGateway == nil) != (activation.WebGatewayClose == nil) || (activation.WebGateway != nil && (!secretPattern.MatchString(activation.WebToken) || activation.WebToken == activation.ModelToken || activation.WebToken == activation.ServerPassword || gitTokenExists(activation.GitRemotes, activation.WebToken))) {
+		return fmt.Errorf("optional Web Gateway requires a distinct high-entropy capability")
+	}
+	if activation.LeaseTTL <= 0 || activation.LeaseTTL > 24*time.Hour {
+		return fmt.Errorf("Agent Session requires a bounded lease lifetime")
 	}
 	return nil
 }
@@ -469,24 +517,14 @@ func (s *Session) Pause(ctx context.Context) error {
 		return fmt.Errorf("session is not in a resumable running state")
 	}
 	var pauseErr error
-	pauseErr = errors.Join(pauseErr, s.stopAttach(ctx))
-	s.gatewayActive.Store(false)
-	if _, err := s.leaseRegistry.Pause(s.SessionID); err != nil {
+	pauseErr = errors.Join(pauseErr, s.stopChannels(ctx))
+	if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
 		return errors.Join(pauseErr, err)
 	}
+	s.leaseCreated = false
 	s.paused = true
-	if err := s.emit("capability.paused", "model"); err != nil {
+	if err := s.emit("capability.revoked", "pause"); err != nil {
 		pauseErr = errors.Join(pauseErr, err)
-	}
-	if s.cfg.GitGateway != nil {
-		if err := s.emit("capability.paused", "git"); err != nil {
-			pauseErr = errors.Join(pauseErr, err)
-		}
-	}
-	if s.cfg.WebGateway != nil {
-		if err := s.emit("capability.paused", "web"); err != nil {
-			pauseErr = errors.Join(pauseErr, err)
-		}
 	}
 	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
 		return errors.Join(pauseErr, err)
@@ -497,24 +535,51 @@ func (s *Session) Pause(ctx context.Context) error {
 	return errors.Join(pauseErr, s.emit("session.paused", ""))
 }
 
-func (s *Session) Resume(ctx context.Context) (err error) {
+// ResumeWith starts a new Agent Session in the existing Project VM.
+func (s *Session) ResumeWith(ctx context.Context, activation Activation) (err error) {
 	if !s.vmCreated || !s.paused {
 		return fmt.Errorf("session is not paused")
 	}
-	if s.gatewayServer == nil {
-		return fmt.Errorf("paused session lost its fixed Model Gateway listener")
+	if err := validateActivation(activation); err != nil {
+		return err
 	}
+	if activation.SessionID == s.SessionID {
+		return fmt.Errorf("refusing to reuse a revoked Agent Session identity")
+	}
+	s.SessionID = activation.SessionID
+	s.cfg.SessionID = activation.SessionID
+	s.cfg.ProviderConfig = append([]byte(nil), activation.ProviderConfig...)
+	s.cfg.ModelGateway, s.cfg.ModelToken = activation.ModelGateway, activation.ModelToken
+	s.cfg.GitGateway, s.cfg.GitRemotes, s.cfg.GitGatewayClose = activation.GitGateway, append([]GitRemote(nil), activation.GitRemotes...), activation.GitGatewayClose
+	s.cfg.WebGateway, s.cfg.WebToken, s.cfg.WebGatewayClose = activation.WebGateway, activation.WebToken, activation.WebGatewayClose
+	s.cfg.ServerPassword, s.cfg.LeaseTTL = activation.ServerPassword, activation.LeaseTTL
+	s.gitCloseOnce, s.webCloseOnce = sync.Once{}, sync.Once{}
 	s.gatewayActive.Store(false)
 	leaseActivated := false
 	defer func() {
 		if err != nil {
 			s.gatewayActive.Store(false)
-			if leaseActivated {
-				_, _ = s.leaseRegistry.Pause(s.SessionID)
+			if leaseActivated || s.leaseCreated {
+				_, _ = s.leaseRegistry.Revoke(s.SessionID)
+				s.leaseCreated = false
 			}
-			_ = s.stopAttach(context.Background())
+			_ = s.stopChannels(context.Background())
+			if current, stateErr := s.cfg.Runtime.ContainerState(context.Background(), s.Container); stateErr == nil && current == runtime.StateRunning {
+				_ = s.cfg.Runtime.Stop(context.Background(), s.Container)
+			}
+			s.paused = true
 		}
 	}()
+	if _, err := s.leaseRegistry.RegisterPaused(s.ProjectID, s.Container, s.SessionID, "model", s.cfg.LeaseTTL); err != nil {
+		return err
+	}
+	s.leaseCreated = true
+	if err := s.emit("capability.issued", "paused"); err != nil {
+		return err
+	}
+	if err := s.startGateway(); err != nil {
+		return err
+	}
 	current, stateErr := s.cfg.Runtime.ContainerState(ctx, s.Container)
 	if stateErr != nil {
 		return stateErr
@@ -568,13 +633,20 @@ func (s *Session) Resume(ctx context.Context) (err error) {
 			return err
 		}
 	}
-	if err := s.emit("session.resumed", health.Version); err != nil {
+	if err := s.emit("session.started", health.Version); err != nil {
 		return err
 	}
 	s.gatewayActive.Store(true)
 	s.paused = false
 	leaseActivated = false
 	return nil
+}
+
+// Resume is intentionally rejected because resuming with the previous
+// capability would extend revoked authority. Call ResumeWith with a freshly
+// generated Activation.
+func (s *Session) Resume(context.Context) error {
+	return fmt.Errorf("a fresh Agent Session activation is required")
 }
 
 func (s *Session) resumeGuest(ctx context.Context) error {
@@ -913,6 +985,9 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, err
 	}
 	if containerState == runtime.StateStopped {
+		if err := s.startRevokedGatewaysForExport(); err != nil {
+			return ExportResult{}, err
+		}
 		if err := s.cfg.Runtime.Start(ctx, s.Container); err != nil {
 			return ExportResult{}, fmt.Errorf("start paused session VM for export: %w", err)
 		}
@@ -968,6 +1043,32 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, err
 	}
 	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: merged.Manifest, ChangeSet: changeSet}, nil
+}
+
+func (s *Session) startRevokedGatewaysForExport() error {
+	rejected := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+	})
+	server, done, err := s.startUnixGateway("model-gateway.sock", rejected)
+	if err != nil {
+		return err
+	}
+	s.gatewayServer, s.gatewayDone = server, done
+	if s.cfg.GitGateway != nil {
+		server, done, err = s.startUnixGateway("git-gateway.sock", rejected)
+		if err != nil {
+			return err
+		}
+		s.gitGatewayServer, s.gitGatewayDone = server, done
+	}
+	if s.cfg.WebGateway != nil {
+		server, done, err = s.startUnixGateway("web-gateway.sock", rejected)
+		if err != nil {
+			return err
+		}
+		s.webGatewayServer, s.webGatewayDone = server, done
+	}
+	return nil
 }
 
 func (s *Session) mountPausedWorkspaceForExport(ctx context.Context) error {
@@ -1031,7 +1132,7 @@ func (s *Session) Destroy(ctx context.Context) error {
 	}
 	info, err := s.cfg.Runtime.Inspect(ctx, s.Container)
 	if err == nil {
-		if info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != s.ProjectID || info.Labels["dev.sunaba.session"] != s.SessionID {
+		if info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != s.ProjectID || info.Labels["dev.sunaba.vm"] != s.VMID {
 			return errors.Join(destroyErr, fmt.Errorf("refusing to remove container without matching ownership labels"))
 		}
 		if info.State == runtime.StateRunning {
@@ -1148,11 +1249,11 @@ func (s *Session) Close() error {
 				}
 			}
 		}
-		if s.leaseGuard != nil {
-			if err := s.leaseGuard.Close(); err != nil && s.closeErr == nil {
+		if s.vmGuard != nil {
+			if err := s.vmGuard.Close(); err != nil && s.closeErr == nil {
 				s.closeErr = err
 			}
-			s.leaseGuard = nil
+			s.vmGuard = nil
 		}
 		if s.projectLock != nil {
 			if err := s.projectLock.Close(); err != nil && s.closeErr == nil {
@@ -1199,7 +1300,7 @@ func makeNewPrivateDirectory(path string) error {
 }
 
 func (s *Session) removeFailedRoot() error {
-	if s.Root == "" || filepath.Dir(s.Root) != s.cfg.RuntimeBase || filepath.Base(s.Root) != "sunaba-session-"+s.SessionID {
+	if s.Root == "" || filepath.Dir(s.Root) != s.cfg.RuntimeBase || filepath.Base(s.Root) != "sunaba-vm-"+s.VMID {
 		return fmt.Errorf("refusing to remove unowned failed session root")
 	}
 	info, err := os.Lstat(s.Root)
