@@ -112,6 +112,11 @@ func (a *app) snapshotImportGitignore(dir string) error {
 	if err != nil {
 		return err
 	}
+	configLock, err := a.store.AcquireConfigLock(projectPolicy.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer configLock.Close()
 	config, rules, err := store.Load(projectPolicy.ProjectID)
 	if err != nil {
 		return err

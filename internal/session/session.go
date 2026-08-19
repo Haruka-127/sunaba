@@ -124,6 +124,7 @@ type Session struct {
 	Baseline           workspace.SnapshotManifest
 	SnapshotRoot       string
 	SnapshotPolicy     workspace.SnapshotPolicy
+	ExportPolicy       workspace.ExportPolicy
 	ExportPolicyDigest string
 
 	cfg              Config
@@ -172,7 +173,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	s := &Session{
 		ProjectID: projectLock.ProjectID, ProjectRoot: projectLock.ProjectRoot,
 		VMID: cfg.VMID, SessionID: cfg.SessionID, cfg: cfg, lifecycleContext: ctx, projectLock: projectLock,
-		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
+		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicy: cfg.ExportPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
 	}
 	defer func() {
 		if err != nil {

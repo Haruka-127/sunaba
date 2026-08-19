@@ -19,6 +19,7 @@ import (
 	"sunaba/internal/openauth"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
+	"sunaba/internal/projectconfig"
 	"sunaba/internal/secretstore"
 	"sunaba/internal/session"
 	"sunaba/internal/state"
@@ -37,9 +38,10 @@ type managedSession struct {
 }
 
 type managedActivation struct {
-	activation session.Activation
-	expiresAt  time.Time
-	gitBroker  pushApprovalBroker
+	activation  session.Activation
+	expiresAt   time.Time
+	idleTimeout time.Duration
+	gitBroker   pushApprovalBroker
 }
 
 func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (*managedSession, error) {
@@ -169,9 +171,39 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		active: active, projectPolicy: projectPolicy, projectState: projectState, runtimeBase: runtimeBase,
 		initialActivation: activation, gitBroker: broker, operationLock: operationLock,
 		activationFactory: func(factoryContext context.Context) (managedActivation, error) {
-			return a.newManagedActivation(factoryContext, projectPolicy, projectState, runtimeBase, vmID, recorder)
+			current, err := a.reloadActivationPolicy(projectPolicy, filepath.Join(projectState, "policy.json"))
+			if err != nil {
+				return managedActivation{}, err
+			}
+			return a.newManagedActivation(factoryContext, current, projectState, runtimeBase, vmID, recorder)
 		},
 	}, nil
+}
+
+func (a *app) reloadActivationPolicy(vmPolicy policy.ProjectPolicy, policyPath string) (policy.ProjectPolicy, error) {
+	current, migrated, err := policy.LoadReadOnly(policyPath, time.Now())
+	if err != nil {
+		return policy.ProjectPolicy{}, fmt.Errorf("reload policy for the next Agent Session: %w", err)
+	}
+	if migrated {
+		return policy.ProjectPolicy{}, fmt.Errorf("the current policy requires migration; stop the VM and run a host configuration command before resuming")
+	}
+	configStore, err := a.projectConfigStore()
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	config, rules, err := configStore.Load(current.ProjectID)
+	if err != nil || config.ProjectRoot != current.ProjectRoot || !projectconfig.Matches(config, rules, current) {
+		return policy.ProjectPolicy{}, fmt.Errorf("host Project configuration is not atomically synchronized with the effective policy; retry 'sunaba config apply'")
+	}
+	plan, err := policy.ClassifyApplication(vmPolicy, current)
+	if err != nil {
+		return policy.ProjectPolicy{}, err
+	}
+	if plan.Has(policy.ApplyAfterRecreate) {
+		return policy.ProjectPolicy{}, fmt.Errorf("current configuration changed VM-bound fields [%s]; export changes and run 'sunaba recreate'", strings.Join(plan.Paths(policy.ApplyAfterRecreate), ", "))
+	}
+	return current, nil
 }
 
 func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState, runtimeBase, vmID string, recorder *audit.Recorder) (managedActivation, error) {
@@ -241,7 +273,7 @@ func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.Pro
 		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
 		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
 		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second,
-	}, expiresAt: expiresAt, gitBroker: gateways.gitBroker}, nil
+	}, expiresAt: expiresAt, idleTimeout: time.Duration(projectPolicy.Session.IdleSeconds) * time.Second, gitBroker: gateways.gitBroker}, nil
 }
 
 func pruneProjectAudit(recorder *audit.Recorder, projectPolicy policy.ProjectPolicy, now time.Time) error {
@@ -297,7 +329,7 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		}
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
-	idleTimeout := time.Duration(managed.projectPolicy.Session.IdleSeconds) * time.Second
+	idleTimeout := managed.initialActivation.idleTimeout
 	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
@@ -383,7 +415,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 		}
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second, managed.activationFactory, managed.gitBroker)
+	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -406,7 +438,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 		return err
 	}
 	tui.Stdin, tui.Stdout, tui.Stderr = a.input, a.output, a.errors
-	tuiErr := runHostTUIWithHeartbeat(ctx, tui, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second, func(context.Context) error { return controlled.heartbeat() })
+	tuiErr := runHostTUIWithHeartbeat(ctx, tui, managed.initialActivation.idleTimeout, func(context.Context) error { return controlled.heartbeat() })
 	exportContext, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	exportErr := controlled.exportAndDestroy(exportContext)
 	cancel()
@@ -437,7 +469,7 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 		}
 		_ = os.RemoveAll(managed.runtimeBase)
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, time.Duration(managed.projectPolicy.Session.IdleSeconds)*time.Second, managed.activationFactory, managed.gitBroker)
+	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}

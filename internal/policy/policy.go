@@ -173,6 +173,21 @@ func CompileExportPolicy(config ExportPolicy, protectedPaths []string, excludedP
 	return CompiledExportPolicy{Snapshot: snapshot, Export: export, Digest: hex.EncodeToString(digest[:])}, nil
 }
 
+// ValidateCompiledExportPolicy verifies a self-contained runtime policy and
+// reproduces its digest without consulting the current Project policy.
+func ValidateCompiledExportPolicy(snapshot workspace.SnapshotPolicy, export workspace.ExportPolicy) (CompiledExportPolicy, error) {
+	compiled, err := CompileExportPolicy(ExportPolicy{
+		MaxEntries: snapshot.MaxEntries, MaxFileBytes: snapshot.MaxFileSize, MaxTotalBytes: snapshot.MaxTotalSize,
+	}, snapshot.ProtectedPaths, snapshot.ExcludedPaths)
+	if err != nil {
+		return CompiledExportPolicy{}, err
+	}
+	if !reflect.DeepEqual(compiled.Snapshot, snapshot) || !reflect.DeepEqual(compiled.Export, export) {
+		return CompiledExportPolicy{}, fmt.Errorf("compiled export policy is not canonical")
+	}
+	return compiled, nil
+}
+
 func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentImage, mode string, now time.Time) (ProjectPolicy, error) {
 	canonical, err := canonicalProjectRoot(projectRoot)
 	if err != nil {

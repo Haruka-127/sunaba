@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	pendingChangeVersion       = 3
-	legacyPendingChangeVersion = 2
+	pendingChangeVersion              = 4
+	selfContainedPendingChangeVersion = 3
+	legacyPendingChangeVersion        = 2
 )
 
 type pendingChange struct {
@@ -30,6 +31,8 @@ type pendingChange struct {
 	Baseline           workspace.SnapshotManifest `json:"baseline"`
 	Merged             workspace.SnapshotManifest `json:"merged"`
 	ChangeSet          workspace.ChangeSet        `json:"change_set"`
+	SnapshotPolicy     workspace.SnapshotPolicy   `json:"snapshot_policy,omitempty"`
+	ExportPolicy       workspace.ExportPolicy     `json:"export_policy,omitempty"`
 	ExportPolicyDigest string                     `json:"export_policy_digest"`
 	CreatedAt          time.Time                  `json:"created_at"`
 }
@@ -93,7 +96,8 @@ func persistPending(projectState string, active *session.Session, result session
 	pending := pendingChange{
 		Version: pendingChangeVersion, ProjectID: active.ProjectID, ProjectRoot: active.ProjectRoot, VMID: active.Container,
 		SessionID: active.SessionID, BaselineRoot: baselineRoot, MergedRoot: mergedRoot, Baseline: baseline, Merged: merged,
-		ChangeSet: rebuilt, ExportPolicyDigest: active.ExportPolicyDigest, CreatedAt: time.Now().UTC(),
+		ChangeSet: rebuilt, SnapshotPolicy: active.SnapshotPolicy, ExportPolicy: active.ExportPolicy,
+		ExportPolicyDigest: active.ExportPolicyDigest, CreatedAt: time.Now().UTC(),
 	}
 	if err := writePrivateJSON(filepath.Join(pendingRoot, "change.json"), pending); err != nil {
 		return pendingChange{}, err
@@ -103,10 +107,6 @@ func persistPending(projectState string, active *session.Session, result session
 }
 
 func loadPending(projectState string, projectPolicy policy.ProjectPolicy) (pendingChange, error) {
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
-	if err != nil {
-		return pendingChange{}, err
-	}
 	path := filepath.Join(projectState, "pending", "change.json")
 	data, err := securefs.ReadOwnedRegular(path, 16<<20)
 	if err != nil {
@@ -116,10 +116,10 @@ func loadPending(projectState string, projectPolicy policy.ProjectPolicy) (pendi
 		return pendingChange{}, fmt.Errorf("pending Change Set metadata is unsafe")
 	}
 	var pending pendingChange
-	if err := securefs.DecodeStrictJSON(data, &pending); err != nil || (pending.Version != pendingChangeVersion && pending.Version != legacyPendingChangeVersion) || pending.ProjectRoot != projectPolicy.ProjectRoot || pending.ProjectID != projectPolicy.ProjectID || pending.MergedRoot != filepath.Join(projectState, "pending", "merged") {
+	if err := securefs.DecodeStrictJSON(data, &pending); err != nil || (pending.Version != pendingChangeVersion && pending.Version != selfContainedPendingChangeVersion && pending.Version != legacyPendingChangeVersion) || pending.ProjectRoot != projectPolicy.ProjectRoot || pending.ProjectID != projectPolicy.ProjectID || pending.MergedRoot != filepath.Join(projectState, "pending", "merged") {
 		return pendingChange{}, fmt.Errorf("pending Change Set identity or schema does not match Project")
 	}
-	if pending.Version == pendingChangeVersion {
+	if pending.Version == pendingChangeVersion || pending.Version == selfContainedPendingChangeVersion {
 		expectedBaselineRoot := filepath.Join(projectState, "pending", "baseline")
 		if pending.BaselineRoot != expectedBaselineRoot || pending.Baseline.Root != expectedBaselineRoot || pending.Merged.Root != pending.MergedRoot {
 			return pendingChange{}, fmt.Errorf("pending Change Set snapshot roots do not match Project state")
@@ -130,10 +130,22 @@ func loadPending(projectState string, projectPolicy policy.ProjectPolicy) (pendi
 	} else if pending.BaselineRoot != "" || pending.Baseline.Root != pending.ProjectRoot || pending.Merged.Root != pending.MergedRoot {
 		return pendingChange{}, fmt.Errorf("legacy pending Change Set snapshot roots do not match Project state")
 	}
-	if pending.ExportPolicyDigest != compiled.Digest {
-		return pendingChange{}, fmt.Errorf("pending Change Set export policy no longer matches Project policy")
-	}
+	var compiled policy.CompiledExportPolicy
 	if pending.Version == pendingChangeVersion {
+		compiled, err = policy.ValidateCompiledExportPolicy(pending.SnapshotPolicy, pending.ExportPolicy)
+		if err != nil || pending.ExportPolicyDigest != compiled.Digest {
+			return pendingChange{}, fmt.Errorf("pending Change Set saved export policy is invalid")
+		}
+	} else {
+		compiled, err = policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+		if err != nil {
+			return pendingChange{}, err
+		}
+		if pending.ExportPolicyDigest != compiled.Digest {
+			return pendingChange{}, fmt.Errorf("legacy pending Change Set export policy no longer matches Project policy")
+		}
+	}
+	if pending.Version == pendingChangeVersion || pending.Version == selfContainedPendingChangeVersion {
 		actualBaseline, err := workspace.BuildSnapshotManifest(pending.BaselineRoot, compiled.Snapshot)
 		if err != nil || actualBaseline.Root != pending.BaselineRoot || actualBaseline.Digest != pending.Baseline.Digest {
 			return pendingChange{}, fmt.Errorf("pending baseline no longer matches its manifest")

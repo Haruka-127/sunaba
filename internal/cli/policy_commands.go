@@ -18,7 +18,7 @@ import (
 )
 
 func (a *app) modelPolicy(_ context.Context, action, auth, dir string, models []string) error {
-	projectPolicy, path, projectState, err := a.loadPolicy(dir)
+	projectPolicy, path, _, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
@@ -37,7 +37,13 @@ func (a *app) modelPolicy(_ context.Context, action, auth, dir string, models []
 		}
 		return nil
 	}
-	if err := refuseActivePolicyChange(projectState); err != nil {
+	configLock, err := a.store.AcquireConfigLock(projectPolicy.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer configLock.Close()
+	projectPolicy, path, _, err = a.loadPolicy(dir)
+	if err != nil {
 		return err
 	}
 	switch action {
@@ -66,15 +72,15 @@ func (a *app) modelPolicy(_ context.Context, action, auth, dir string, models []
 		return fmt.Errorf("unknown model policy action %q", action)
 	}
 	projectPolicy.UpdatedAt = time.Now().UTC()
-	if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
+	if err := a.savePolicyAndConfigLocked(path, projectPolicy); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Configured Project Model Gateway authentication=%s with models=%s.\n", projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","))
+	fmt.Fprintf(a.output, "Configured Project Model Gateway authentication=%s with models=%s. The active Agent Session is unchanged; fresh authority will use this policy on the next Session.\n", projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","))
 	return nil
 }
 
 func (a *app) gitPolicy(_ context.Context, action, dir, name, remoteURL string) error {
-	projectPolicy, path, projectState, err := a.loadPolicy(dir)
+	projectPolicy, path, _, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
@@ -88,7 +94,13 @@ func (a *app) gitPolicy(_ context.Context, action, dir, name, remoteURL string) 
 		}
 		return nil
 	}
-	if err := refuseActivePolicyChange(projectState); err != nil {
+	configLock, err := a.store.AcquireConfigLock(projectPolicy.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer configLock.Close()
+	projectPolicy, path, _, err = a.loadPolicy(dir)
+	if err != nil {
 		return err
 	}
 	switch action {
@@ -130,13 +142,13 @@ func (a *app) gitPolicy(_ context.Context, action, dir, name, remoteURL string) 
 	}
 	projectPolicy.Git.Remotes = sortedGitRemotes(projectPolicy.Git.Remotes)
 	projectPolicy.UpdatedAt = time.Now().UTC()
-	if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
+	if err := a.savePolicyAndConfigLocked(path, projectPolicy); err != nil {
 		return err
 	}
 	if len(projectPolicy.Git.Remotes) == 0 {
-		fmt.Fprintln(a.output, "Disabled the Project Git Gateway. Existing host quarantine data was retained and is inactive.")
+		fmt.Fprintln(a.output, "Disabled the Project Git Gateway for the next Agent Session. The active Session is unchanged; existing host quarantine data was retained and is inactive.")
 	} else {
-		fmt.Fprintf(a.output, "Configured %d fixed Git Gateway remote(s). Host credential lookup occurs only when an Agent Session starts.\n", len(projectPolicy.Git.Remotes))
+		fmt.Fprintf(a.output, "Configured %d fixed Git Gateway remote(s) for the next Agent Session. The active Session is unchanged; host credential lookup occurs only when fresh authority is issued.\n", len(projectPolicy.Git.Remotes))
 	}
 	return nil
 }
@@ -152,7 +164,13 @@ func (a *app) webPolicy(ctx context.Context, action, dir string, includeSubdomai
 	if err != nil {
 		return err
 	}
-	if err := refuseActivePolicyChange(projectState); err != nil {
+	configLock, err := a.store.AcquireConfigLock(projectPolicy.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer configLock.Close()
+	projectPolicy, path, projectState, err = a.loadPolicy(dir)
+	if err != nil {
 		return err
 	}
 	switch action {
@@ -185,10 +203,10 @@ func (a *app) webPolicy(ctx context.Context, action, dir string, includeSubdomai
 		projectPolicy.Web.BlocklistManifest = ""
 		projectPolicy.Web.BlocklistSHA256 = ""
 		projectPolicy.UpdatedAt = time.Now().UTC()
-		if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
+		if err := a.savePolicyAndConfigLocked(path, projectPolicy); err != nil {
 			return err
 		}
-		fmt.Fprintln(a.output, "Disabled the Project Web Gateway. The pinned blocklist snapshot was retained and is inactive.")
+		fmt.Fprintln(a.output, "Disabled the Project Web Gateway for the next Agent Session. The active Session is unchanged; the pinned blocklist snapshot was retained and is inactive.")
 		return nil
 	default:
 		return fmt.Errorf("unknown web action %q", action)
@@ -217,10 +235,10 @@ func (a *app) refreshWebPolicy(ctx context.Context, projectPolicy policy.Project
 	projectPolicy.Web.BlocklistManifest = manifestPath
 	projectPolicy.Web.BlocklistSHA256 = digest
 	projectPolicy.UpdatedAt = time.Now().UTC()
-	if err := a.savePolicyAndConfig(policyPath, projectPolicy); err != nil {
+	if err := a.savePolicyAndConfigLocked(policyPath, projectPolicy); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Enabled Web Gateway with %d effective origin rules (%d custom) and pinned blocklist %s (expires %s).\n", len(rules), len(projectPolicy.Web.CustomRules), digest, expiresAt.Format(time.RFC3339))
+	fmt.Fprintf(a.output, "Enabled Web Gateway for the next Agent Session with %d effective origin rules (%d custom) and pinned blocklist %s (expires %s). The active Session is unchanged.\n", len(rules), len(projectPolicy.Web.CustomRules), digest, expiresAt.Format(time.RFC3339))
 	return nil
 }
 

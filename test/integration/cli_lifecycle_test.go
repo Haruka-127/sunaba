@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"sunaba/internal/projectconfig"
 	"sunaba/internal/state"
 )
 
@@ -86,6 +87,19 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	if err != nil || !strings.Contains(paused, "=paused/secure") {
 		t.Fatalf("paused status error=%v output=%s", err, paused)
 	}
+	configStore := &projectconfig.Store{Root: filepath.Join(runtimeBase, "config", "sunaba")}
+	config, rules, err := configStore.Load(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Session.TTLSeconds++
+	if err := configStore.Save(projectID, config, rules); err != nil {
+		t.Fatal(err)
+	}
+	configApplied, err := runSunaba("", "config", "apply", "--project-id", projectID)
+	if err != nil || !strings.Contains(configApplied, "Application (next-session): session") || !strings.Contains(configApplied, "active Session is unchanged") {
+		t.Fatalf("paused next-Session config apply error=%v output=%s", err, configApplied)
+	}
 	second, err := runSunaba("cat persistent.txt\n", "shell", "--dir", project)
 	if err != nil || !strings.Contains(second, "persistent") {
 		t.Fatalf("persistent shell state error=%v output=%s", err, second)
@@ -93,6 +107,18 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	exported, err := runSunaba("", "changes", "export", "--project-id", projectID)
 	if err != nil || !strings.Contains(exported, "persistent.txt") || !strings.Contains(exported, "Change Set:") {
 		t.Fatalf("CLI export error=%v output=%s", err, exported)
+	}
+	config, rules, err = configStore.Load(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Model.MaxRequests--
+	if err := configStore.Save(projectID, config, rules); err != nil {
+		t.Fatal(err)
+	}
+	configApplied, err = runSunaba("", "config", "apply", "--project-id", projectID)
+	if err != nil || !strings.Contains(configApplied, "Application (next-session): model") {
+		t.Fatalf("pending Change Set blocked unrelated config apply error=%v output=%s", err, configApplied)
 	}
 	reviewed, err := runSunaba("", "changes", "review", "--project-id", projectID)
 	if err != nil || !strings.Contains(reviewed, "SUNABA HOST CHANGE SET REVIEW") || !strings.Contains(reviewed, "+persistent") {

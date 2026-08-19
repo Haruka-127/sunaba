@@ -580,11 +580,11 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 		if err != nil {
 			return err
 		}
-		compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+		snapshotPolicy, err := pendingSnapshotPolicy(pending, projectPolicy)
 		if err != nil {
 			return err
 		}
-		applied, err := hostapply.Apply(hostapply.Config{Store: a.store, ProjectRoot: pending.ProjectRoot, ProjectID: pending.ProjectID, MergedRoot: pending.MergedRoot, Baseline: pending.Baseline, Merged: pending.Merged, ChangeSet: pending.ChangeSet, Approvals: approvals, Grant: grant, Audit: recorder, SnapshotPolicy: compiled.Snapshot})
+		applied, err := hostapply.Apply(hostapply.Config{Store: a.store, ProjectRoot: pending.ProjectRoot, ProjectID: pending.ProjectID, MergedRoot: pending.MergedRoot, Baseline: pending.Baseline, Merged: pending.Merged, ChangeSet: pending.ChangeSet, Approvals: approvals, Grant: grant, Audit: recorder, SnapshotPolicy: snapshotPolicy})
 		if err != nil {
 			return err
 		}
@@ -602,7 +602,7 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 }
 
 func buildPendingReview(pending pendingChange, projectPolicy policy.ProjectPolicy, options workspace.ReviewOptions, allowLegacyMetadata bool) (workspace.Review, error) {
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+	snapshotPolicy, err := pendingSnapshotPolicy(pending, projectPolicy)
 	if err != nil {
 		return workspace.Review{}, err
 	}
@@ -610,13 +610,28 @@ func buildPendingReview(pending pendingChange, projectPolicy policy.ProjectPolic
 	if pending.Version == legacyPendingChangeVersion {
 		baselineRoot = pending.ProjectRoot
 		if allowLegacyMetadata {
-			current, currentErr := workspace.BuildSnapshotManifest(baselineRoot, compiled.Snapshot)
+			current, currentErr := workspace.BuildSnapshotManifest(baselineRoot, snapshotPolicy)
 			if currentErr != nil || current.Digest != pending.Baseline.Digest {
-				return workspace.BuildMetadataOnlyReview(pending.Baseline, pending.Merged, pending.ChangeSet, compiled.Snapshot, options)
+				return workspace.BuildMetadataOnlyReview(pending.Baseline, pending.Merged, pending.ChangeSet, snapshotPolicy, options)
 			}
 		}
 	}
-	return workspace.BuildReview(baselineRoot, pending.MergedRoot, pending.Baseline, pending.Merged, pending.ChangeSet, compiled.Snapshot, options)
+	return workspace.BuildReview(baselineRoot, pending.MergedRoot, pending.Baseline, pending.Merged, pending.ChangeSet, snapshotPolicy, options)
+}
+
+func pendingSnapshotPolicy(pending pendingChange, projectPolicy policy.ProjectPolicy) (workspace.SnapshotPolicy, error) {
+	if pending.Version == pendingChangeVersion {
+		compiled, err := policy.ValidateCompiledExportPolicy(pending.SnapshotPolicy, pending.ExportPolicy)
+		if err != nil || compiled.Digest != pending.ExportPolicyDigest {
+			return workspace.SnapshotPolicy{}, fmt.Errorf("pending Change Set saved export policy is invalid")
+		}
+		return compiled.Snapshot, nil
+	}
+	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+	if err != nil {
+		return workspace.SnapshotPolicy{}, err
+	}
+	return compiled.Snapshot, nil
 }
 
 func (a *app) approvals(ctx context.Context, dir string) error {
@@ -889,6 +904,15 @@ func (a *app) projectConfigStore() (*projectconfig.Store, error) {
 }
 
 func (a *app) savePolicyAndConfig(policyPath string, effective policy.ProjectPolicy) error {
+	configLock, err := a.store.AcquireConfigLock(effective.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer configLock.Close()
+	return a.savePolicyAndConfigLocked(policyPath, effective)
+}
+
+func (a *app) savePolicyAndConfigLocked(policyPath string, effective policy.ProjectPolicy) error {
 	operationLock, err := a.store.AcquireOperationReadLock()
 	if err != nil {
 		return err

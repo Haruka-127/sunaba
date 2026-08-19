@@ -181,6 +181,9 @@ func (s *controlledSession) resume(ctx context.Context) error {
 	s.sessionID = activation.activation.SessionID
 	s.serverPassword = activation.activation.ServerPassword
 	s.expiresAt = activation.expiresAt
+	if activation.idleTimeout >= time.Second {
+		s.idleTimeout = activation.idleTimeout
+	}
 	if s.gitBroker != nil {
 		s.gitBroker.Set(activation.gitBroker)
 	}

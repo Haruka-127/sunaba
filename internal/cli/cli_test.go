@@ -643,8 +643,9 @@ func TestGitPolicyManagesMultipleNamedHTTPSRemotesAndRejectsCredentialURLs(t *te
 	if err := os.WriteFile(locator, []byte(`{"version":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.run(context.Background(), []string{"git", "disable", "--dir", project}); err == nil || !strings.Contains(err.Error(), "cannot change") {
-		t.Fatalf("active policy mutation error=%v", err)
+	output.Reset()
+	if err := a.run(context.Background(), []string{"git", "disable", "--dir", project}); err != nil || !strings.Contains(output.String(), "active Session is unchanged") {
+		t.Fatalf("next-Session policy mutation output=%q error=%v", output.String(), err)
 	}
 	if err := os.Remove(locator); err != nil {
 		t.Fatal(err)
@@ -1117,7 +1118,7 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicyDigest: compiled.Digest}
+	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest}
 	persisted, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedSource, Merged: merged, ChangeSet: changes})
 	if err != nil {
 		t.Fatal(err)
@@ -1142,14 +1143,27 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err != nil || loaded.ChangeSet.Digest != persisted.ChangeSet.Digest {
 		t.Fatalf("loaded=%+v error=%v", loaded, err)
 	}
+	legacyV3 := persisted
+	legacyV3.Version = selfContainedPendingChangeVersion
+	legacyV3.SnapshotPolicy = workspace.SnapshotPolicy{}
+	legacyV3.ExportPolicy = workspace.ExportPolicy{}
+	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), legacyV3); err != nil {
+		t.Fatal(err)
+	}
+	if migrated, err := loadPending(projectState, testPolicy); err != nil || migrated.ChangeSet.Digest != persisted.ChangeSet.Digest {
+		t.Fatalf("pending v3 compatibility failed: loaded=%+v error=%v", migrated, err)
+	}
+	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), persisted); err != nil {
+		t.Fatal(err)
+	}
 	stageRoot := filepath.Join(root, "stage")
 	if _, err := workspace.CreateApprovedSnapshotSubset(loaded.MergedRoot, stageRoot, loaded.Merged, []string{"file.txt"}, compiled.Snapshot); err != nil {
 		t.Fatalf("stage persisted Merged View: %v", err)
 	}
 	changedPolicy := testPolicy
 	changedPolicy.Export.MaxFileBytes--
-	if _, err := loadPending(projectState, changedPolicy); err == nil || !strings.Contains(err.Error(), "export policy") {
-		t.Fatalf("changed export policy was accepted: %v", err)
+	if loadedAfterChange, err := loadPending(projectState, changedPolicy); err != nil || loadedAfterChange.ChangeSet.Digest != persisted.ChangeSet.Digest {
+		t.Fatalf("self-contained pending Change Set did not survive an unrelated current policy change: loaded=%+v error=%v", loadedAfterChange, err)
 	}
 	if err := os.WriteFile(filepath.Join(loaded.BaselineRoot, "file.txt"), []byte("tampered baseline\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -1207,7 +1221,7 @@ func TestLegacyPendingChangeRemainsReviewableWhenHostMatchesBaseline(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicyDigest: compiled.Digest}
+	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest}
 	persisted, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedSource, Merged: merged, ChangeSet: changes})
 	if err != nil {
 		t.Fatal(err)
@@ -1420,6 +1434,146 @@ func TestHostProjectConfigurationMustBeAppliedBeforeUse(t *testing.T) {
 	output.Reset()
 	if err := a.run(context.Background(), []string{"config", "path", "--dir", project}); err != nil || !strings.Contains(output.String(), paths.WebOrigins) {
 		t.Fatalf("path output=%q error=%v", output.String(), err)
+	}
+}
+
+func TestConfigApplyClassifiesNextSessionAndRecreationChanges(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	var output bytes.Buffer
+	a := &app{store: store, configs: configs, output: &output, errors: &output}
+	prepareTestSetup(t, a)
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	projectState := filepath.Join(store.Root, "projects", projectID)
+	locator := filepath.Join(projectState, approvalControlLocator)
+	if err := os.WriteFile(locator, []byte(`{"version":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, rules, err := configs.Load(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Session.TTLSeconds++
+	if err := configs.Save(projectID, config, rules); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := a.run(context.Background(), []string{"config", "diff", "--dir", project}); err != nil || !strings.Contains(output.String(), "Application (next-session): session") {
+		t.Fatalf("next-Session diff output=%q error=%v", output.String(), err)
+	}
+	output.Reset()
+	if err := a.run(context.Background(), []string{"config", "apply", "--dir", project}); err != nil || !strings.Contains(output.String(), "active Session is unchanged") {
+		t.Fatalf("next-Session apply output=%q error=%v", output.String(), err)
+	}
+	config, rules, err = configs.Load(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Resources.CPUs++
+	if err := configs.Save(projectID, config, rules); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := a.run(context.Background(), []string{"config", "diff", "--dir", project}); err != nil || !strings.Contains(output.String(), "Application (recreate-required): resources") {
+		t.Fatalf("recreate diff output=%q error=%v", output.String(), err)
+	}
+	if err := a.run(context.Background(), []string{"config", "apply", "--dir", project}); err == nil || !strings.Contains(err.Error(), "require VM recreation") {
+		t.Fatalf("VM-bound configuration changed an existing VM: %v", err)
+	}
+}
+
+func TestActivationPolicyReloadUsesNextSessionChangesAndRejectsVMBoundDrift(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	a := &app{store: store, configs: configs, output: io.Discard, errors: io.Discard}
+	prepareTestSetup(t, a)
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	initial, policyPath, _, err := a.loadPolicy(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := initial
+	next.Session.TTLSeconds++
+	next.UpdatedAt = time.Now().UTC()
+	if err := a.savePolicyAndConfig(policyPath, next); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := a.reloadActivationPolicy(initial, policyPath)
+	if err != nil || loaded.Session.TTLSeconds != next.Session.TTLSeconds {
+		t.Fatalf("next Session policy=%+v error=%v", loaded.Session, err)
+	}
+	recreate := next
+	recreate.Resources.CPUs++
+	recreate.UpdatedAt = time.Now().Add(time.Second).UTC()
+	if err := a.savePolicyAndConfig(policyPath, recreate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.reloadActivationPolicy(initial, policyPath); err == nil || !strings.Contains(err.Error(), "VM-bound fields [resources]") {
+		t.Fatalf("VM-bound policy drift was accepted: %v", err)
+	}
+}
+
+func TestConfigApplyEnforcesAuditRetentionImmediately(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	var output bytes.Buffer
+	a := &app{store: store, configs: configs, output: &output, errors: &output}
+	prepareTestSetup(t, a)
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	auditDirectory := filepath.Join(store.Root, "audit", projectID)
+	if err := os.MkdirAll(auditDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	oldLog := filepath.Join(auditDirectory, "audit-20200101.jsonl")
+	if err := os.WriteFile(oldLog, []byte("fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config, rules, err := configs.Load(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Audit.RetentionDays = 1
+	if err := configs.Save(projectID, config, rules); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := a.run(context.Background(), []string{"config", "apply", "--dir", project}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(oldLog); !errors.Is(err, os.ErrNotExist) || !strings.Contains(output.String(), "Application (immediate): audit") {
+		t.Fatalf("old audit log remained or apply timing was omitted: output=%q error=%v", output.String(), err)
 	}
 }
 
