@@ -1262,7 +1262,7 @@ func TestPruneProjectAuditUsesOnlyCurrentProjectRetentionAndRecordsResult(t *tes
 	}
 }
 
-func TestProjectInitCreatesPinnedPolicyAndSafeInitialSnapshot(t *testing.T) {
+func TestProjectInitCreatesPinnedPolicyWithoutPrematureSnapshot(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1287,14 +1287,66 @@ func TestProjectInitCreatesPinnedPolicyAndSafeInitialSnapshot(t *testing.T) {
 	if err != nil || migrated || loaded.Mode != "dev" || loaded.Dependency.OpenCode != dependency.OpenCodeVersion {
 		t.Fatalf("policy=%+v migrated=%v error=%v", loaded, migrated, err)
 	}
-	if _, err := os.Lstat(filepath.Join(store.Root, "projects", state.ProjectID(project), "initial-snapshot", "hello.txt")); err != nil {
+	if _, err := os.Lstat(filepath.Join(store.Root, "projects", state.ProjectID(project), "initial-snapshot")); !os.IsNotExist(err) {
+		t.Fatalf("project init created an unused snapshot: %v", err)
+	}
+	if !strings.Contains(output.String(), "snapshot preview") {
+		t.Fatalf("project init did not explain first Snapshot approval: %q", output.String())
+	}
+}
+
+func TestSnapshotPreviewApprovalIsDigestBoundAndProtectsNestedGit(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	project := filepath.Join(base, "project")
+	if err := os.MkdirAll(filepath.Join(project, "nested", ".git"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(project, "after.txt"), []byte("after\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(project, ".env"), []byte("TOKEN=secret\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Join(store.Root, "projects", state.ProjectID(project), "initial-snapshot", "after.txt")); !os.IsNotExist(err) {
-		t.Fatalf("initial snapshot was not immutable: %v", err)
+	if err := os.WriteFile(filepath.Join(project, "nested", ".git", "config"), []byte("credential=secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state", "sunaba")}
+	configs := &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	var output bytes.Buffer
+	a := &app{store: store, configs: configs, output: &output, errors: &output}
+	prepareTestSetup(t, a)
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := a.run(context.Background(), []string{"snapshot", "preview", "--dir", project}); err != nil {
+		t.Fatal(err)
+	}
+	preview := output.String()
+	if !strings.Contains(preview, "Sensitive filename candidate: .env") || strings.Contains(preview, "credential=secret") || strings.Contains(preview, "nested/.git") {
+		t.Fatalf("unsafe preview output: %q", preview)
+	}
+	var digest string
+	for _, line := range strings.Split(preview, "\n") {
+		if strings.HasPrefix(line, "Snapshot digest: ") {
+			digest = strings.TrimPrefix(line, "Snapshot digest: ")
+		}
+	}
+	if digest == "" {
+		t.Fatalf("preview digest missing: %q", preview)
+	}
+	if err := a.run(context.Background(), []string{"snapshot", "approve", "--dir", project, "--digest", digest}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "new.txt"), []byte("changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.run(context.Background(), []string{"snapshot", "approve", "--dir", project, "--digest", digest}); err == nil || !strings.Contains(err.Error(), "digest changed") {
+		t.Fatalf("stale digest approval was accepted: %v", err)
+	}
+}
+
+func TestGitignoreImportOnlyAcceptsLiteralCandidates(t *testing.T) {
+	candidates, skipped, err := parseGitignoreExclusionCandidates([]byte("# comment\n/node_modules/\nbuild/output\n*.key\n!important\n../escape\n"))
+	if err != nil || strings.Join(candidates, ",") != "build/output,node_modules" || skipped != 3 {
+		t.Fatalf("candidates=%v skipped=%d error=%v", candidates, skipped, err)
 	}
 }
 

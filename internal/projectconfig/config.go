@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,7 +26,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 2
+	CurrentSchemaVersion = 3
 	ProjectFileName      = "project.json"
 	WebOriginsFileName   = "web-origins.txt"
 	maxConfigBytes       = 1 << 20
@@ -49,6 +50,7 @@ type Config struct {
 	Git           GitConfig             `json:"git"`
 	Web           WebConfig             `json:"web"`
 	Export        policy.ExportPolicy   `json:"export"`
+	Snapshot      policy.SnapshotPolicy `json:"snapshot"`
 	Audit         policy.AuditPolicy    `json:"audit"`
 }
 
@@ -200,7 +202,7 @@ func (s *Store) Load(projectID string) (Config, []webgateway.OriginRule, error) 
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return Config{}, nil, fmt.Errorf("Project configuration contains trailing data")
 	}
-	if config.SchemaVersion == 1 {
+	if config.SchemaVersion == 1 || config.SchemaVersion == 2 {
 		config.SchemaVersion = CurrentSchemaVersion
 	}
 	if state.ProjectID(config.ProjectRoot) != projectID {
@@ -281,8 +283,9 @@ func FromPolicy(effective policy.ProjectPolicy) (Config, []webgateway.OriginRule
 			MaxConnectSeconds: effective.Web.MaxConnectSeconds, MaxUploadBytes: effective.Web.MaxUploadBytes,
 			MaxDownloadBytes: effective.Web.MaxDownloadBytes, MaxTotalBytes: effective.Web.MaxTotalBytes,
 		},
-		Export: effective.Export,
-		Audit:  effective.Audit,
+		Export:   effective.Export,
+		Snapshot: effective.Snapshot,
+		Audit:    effective.Audit,
 	}
 	return normalizeConfig(config), normalizeRules(effective.Web.CustomRules)
 }
@@ -314,7 +317,7 @@ func Validate(config Config, rules []webgateway.OriginRule) error {
 			MaxRequests: config.Web.MaxRequests, MaxConcurrent: config.Web.MaxConcurrent, MaxConnectSeconds: config.Web.MaxConnectSeconds,
 			MaxUploadBytes: config.Web.MaxUploadBytes, MaxDownloadBytes: config.Web.MaxDownloadBytes, MaxTotalBytes: config.Web.MaxTotalBytes,
 		},
-		Export: config.Export, Audit: config.Audit, ProtectedPaths: []string{".git"}, CreatedAt: created, UpdatedAt: created,
+		Export: config.Export, Snapshot: normalizeConfig(config).Snapshot, Audit: config.Audit, ProtectedPaths: []string{".git"}, CreatedAt: created, UpdatedAt: created,
 	}
 	if candidate.Web.Enabled {
 		candidate.Web.BlocklistManifest = filepath.Join(config.ProjectRoot, ".sunaba-validation-blocklist.json")
@@ -361,6 +364,7 @@ func Compile(config Config, rules []webgateway.OriginRule, base policy.ProjectPo
 		result.Web.BlocklistSHA256 = ""
 	}
 	result.Export = config.Export
+	result.Snapshot = normalizeConfig(config).Snapshot
 	result.Audit = config.Audit
 	result.ProtectedPaths = []string{".git"}
 	result.UpdatedAt = now.UTC()
@@ -488,6 +492,11 @@ func normalizeConfig(config Config) Config {
 	sort.Slice(config.Git.Remotes, func(i, j int) bool { return config.Git.Remotes[i].Name < config.Git.Remotes[j].Name })
 	config.Web.OriginPresets = append(make([]string, 0, len(config.Web.OriginPresets)), config.Web.OriginPresets...)
 	sort.Strings(config.Web.OriginPresets)
+	config.Snapshot.Exclude = append(make([]string, 0, len(config.Snapshot.Exclude)), config.Snapshot.Exclude...)
+	sort.Slice(config.Snapshot.Exclude, func(i, j int) bool {
+		return strings.ToLower(config.Snapshot.Exclude[i]) < strings.ToLower(config.Snapshot.Exclude[j])
+	})
+	config.Snapshot.Exclude = slices.CompactFunc(config.Snapshot.Exclude, strings.EqualFold)
 	return config
 }
 

@@ -191,6 +191,9 @@ func ParseFrozenRootFS(archivePath, quarantine string, baseline SnapshotManifest
 			}
 		case strings.HasPrefix(name, upperPrefix+"/"):
 			relative := strings.TrimPrefix(name, upperPrefix+"/")
+			if policy.Workspace.isExcludedPath(relative) {
+				continue
+			}
 			if _, exists := upperSeen[relative]; exists {
 				return FrozenExport{}, fmt.Errorf("duplicate upper path %q", relative)
 			}
@@ -211,6 +214,9 @@ func ParseFrozenRootFS(archivePath, quarantine string, baseline SnapshotManifest
 			mergedRootSeen = true
 		case strings.HasPrefix(name, mergedPrefix+"/"):
 			relative := strings.TrimPrefix(name, mergedPrefix+"/")
+			if policy.Workspace.isExcludedPath(relative) {
+				continue
+			}
 			if _, exists := mergedSeen[relative]; exists {
 				return FrozenExport{}, fmt.Errorf("duplicate merged export path %q", relative)
 			}
@@ -446,10 +452,11 @@ func validateWorkspacePath(relative string, policy SnapshotPolicy) error {
 			return err
 		}
 	}
-	for _, protected := range policy.ProtectedPaths {
-		if strings.EqualFold(components[0], protected) {
-			return fmt.Errorf("workspace path %q targets Protected Path", relative)
-		}
+	if policy.isProtectedPath(relative) {
+		return fmt.Errorf("workspace path %q targets Protected Path", relative)
+	}
+	if policy.isExcludedPath(relative) {
+		return fmt.Errorf("workspace path %q targets excluded Snapshot path", relative)
 	}
 	return nil
 }

@@ -149,21 +149,9 @@ func (a *app) projectInit(ctx context.Context, projectArgument, mode, modelAuth 
 	if err := persistConfigAndPolicy(configStore, projectState, policyPath, projectConfig, originRules, projectPolicy); err != nil {
 		return err
 	}
-	initialRoot := filepath.Join(projectState, "initial-snapshot")
-	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
-	if err != nil {
-		return err
-	}
-	initial, err := workspace.CreateProjectSnapshot(root, initialRoot, exportPolicy.Snapshot)
-	if err != nil {
-		return err
-	}
-	if err := writePrivateJSON(filepath.Join(projectState, "initial-snapshot.json"), initial); err != nil {
-		return err
-	}
 	createdState = false
 	createdConfig = false
-	fmt.Fprintf(a.output, "Registered Project %s (%s) in %s mode. Host configuration: %s\n", projectPolicy.ProjectID, root, projectPolicy.Mode, configPaths.Project)
+	fmt.Fprintf(a.output, "Registered Project %s (%s) in %s mode. Host configuration: %s\nRun 'sunaba snapshot preview' and approve its digest before the first VM is created.\n", projectPolicy.ProjectID, root, projectPolicy.Mode, configPaths.Project)
 	return nil
 }
 
@@ -583,7 +571,7 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 		if err != nil {
 			return err
 		}
-		compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+		compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
 		if err != nil {
 			return err
 		}
@@ -605,7 +593,7 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 }
 
 func buildPendingReview(pending pendingChange, projectPolicy policy.ProjectPolicy, options workspace.ReviewOptions, allowLegacyMetadata bool) (workspace.Review, error) {
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
 	if err != nil {
 		return workspace.Review{}, err
 	}

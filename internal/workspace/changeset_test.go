@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,5 +94,20 @@ func TestBuildChangeSetRejectsProtectedManifest(t *testing.T) {
 	}
 	if _, err := BuildChangeSet(baseline, malicious, DefaultSnapshotPolicy()); err == nil {
 		t.Fatal("Protected Path manifest was accepted")
+	}
+}
+
+func TestCanonicalManifestRejectsNestedGitAndExcludedPaths(t *testing.T) {
+	policy := DefaultSnapshotPolicy()
+	policy.ExcludedPaths = []string{"cache"}
+	for _, entryPath := range []string{"nested/.git/config", "cache/result.bin"} {
+		entry := SnapshotEntry{Path: entryPath, Type: TypeFile, Mode: 0600, Size: 1, SHA256: strings.Repeat("a", 64)}
+		manifest, err := finalizeSnapshotManifest("/snapshot", []SnapshotEntry{entry}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateCanonicalManifest(manifest, policy); err == nil {
+			t.Fatalf("unsafe manifest path accepted: %s", entryPath)
+		}
 	}
 }

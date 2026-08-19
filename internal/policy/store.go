@@ -53,6 +53,7 @@ type legacyPolicyV2 struct {
 
 type legacyPolicyV3 ProjectPolicy
 type legacyPolicyV4 ProjectPolicy
+type legacyPolicyV6 ProjectPolicy
 
 type legacyPolicyV5 struct {
 	SchemaVersion  int              `json:"schema_version"`
@@ -134,6 +135,16 @@ func LoadReadOnly(path string, now time.Time) (ProjectPolicy, bool, error) {
 			return ProjectPolicy{}, false, err
 		}
 		return migrated, true, nil
+	case 6:
+		var legacy legacyPolicyV6
+		if err := decodeStrict(data, &legacy); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		migrated, err := migrateV6(legacy, now)
+		if err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		return migrated, true, nil
 	case 4:
 		var legacy legacyPolicyV4
 		if err := decodeStrict(data, &legacy); err != nil {
@@ -177,6 +188,14 @@ func LoadReadOnly(path string, now time.Time) (ProjectPolicy, bool, error) {
 	default:
 		return ProjectPolicy{}, false, fmt.Errorf("unsupported Project policy schema %d", envelope.SchemaVersion)
 	}
+}
+
+func migrateV6(legacy legacyPolicyV6, now time.Time) (ProjectPolicy, error) {
+	result := ProjectPolicy(legacy)
+	result.SchemaVersion = CurrentSchemaVersion
+	result.Snapshot = SnapshotPolicy{}
+	result.UpdatedAt = now.UTC()
+	return result, result.Validate()
 }
 
 func migrateV5(legacy legacyPolicyV5, now time.Time) (ProjectPolicy, error) {

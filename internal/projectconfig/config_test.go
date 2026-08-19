@@ -3,6 +3,7 @@ package projectconfig
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -264,7 +265,7 @@ func TestStoreRejectsUnknownConfigurationAndDoesNotFollowDirectorySymlink(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = []byte(strings.Replace(string(data), "\"schema_version\": 2,", "\"schema_version\": 2,\n  \"unknown\": true,", 1))
+	data = []byte(strings.Replace(string(data), fmt.Sprintf("\"schema_version\": %d,", CurrentSchemaVersion), fmt.Sprintf("\"schema_version\": %d,\n  \"unknown\": true,", CurrentSchemaVersion), 1))
 	if err := os.WriteFile(paths.Project, data, 0600); err != nil {
 		t.Fatal(err)
 	}

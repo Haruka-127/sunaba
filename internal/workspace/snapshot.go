@@ -33,6 +33,7 @@ type SnapshotPolicy struct {
 	MaxTotalSize   int64
 	MaxSymlinkSize int
 	ProtectedPaths []string
+	ExcludedPaths  []string
 }
 
 func DefaultSnapshotPolicy() SnapshotPolicy {
@@ -43,6 +44,7 @@ func DefaultSnapshotPolicy() SnapshotPolicy {
 		MaxTotalSize:   1 << 30,
 		MaxSymlinkSize: 4096,
 		ProtectedPaths: []string{".git", ".sunaba"},
+		ExcludedPaths:  nil,
 	}
 }
 
@@ -134,6 +136,14 @@ func (p SnapshotPolicy) validate() error {
 			return fmt.Errorf("invalid protected path %q", protected)
 		}
 	}
+	if len(p.ExcludedPaths) > 4096 {
+		return fmt.Errorf("snapshot exclusion count exceeds 4096")
+	}
+	for _, excluded := range p.ExcludedPaths {
+		if excluded == "" || excluded == "." || path.IsAbs(excluded) || path.Clean(excluded) != excluded || excluded == ".." || strings.HasPrefix(excluded, "../") || strings.ContainsAny(excluded, "\\\x00") {
+			return fmt.Errorf("invalid excluded path %q", excluded)
+		}
+	}
 	return nil
 }
 
@@ -155,7 +165,7 @@ func (w *snapshotWalker) walkDirectory(parentFD int, relative string, depth int)
 		if relative != "" {
 			entryPath = path.Join(relative, name)
 		}
-		if w.isProtected(entryPath) {
+		if w.isProtected(entryPath) || w.isExcluded(entryPath) {
 			continue
 		}
 		if len(w.result.Entries) >= w.policy.MaxEntries {
@@ -291,9 +301,36 @@ func validateEntryName(name string) error {
 }
 
 func (w *snapshotWalker) isProtected(entryPath string) bool {
-	first := strings.Split(entryPath, "/")[0]
-	for _, protected := range w.policy.ProtectedPaths {
-		if strings.EqualFold(first, protected) {
+	return w.policy.isProtectedPath(entryPath)
+}
+
+func (p SnapshotPolicy) isProtectedPath(entryPath string) bool {
+	components := strings.Split(entryPath, "/")
+	for _, protected := range p.ProtectedPaths {
+		if strings.EqualFold(components[0], protected) {
+			return true
+		}
+		if !strings.EqualFold(protected, ".git") && !strings.EqualFold(protected, ".sunaba") {
+			continue
+		}
+		for _, component := range components[1:] {
+			if strings.EqualFold(component, protected) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (w *snapshotWalker) isExcluded(entryPath string) bool {
+	return w.policy.isExcludedPath(entryPath)
+}
+
+func (p SnapshotPolicy) isExcludedPath(entryPath string) bool {
+	foldedEntry := strings.ToLower(entryPath)
+	for _, excluded := range p.ExcludedPaths {
+		foldedExcluded := strings.ToLower(excluded)
+		if foldedEntry == foldedExcluded || strings.HasPrefix(foldedEntry, foldedExcluded+"/") {
 			return true
 		}
 	}

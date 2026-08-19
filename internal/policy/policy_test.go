@@ -76,6 +76,24 @@ func TestCompileExportPolicyPreservesConfiguredLimitsAndHardBounds(t *testing.T)
 	}
 }
 
+func TestCompileExportPolicyCanonicalizesSnapshotExclusions(t *testing.T) {
+	configured := ExportPolicy{MaxEntries: 100, MaxFileBytes: 1 << 20, MaxTotalBytes: 2 << 20}
+	first, err := CompileExportPolicy(configured, []string{".git"}, []string{"vendor/cache", "Build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CompileExportPolicy(configured, []string{".git"}, []string{"Build", "vendor/cache"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Digest != second.Digest || !reflect.DeepEqual(first.Snapshot.ExcludedPaths, []string{"Build", "vendor/cache"}) {
+		t.Fatalf("non-canonical exclusions: first=%+v second=%+v", first, second)
+	}
+	if _, err := CompileExportPolicy(configured, []string{".git"}, []string{"build", "Build"}); err != nil {
+		t.Fatalf("case-equivalent exclusions should canonicalize safely: %v", err)
+	}
+}
+
 func TestPolicyRejectsWebQuotaAboveGatewayMaximum(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	candidate, err := New(project, strings.Repeat("a", 64), "1.18.16", "1.2.2", "sunaba-base:test", "secure", time.Now())
@@ -95,7 +113,7 @@ func TestPolicyRejectsWebQuotaAboveGatewayMaximum(t *testing.T) {
 	}
 }
 
-func TestLegacyV1MigratesAtomicallyToStrictV6(t *testing.T) {
+func TestLegacyV1MigratesAtomicallyToStrictV7(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	legacy := legacyPolicyV1{
@@ -119,8 +137,8 @@ func TestLegacyV1MigratesAtomicallyToStrictV6(t *testing.T) {
 		t.Fatalf("migrated=%+v changed=%v error=%v", migrated, changed, err)
 	}
 	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), `"schema_version": 6`) || !strings.Contains(string(data), `"auth": "api_key"`) || strings.Contains(string(data), `"web_origins"`) {
-		t.Fatalf("policy file was not atomically replaced with v6: %s", data)
+	if !strings.Contains(string(data), `"schema_version": 7`) || !strings.Contains(string(data), `"auth": "api_key"`) || strings.Contains(string(data), `"web_origins"`) {
+		t.Fatalf("policy file was not atomically replaced with v7: %s", data)
 	}
 	if leftovers, _ := filepath.Glob(filepath.Join(directory, ".sunaba-policy-*.tmp")); len(leftovers) != 0 {
 		t.Fatalf("migration temporary files remained: %v", leftovers)
@@ -151,6 +169,7 @@ func TestLegacyV5WebRulesMigrateWithoutExpandingAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacyWeb := legacyDocument["web"].(map[string]any)
+	delete(legacyDocument, "snapshot")
 	delete(legacyWeb, "origin_presets")
 	delete(legacyWeb, "origin_preset_sha256")
 	delete(legacyWeb, "custom_rules")
@@ -166,6 +185,35 @@ func TestLegacyV5WebRulesMigrateWithoutExpandingAccess(t *testing.T) {
 	migrated, changed, err := LoadAndMigrate(path, now)
 	if err != nil || !changed || len(migrated.Web.OriginPresets) != 0 || !reflect.DeepEqual(migrated.Web.CustomRules, []webgateway.OriginRule{migratedRule}) || !reflect.DeepEqual(migrated.Web.Rules, []webgateway.OriginRule{migratedRule}) {
 		t.Fatalf("migrated=%+v changed=%v error=%v", migrated.Web, changed, err)
+	}
+}
+
+func TestLegacyV6MigratesWithEmptySnapshotExclusions(t *testing.T) {
+	project, _ := filepath.EvalSymlinks(t.TempDir())
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	legacy, err := New(project, strings.Repeat("e", 64), "1.18.16", "1.2.2", "sunaba-base:1.18.16-secure.1", "secure", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.SchemaVersion = 6
+	encoded, _ := json.Marshal(legacy)
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	delete(document, "snapshot")
+	encoded, _ = json.Marshal(document)
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	path := filepath.Join(root, "state", "policy.json")
+	if err := os.Mkdir(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, changed, err := LoadReadOnly(path, now)
+	if err != nil || !changed || migrated.SchemaVersion != CurrentSchemaVersion || len(migrated.Snapshot.Exclude) != 0 {
+		t.Fatalf("migrated=%+v changed=%v error=%v", migrated, changed, err)
 	}
 }
 

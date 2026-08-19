@@ -103,7 +103,7 @@ func persistPending(projectState string, active *session.Session, result session
 }
 
 func loadPending(projectState string, projectPolicy policy.ProjectPolicy) (pendingChange, error) {
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
 	if err != nil {
 		return pendingChange{}, err
 	}

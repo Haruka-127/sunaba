@@ -43,6 +43,7 @@ func (a *app) command() *urfavecli.Command {
 	command.Commands = []*urfavecli.Command{
 		a.setupCommand(), a.versionsCommand(), a.updateCommand(),
 		a.projectCommand(), a.configCommand(), a.credentialsCommand(), a.modelCommand(),
+		a.snapshotCommand(),
 		a.simpleProjectCommand("up", "Prepare the Project VM", projectSelectorFlags(&urfavecli.StringFlag{Name: "mode", Usage: "Execution mode (secure or dev)", OnlyOnce: true, Validator: optionalEnum("mode", "secure", "dev")}), a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.up(ctx, dir, cmd.String("mode"))
 		})),
@@ -62,6 +63,22 @@ func (a *app) command() *urfavecli.Command {
 	}
 	addProjectSelectorConstraints(command)
 	return command
+}
+
+func (a *app) snapshotCommand() *urfavecli.Command {
+	return &urfavecli.Command{Name: "snapshot", Usage: "Preview and approve host Project snapshots", Commands: []*urfavecli.Command{
+		{Name: "preview", Usage: "Show bounded snapshot metadata without file contents", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+			return a.snapshotPreview(dir)
+		}))},
+		{Name: "approve", Usage: "Approve the exact digest shown by snapshot preview", Flags: projectSelectorFlags(&urfavecli.StringFlag{Name: "digest", Usage: "Exact preview digest", Required: true, OnlyOnce: true}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.snapshotApprove(dir, cmd.String("digest"))
+		}))},
+		{Name: "exclude", Usage: "Manage host-only snapshot exclusions", Commands: []*urfavecli.Command{
+			{Name: "import-gitignore", Usage: "Import literal .gitignore entries as exclusion candidates", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
+				return a.snapshotImportGitignore(dir)
+			}))},
+		}},
+	}}
 }
 
 func (a *app) simpleProjectCommand(name, usage string, flags []urfavecli.Flag, action urfavecli.ActionFunc) *urfavecli.Command {
