@@ -46,6 +46,63 @@ type managedActivation struct {
 	modelUsage  func() (int64, int64)
 }
 
+type sessionDeadlineTimers struct {
+	idle     *time.Timer
+	expiry   *time.Timer
+	idleC    <-chan time.Time
+	expiryC  <-chan time.Time
+	revision uint64
+}
+
+func newSessionDeadlineTimers() *sessionDeadlineTimers {
+	idle := time.NewTimer(time.Hour)
+	expiry := time.NewTimer(time.Hour)
+	idle.Stop()
+	expiry.Stop()
+	return &sessionDeadlineTimers{idle: idle, expiry: expiry}
+}
+
+func (t *sessionDeadlineTimers) reconcile(snapshot sessionDeadlineSnapshot, now time.Time) error {
+	t.disarm()
+	t.revision = snapshot.revision
+	if snapshot.state != "running" {
+		return nil
+	}
+	if snapshot.idleDeadline.IsZero() || snapshot.expiresAt.IsZero() {
+		return fmt.Errorf("running Agent Session has incomplete deadlines")
+	}
+	t.idle.Reset(deadlineDelay(snapshot.idleDeadline, now))
+	t.expiry.Reset(deadlineDelay(snapshot.expiresAt, now))
+	t.idleC = t.idle.C
+	t.expiryC = t.expiry.C
+	return nil
+}
+
+func (t *sessionDeadlineTimers) disarm() {
+	stopAndDrainTimer(t.idle)
+	stopAndDrainTimer(t.expiry)
+	t.idleC = nil
+	t.expiryC = nil
+}
+
+func deadlineDelay(deadline, now time.Time) time.Duration {
+	delay := deadline.Sub(now)
+	if delay <= 0 {
+		return time.Nanosecond
+	}
+	return delay
+}
+
+func stopAndDrainTimer(timer *time.Timer) {
+	if timer == nil || timer.Stop() {
+		return
+	}
+	select {
+	case <-timer.C:
+	default:
+	}
+}
+
 func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (*managedSession, error) {
 	configLock, err := a.store.AcquireConfigLock(projectPolicy.ProjectID)
 	if err != nil {
@@ -384,27 +441,10 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, control.Close()) }()
-	expiry := time.NewTimer(controlled.expiryDelay(time.Now()))
-	defer expiry.Stop()
-	idleTimer := time.NewTimer(controlled.idleDelay(time.Now()))
-	defer idleTimer.Stop()
-	resetIdle := func(delay time.Duration) {
-		if !idleTimer.Stop() {
-			select {
-			case <-idleTimer.C:
-			default:
-			}
-		}
-		idleTimer.Reset(delay)
-	}
-	resetExpiry := func(delay time.Duration) {
-		if !expiry.Stop() {
-			select {
-			case <-expiry.C:
-			default:
-			}
-		}
-		expiry.Reset(delay)
+	deadlines := newSessionDeadlineTimers()
+	defer deadlines.disarm()
+	if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
+		return err
 	}
 	for {
 		select {
@@ -414,27 +454,30 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 			recoveryRetained = controlled.recoveryRetained()
 			destroyed = true
 			return nil
-		case <-expiry.C:
+		case <-controlled.deadlineChanged:
+			if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
+				return err
+			}
+		case now := <-deadlines.expiryC:
 			pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			pauseErr := controlled.pause(pauseContext)
+			_, pauseErr := controlled.pauseIfExpired(pauseContext, deadlines.revision, now)
 			cancel()
 			if pauseErr != nil {
 				return fmt.Errorf("pause expired Agent Session: %w", pauseErr)
 			}
-			resetExpiry(controlled.expiryDelay(time.Now()))
-		case <-controlled.activity:
-			resetIdle(controlled.idleDelay(time.Now()))
-			resetExpiry(controlled.expiryDelay(time.Now()))
-		case now := <-idleTimer.C:
-			if controlled.idleExpired(now) {
-				pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				pauseErr := controlled.pause(pauseContext)
-				cancel()
-				if pauseErr != nil {
-					return fmt.Errorf("pause idle Agent Session: %w", pauseErr)
-				}
+			if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
+				return err
 			}
-			idleTimer.Reset(controlled.idleDelay(time.Now()))
+		case now := <-deadlines.idleC:
+			pauseContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			_, pauseErr := controlled.pauseIfIdle(pauseContext, deadlines.revision, now)
+			cancel()
+			if pauseErr != nil {
+				return fmt.Errorf("pause idle Agent Session: %w", pauseErr)
+			}
+			if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
+				return err
+			}
 		}
 	}
 }

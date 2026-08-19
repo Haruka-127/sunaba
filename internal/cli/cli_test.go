@@ -983,12 +983,15 @@ func TestSupervisorExecUsesExactArgvAndStructuredSanitizedOutput(t *testing.T) {
 }
 
 func TestSupervisorHeartbeatExtendsIdleDeadline(t *testing.T) {
-	clock := time.Unix(1_700_000_000, 0)
+	start := time.Unix(1_700_000_000, 0)
+	clock := start
+	target := &fakeSessionControlTarget{}
 	controlled := &controlledSession{
-		active: &fakeSessionControlTarget{}, expiresAt: clock.Add(time.Hour), idleTimeout: 10 * time.Second,
-		lastActivity: clock, now: func() time.Time { return clock }, activity: make(chan struct{}, 1), state: "running", exit: make(chan struct{}),
+		active: target, expiresAt: start.Add(time.Hour), idleTimeout: 10 * time.Second,
+		lastActivity: start, now: func() time.Time { return clock }, deadlineChanged: make(chan struct{}, 1), deadlineRevision: 1, state: "running", exit: make(chan struct{}),
 	}
-	if controlled.idleExpired(clock.Add(9 * time.Second)) {
+	initial := controlled.deadlineSnapshot()
+	if paused, err := controlled.pauseIfIdle(context.Background(), initial.revision, start.Add(9*time.Second)); err != nil || paused {
 		t.Fatal("session expired before its idle deadline")
 	}
 	clock = clock.Add(8 * time.Second)
@@ -996,18 +999,111 @@ func TestSupervisorHeartbeatExtendsIdleDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-controlled.activity:
+	case <-controlled.deadlineChanged:
 	default:
 		t.Fatal("heartbeat did not notify the idle deadline timer")
 	}
-	if delay := controlled.idleDelay(clock.Add(3 * time.Second)); delay != 7*time.Second {
-		t.Fatalf("idle timer delay=%s", delay)
+	refreshed := controlled.deadlineSnapshot()
+	if refreshed.revision == initial.revision || !refreshed.idleDeadline.Equal(start.Add(18*time.Second)) {
+		t.Fatalf("refreshed deadline=%s revision=%d initial=%d", refreshed.idleDeadline, refreshed.revision, initial.revision)
 	}
-	if controlled.idleExpired(clock.Add(9 * time.Second)) {
+	if paused, err := controlled.pauseIfIdle(context.Background(), refreshed.revision, start.Add(17*time.Second)); err != nil || paused {
 		t.Fatal("heartbeat did not extend the idle deadline")
 	}
-	if !controlled.idleExpired(clock.Add(10 * time.Second)) {
+	if paused, err := controlled.pauseIfIdle(context.Background(), refreshed.revision, start.Add(18*time.Second)); err != nil || !paused || target.paused != 1 {
 		t.Fatal("session remained active at the extended idle deadline")
+	}
+}
+
+func TestSupervisorDeadlineTimersDisarmWhilePausedAndRejectStaleEvents(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	clock := start
+	target := &fakeSessionControlTarget{}
+	controlled := &controlledSession{
+		active: target, expiresAt: start.Add(time.Hour), idleTimeout: 10 * time.Second, lastActivity: start,
+		now: func() time.Time { return clock }, deadlineChanged: make(chan struct{}, 1), deadlineRevision: 1,
+		state: "running", exit: make(chan struct{}), gitBroker: &rotatingPushBroker{},
+		activate: func(context.Context) (managedActivation, error) {
+			return managedActivation{
+				activation: session.Activation{SessionID: "resumed", ServerPassword: strings.Repeat("r", 32)},
+				expiresAt:  start.Add(2 * time.Hour), idleTimeout: 20 * time.Second,
+			}, nil
+		},
+	}
+	deadlines := newSessionDeadlineTimers()
+	defer deadlines.disarm()
+	initial := controlled.deadlineSnapshot()
+	if err := deadlines.reconcile(initial, start); err != nil {
+		t.Fatal(err)
+	}
+	if deadlines.idleC == nil || deadlines.expiryC == nil {
+		t.Fatal("running session deadlines were not armed")
+	}
+
+	if err := controlled.pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-controlled.deadlineChanged:
+	default:
+		t.Fatal("pause did not notify the deadline owner")
+	}
+	if err := deadlines.reconcile(controlled.deadlineSnapshot(), clock); err != nil {
+		t.Fatal(err)
+	}
+	if deadlines.idleC != nil || deadlines.expiryC != nil {
+		t.Fatal("paused session retained an armed deadline timer")
+	}
+
+	clock = start.Add(time.Minute)
+	if err := controlled.resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-controlled.deadlineChanged:
+	default:
+		t.Fatal("resume did not notify the deadline owner")
+	}
+	resumed := controlled.deadlineSnapshot()
+	if err := deadlines.reconcile(resumed, clock); err != nil {
+		t.Fatal(err)
+	}
+	if deadlines.idleC == nil || deadlines.expiryC == nil || deadlines.revision != resumed.revision {
+		t.Fatal("resumed session deadlines were not rearmed")
+	}
+	if paused, err := controlled.pauseIfIdle(context.Background(), initial.revision, clock.Add(time.Hour)); err != nil || paused || target.paused != 1 {
+		t.Fatalf("stale deadline affected resumed session: paused=%t count=%d error=%v", paused, target.paused, err)
+	}
+	if paused, err := controlled.pauseIfIdle(context.Background(), resumed.revision, clock.Add(20*time.Second)); err != nil || !paused || target.paused != 2 {
+		t.Fatalf("current idle deadline did not pause once: paused=%t count=%d error=%v", paused, target.paused, err)
+	}
+	if paused, err := controlled.pauseIfIdle(context.Background(), resumed.revision, clock.Add(time.Hour)); err != nil || paused || target.paused != 2 {
+		t.Fatalf("idle deadline paused more than once: paused=%t count=%d error=%v", paused, target.paused, err)
+	}
+	if err := deadlines.reconcile(controlled.deadlineSnapshot(), clock.Add(20*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if deadlines.idleC != nil || deadlines.expiryC != nil {
+		t.Fatal("idle pause did not disarm deadline timers")
+	}
+}
+
+func TestSupervisorAbsoluteExpiryPausesOnce(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	target := &fakeSessionControlTarget{}
+	controlled := &controlledSession{
+		active: target, expiresAt: start.Add(time.Minute), idleTimeout: time.Hour, lastActivity: start,
+		deadlineChanged: make(chan struct{}, 1), deadlineRevision: 1, state: "running", exit: make(chan struct{}),
+	}
+	snapshot := controlled.deadlineSnapshot()
+	if paused, err := controlled.pauseIfExpired(context.Background(), snapshot.revision, start.Add(time.Minute-time.Nanosecond)); err != nil || paused {
+		t.Fatalf("session expired early: paused=%t error=%v", paused, err)
+	}
+	if paused, err := controlled.pauseIfExpired(context.Background(), snapshot.revision, start.Add(time.Minute)); err != nil || !paused || target.paused != 1 {
+		t.Fatalf("absolute expiry did not pause once: paused=%t count=%d error=%v", paused, target.paused, err)
+	}
+	if paused, err := controlled.pauseIfExpired(context.Background(), snapshot.revision, start.Add(2*time.Minute)); err != nil || paused || target.paused != 1 {
+		t.Fatalf("absolute expiry paused more than once: paused=%t count=%d error=%v", paused, target.paused, err)
 	}
 }
 

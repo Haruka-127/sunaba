@@ -106,29 +106,30 @@ type sessionControlTarget interface {
 }
 
 type controlledSession struct {
-	active         sessionControlTarget
-	persistent     *session.Session
-	projectID      string
-	vmID           string
-	sessionID      string
-	container      string
-	runtimeRoot    string
-	workspacePath  string
-	attachURL      string
-	projectState   string
-	serverPassword string
-	expiresAt      time.Time
-	idleTimeout    time.Duration
-	lastActivity   time.Time
-	now            func() time.Time
-	activity       chan struct{}
-	mu             sync.Mutex
-	state          string
-	exit           chan struct{}
-	exitOnce       sync.Once
-	activate       func(context.Context) (managedActivation, error)
-	gitBroker      *rotatingPushBroker
-	modelUsage     func() (int64, int64)
+	active           sessionControlTarget
+	persistent       *session.Session
+	projectID        string
+	vmID             string
+	sessionID        string
+	container        string
+	runtimeRoot      string
+	workspacePath    string
+	attachURL        string
+	projectState     string
+	serverPassword   string
+	expiresAt        time.Time
+	idleTimeout      time.Duration
+	lastActivity     time.Time
+	now              func() time.Time
+	deadlineChanged  chan struct{}
+	deadlineRevision uint64
+	mu               sync.Mutex
+	state            string
+	exit             chan struct{}
+	exitOnce         sync.Once
+	activate         func(context.Context) (managedActivation, error)
+	gitBroker        *rotatingPushBroker
+	modelUsage       func() (int64, int64)
 }
 
 func newControlledSession(active *session.Session, projectState string, initial managedActivation, idleTimeout time.Duration, activate func(context.Context) (managedActivation, error), broker *rotatingPushBroker) (*controlledSession, error) {
@@ -140,7 +141,7 @@ func newControlledSession(active *session.Session, projectState string, initial 
 		active: active, persistent: active, projectID: active.ProjectID, vmID: active.VMID, sessionID: active.SessionID, container: active.Container,
 		runtimeRoot: active.Root, workspacePath: active.WorkspacePath, attachURL: active.AttachURL,
 		projectState: projectState, serverPassword: initial.activation.ServerPassword, expiresAt: initial.expiresAt,
-		idleTimeout: idleTimeout, lastActivity: now(), now: now, activity: make(chan struct{}, 1), state: "running", exit: make(chan struct{}),
+		idleTimeout: idleTimeout, lastActivity: now(), now: now, deadlineChanged: make(chan struct{}, 1), deadlineRevision: 1, state: "running", exit: make(chan struct{}),
 		activate: activate, gitBroker: broker,
 		modelUsage: initial.modelUsage,
 	}, nil
@@ -172,8 +173,13 @@ func (s *controlledSession) pause(ctx context.Context) error {
 	if s.state != "running" {
 		return fmt.Errorf("supervisor session is not running")
 	}
+	return s.pauseLocked(ctx)
+}
+
+func (s *controlledSession) pauseLocked(ctx context.Context) error {
 	if err := s.active.Pause(ctx); err != nil {
 		s.state = "failed"
+		s.notifyDeadlineChangedLocked()
 		return err
 	}
 	s.state = "paused"
@@ -182,6 +188,7 @@ func (s *controlledSession) pause(ctx context.Context) error {
 	if s.gitBroker != nil {
 		s.gitBroker.Set(nil)
 	}
+	s.notifyDeadlineChangedLocked()
 	return nil
 }
 
@@ -203,6 +210,7 @@ func (s *controlledSession) resume(ctx context.Context) error {
 	}
 	if err := s.active.ResumeWith(ctx, activation.activation); err != nil {
 		s.state = "failed"
+		s.notifyDeadlineChangedLocked()
 		return err
 	}
 	if s.persistent != nil {
@@ -218,8 +226,9 @@ func (s *controlledSession) resume(ctx context.Context) error {
 	if s.gitBroker != nil {
 		s.gitBroker.Set(activation.gitBroker)
 	}
-	s.touchLocked(s.currentTime())
+	s.lastActivity = s.currentTime()
 	s.state = "running"
+	s.notifyDeadlineChangedLocked()
 	return nil
 }
 
@@ -234,33 +243,38 @@ func (s *controlledSession) heartbeat() error {
 	return nil
 }
 
-func (s *controlledSession) idleExpired(now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.state == "running" && s.idleTimeout >= time.Second && !now.Before(s.lastActivity.Add(s.idleTimeout))
+type sessionDeadlineSnapshot struct {
+	state        string
+	revision     uint64
+	expiresAt    time.Time
+	idleDeadline time.Time
 }
 
-func (s *controlledSession) idleDelay(now time.Time) time.Duration {
+func (s *controlledSession) deadlineSnapshot() sessionDeadlineSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delay := s.lastActivity.Add(s.idleTimeout).Sub(now)
-	if delay <= 0 {
-		return time.Nanosecond
+	return sessionDeadlineSnapshot{
+		state: s.state, revision: s.deadlineRevision, expiresAt: s.expiresAt,
+		idleDeadline: s.lastActivity.Add(s.idleTimeout),
 	}
-	return delay
 }
 
-func (s *controlledSession) expiryDelay(now time.Time) time.Duration {
+func (s *controlledSession) pauseIfIdle(ctx context.Context, revision uint64, now time.Time) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != "running" || s.expiresAt.IsZero() {
-		return 24 * time.Hour
+	if s.deadlineRevision != revision || s.state != "running" || s.idleTimeout < time.Second || now.Before(s.lastActivity.Add(s.idleTimeout)) {
+		return false, nil
 	}
-	delay := s.expiresAt.Sub(now)
-	if delay <= 0 {
-		return time.Nanosecond
+	return true, s.pauseLocked(ctx)
+}
+
+func (s *controlledSession) pauseIfExpired(ctx context.Context, revision uint64, now time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.deadlineRevision != revision || s.state != "running" || s.expiresAt.IsZero() || now.Before(s.expiresAt) {
+		return false, nil
 	}
-	return delay
+	return true, s.pauseLocked(ctx)
 }
 
 func (s *controlledSession) currentTime() time.Time {
@@ -272,9 +286,14 @@ func (s *controlledSession) currentTime() time.Time {
 
 func (s *controlledSession) touchLocked(now time.Time) {
 	s.lastActivity = now
-	if s.activity != nil {
+	s.notifyDeadlineChangedLocked()
+}
+
+func (s *controlledSession) notifyDeadlineChangedLocked() {
+	s.deadlineRevision++
+	if s.deadlineChanged != nil {
 		select {
-		case s.activity <- struct{}{}:
+		case s.deadlineChanged <- struct{}{}:
 		default:
 		}
 	}
@@ -301,6 +320,7 @@ func (s *controlledSession) exportAndDestroyWithOptions(ctx context.Context, dis
 			// destruction, even if host metadata persistence itself reports an
 			// error. Losing the record must never authorize losing guest state.
 			s.state = "recovery"
+			s.notifyDeadlineChangedLocked()
 			s.signalExit()
 			record := s.persistent.RecoveryState(recoveryRequired.Cause.Error())
 			if saveErr := recovery.Save(s.projectState, record); saveErr != nil {
@@ -314,6 +334,7 @@ func (s *controlledSession) exportAndDestroyWithOptions(ctx context.Context, dis
 			return err
 		}
 		s.state = "failed"
+		s.notifyDeadlineChangedLocked()
 		return err
 	}
 	if len(result.ChangeSet.Changes) > 0 {
@@ -323,9 +344,11 @@ func (s *controlledSession) exportAndDestroyWithOptions(ctx context.Context, dis
 		if _, err := persistPending(s.projectState, s.persistent, result); err != nil {
 			if !s.persistent.SupportsFrozenRecovery() {
 				s.state = "failed"
+				s.notifyDeadlineChangedLocked()
 				return err
 			}
 			s.state = "recovery"
+			s.notifyDeadlineChangedLocked()
 			s.signalExit()
 			record := s.persistent.RecoveryStateWithPendingExport(err.Error(), result)
 			saveErr := recovery.Save(s.projectState, record)
@@ -343,9 +366,11 @@ func (s *controlledSession) exportAndDestroyWithOptions(ctx context.Context, dis
 	}
 	if err := s.active.Destroy(ctx); err != nil {
 		s.state = "failed"
+		s.notifyDeadlineChangedLocked()
 		return err
 	}
 	s.state = "exported"
+	s.notifyDeadlineChangedLocked()
 	s.signalExit()
 	return nil
 }
@@ -358,9 +383,11 @@ func (s *controlledSession) destroy(ctx context.Context) error {
 	}
 	if err := s.active.Destroy(ctx); err != nil {
 		s.state = "failed"
+		s.notifyDeadlineChangedLocked()
 		return err
 	}
 	s.state = "destroyed"
+	s.notifyDeadlineChangedLocked()
 	s.signalExit()
 	return nil
 }

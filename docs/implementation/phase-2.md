@@ -40,6 +40,8 @@ unit/race testはadd、modify、delete、rename、Protected Path保持、承認�
 
 Project VM objectとProject lockを保持したままVMをpauseし、別のAgent Sessionで再開できる。VM名、runtime root、workspace、ownership label、live guardは永続VM IDへ固定する。pauseはLocal Attach Relayと全Gateway listenerを閉じ、永続leaseと各handlerをrevokedにしてからVMを停止する。次の開始では新しいSession ID、token、server password、絶対TTL、Gateway handlerを生成し、health/version一致後だけ新leaseとgateをactiveにする。pause中もProject lockを解放せず、終了済みSessionのattach/Gateway capabilityは到達不能である。
 
+2026-08-20のidle timer回帰修正では、Supervisor event loopをidle/TTL timerの単一ownerとし、running状態だけで両deadlineをarmするstate-driven schedulerへ変更した。pause、failed、recovery、exported、destroyedではtimerをstop/drainして受信channelをnil化し、resumeとheartbeatでcurrent deadlineを再armする。各状態・activity更新へrevisionを付け、旧Sessionまたは更新前deadlineの発火が新しいSessionをpauseできないよう、停止直前にcurrent revisionとdeadlineをmutex下で再検証する。明示pause後の無再発火、resume後の再arm、stale event拒否、idle/TTL各1回だけのpauseをunit testで固定し、`./scripts/verify.sh`と`./scripts/verify-race.sh`を通過した。Apple Container実機gateはこの修正では実行していない。
+
 ## 永続session lease
 
 Model Gateway capabilityはmode `0700`のhost state directoryに、mode `0600`のJSON recordとして原子的に永続化する。recordはProject ID、VM ID、Session ID、用途、状態、絶対有効期限へ束縛し、symlink、所有者・mode不一致、不正identity、期限切れ、別Project/VM/用途を拒否する。起動中はpausedで発行し、OpenCode serverのhealth/version確認後だけactiveにする。pauseはVM停止より先にpausedへ遷移し、session終了・export・VM破棄・起動失敗ではrevokedへ遷移する。revoked recordとSession IDは再利用しない。Supervisor processが終了すると専用Unix listenerも失われるため、persisted active recordだけからcapabilityを再発行せずfail closedとなる。
