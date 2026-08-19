@@ -135,6 +135,30 @@ func TestCleanupKeepsExactStoppedDevRecoveryWithoutProcessGuard(t *testing.T) {
 	}
 }
 
+func TestCleanupRefusesStoppedVMWhenRecoveryRecordCouldNotBeSaved(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const projectID = "0123456789ab"
+	resources := make(map[string]runtime.Info)
+	for mode, vmID := range map[string]string{"dev": "vm123456", "secure": "vm654321"} {
+		name := "sunaba-" + projectID + "-" + vmID
+		labels := ownedLabels(projectID, vmID)
+		labels["dev.sunaba.mode"] = mode
+		resources[name] = runtime.Info{Name: name, State: runtime.StateStopped, Labels: labels}
+	}
+	fake := &cleanupRuntime{resources: resources}
+	result, err := Run(context.Background(), Config{Store: &state.Store{Root: root}, Runtime: fake, Audit: recorder})
+	if err != nil || len(result.Refused) != 2 || fake.stopped != "" || fake.removed != "" {
+		t.Fatalf("unrecorded stopped dev result=%+v stopped=%q removed=%q error=%v", result, fake.stopped, fake.removed, err)
+	}
+}
+
 func TestCleanupRefusesLabelOrLeaseSubstitution(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))

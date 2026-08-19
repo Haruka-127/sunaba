@@ -82,6 +82,10 @@ type execRequest struct {
 	Arguments []string `json:"arguments"`
 }
 
+type exportRequest struct {
+	DiscardExternalGit bool `json:"discard_external_git"`
+}
+
 type execResponse struct {
 	Stdout          string `json:"stdout"`
 	Stderr          string `json:"stderr"`
@@ -95,6 +99,7 @@ type sessionControlTarget interface {
 	Pause(context.Context) error
 	ResumeWith(context.Context, session.Activation) error
 	StopAndExport(context.Context) (session.ExportResult, error)
+	SetDiscardExternalGitForExport(bool) error
 	Destroy(context.Context) error
 	ExecOutput(context.Context, []string) (string, error)
 	ExecCapture(context.Context, []string, int64, int64) (runtime.ExecResult, error)
@@ -276,10 +281,17 @@ func (s *controlledSession) touchLocked(now time.Time) {
 }
 
 func (s *controlledSession) exportAndDestroy(ctx context.Context) error {
+	return s.exportAndDestroyWithOptions(ctx, false)
+}
+
+func (s *controlledSession) exportAndDestroyWithOptions(ctx context.Context, discardExternalGit bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state == "destroyed" || s.state == "exported" {
 		return fmt.Errorf("supervisor session is already closed")
+	}
+	if err := s.active.SetDiscardExternalGitForExport(discardExternalGit); err != nil {
+		return err
 	}
 	result, err := s.active.StopAndExport(ctx)
 	if err != nil {
@@ -309,8 +321,24 @@ func (s *controlledSession) exportAndDestroy(ctx context.Context) error {
 			return fmt.Errorf("supervisor cannot persist an unbound Change Set")
 		}
 		if _, err := persistPending(s.projectState, s.persistent, result); err != nil {
-			s.state = "failed"
-			return err
+			if !s.persistent.SupportsFrozenRecovery() {
+				s.state = "failed"
+				return err
+			}
+			s.state = "recovery"
+			s.signalExit()
+			record := s.persistent.RecoveryStateWithPendingExport(err.Error(), result)
+			saveErr := recovery.Save(s.projectState, record)
+			// StopAndExport has already stopped the VM, but a successful export
+			// only quiesces (rather than closes) the dev network. Always transfer
+			// the stopped VM out of process ownership, even if the recovery record
+			// itself could not be written. Cleanup treats an unrecorded stopped dev
+			// VM as fail-closed, so a metadata failure cannot authorize deletion.
+			retainErr := s.persistent.RetainForRecovery(ctx)
+			if saveErr != nil {
+				return errors.Join(err, fmt.Errorf("persist frozen export recovery ownership: %w", saveErr), retainErr)
+			}
+			return errors.Join(err, retainErr)
 		}
 	}
 	if err := s.active.Destroy(ctx); err != nil {
@@ -474,7 +502,7 @@ func startApprovalControl(projectState, runtimeBase string, broker pushApprovalB
 		})
 		for path, operation := range map[string]func(context.Context) error{
 			"/v1/session/pause": controlled.pause, "/v1/session/resume": controlled.resume,
-			"/v1/session/export": controlled.exportAndDestroy, "/v1/session/destroy": controlled.destroy,
+			"/v1/session/destroy": controlled.destroy,
 		} {
 			operation := operation
 			mux.HandleFunc("POST "+path, func(response http.ResponseWriter, request *http.Request) {
@@ -485,6 +513,20 @@ func startApprovalControl(projectState, runtimeBase string, broker pushApprovalB
 				response.WriteHeader(http.StatusNoContent)
 			})
 		}
+		mux.HandleFunc("POST /v1/session/export", func(response http.ResponseWriter, request *http.Request) {
+			decoder := json.NewDecoder(io.LimitReader(request.Body, 4<<10))
+			decoder.DisallowUnknownFields()
+			var options exportRequest
+			if decoder.Decode(&options) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+				http.Error(response, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+				return
+			}
+			if err := controlled.exportAndDestroyWithOptions(request.Context(), options.DiscardExternalGit); err != nil {
+				http.Error(response, err.Error(), http.StatusConflict)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+		})
 		mux.HandleFunc("POST /v1/session/heartbeat", func(response http.ResponseWriter, _ *http.Request) {
 			if err := controlled.heartbeat(); err != nil {
 				http.Error(response, err.Error(), http.StatusConflict)

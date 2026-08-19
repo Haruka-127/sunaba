@@ -477,7 +477,7 @@ canonical manifestは、正規化済み相対path、file type、mode、size、co
 7. 利用者または後続の検査処理へ、制御文字をescapeしたChange Setを提示する。
 8. 承認されたChange Setだけをホスト作業ツリーへ適用する。
 
-pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みbaseline Snapshot、検証済みMerged View、両manifest、Change Set、作成時の正規化済みSnapshot/export policyとそのdigestを自己完結した組として保存する。保存した両Snapshot、policy、Change Setのdigestを再検証できた場合だけpendingを確定し、容量不足や保存失敗ではAgent VMを破棄しない。これによりexport後にhost worktreeや無関係なcurrent Project policyが変化しても、作成時のpolicyで変更前後の内容をreview/applyできる。ただしhost baselineが変化したpendingのapplyは9.5のとおり拒否する。
+pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みbaseline Snapshot、検証済みMerged View、両manifest、Change Set、作成時の正規化済みSnapshot/export policyとそのdigestを自己完結した組として保存する。保存した両Snapshot、policy、Change Setのdigestを再検証できた場合だけpendingを確定し、容量不足や保存失敗ではAgent VMを破棄しない。pending確定に失敗した場合はsecure/devのどちらでも、停止VM、固定runtime root、検証済みMerged ViewのdigestをProject-boundなhost-only recovery recordへ束縛し、`changes export`が同じfrozen成果物のpending確定を再試行できるようにする。通常cleanupはrecord保存失敗を削除許可とせず、guardlessな停止VMをfail closedで拒否する。これによりexport後にhost worktreeや無関係なcurrent Project policyが変化しても、作成時のpolicyで変更前後の内容をreview/applyできる。ただしhost baselineが変化したpendingのapplyは9.5のとおり拒否する。
 
 内容確認はhost側の`changes review`で行う。reviewはread-onlyであり、保存済みbaselineとMerged Viewをfd-relativeかつsymlink非追跡で再検証し、Change Set digestへ対応する追加、変更、削除、rename、type、mode、実行属性、symlink target、text差分を表示する。差分生成と表示ではProjectのGit設定、外部`diff`、pager、editor、syntax highlighter、MIME判定、preview helper、scriptを起動しない。text判定、1 file、総入力、行長、行数、diff出力へhost固定の上限を設け、binary、invalid UTF-8、巨大file等の内容を表示できない場合はsize、SHA-256、modeと未表示理由を明示する。path、symlink target、diff本文を含むすべてのuntrusted表示はterminal sanitizerを通す。
 

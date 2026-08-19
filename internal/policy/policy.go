@@ -130,6 +130,17 @@ type CompiledExportPolicy struct {
 }
 
 func CompileExportPolicy(config ExportPolicy, protectedPaths []string, excludedPaths ...[]string) (CompiledExportPolicy, error) {
+	return compileExportPolicy(config, protectedPaths, excludedPaths, 2)
+}
+
+// CompileLegacyExportPolicyV1 reproduces the exact export contract used by
+// pending Change Set schemas 2 and 3 before host-only Snapshot exclusions
+// existed. It is only for validating already persisted artifacts.
+func CompileLegacyExportPolicyV1(config ExportPolicy, protectedPaths []string) (CompiledExportPolicy, error) {
+	return compileExportPolicy(config, protectedPaths, nil, 1)
+}
+
+func compileExportPolicy(config ExportPolicy, protectedPaths []string, excludedPaths [][]string, digestVersion int) (CompiledExportPolicy, error) {
 	if config.MaxEntries <= 0 || config.MaxEntries > MaximumExportEntries ||
 		config.MaxFileBytes <= 0 || config.MaxFileBytes > MaximumExportFileBytes ||
 		config.MaxTotalBytes < config.MaxFileBytes || config.MaxTotalBytes > MaximumExportTotalBytes {
@@ -155,7 +166,16 @@ func CompileExportPolicy(config ExportPolicy, protectedPaths []string, excludedP
 		Workspace: snapshot, MaxArchiveEntries: workspace.MaximumArchiveEntries,
 		MaxArchiveSize: workspace.MaximumArchiveSize,
 	}
-	digestInput := struct {
+	legacyDigestInput := struct {
+		Version        int      `json:"version"`
+		MaxEntries     int      `json:"max_entries"`
+		MaxFileBytes   int64    `json:"max_file_bytes"`
+		MaxTotalBytes  int64    `json:"max_total_bytes"`
+		MaxDepth       int      `json:"max_depth"`
+		MaxSymlinkSize int      `json:"max_symlink_size"`
+		ProtectedPaths []string `json:"protected_paths"`
+	}{1, snapshot.MaxEntries, snapshot.MaxFileSize, snapshot.MaxTotalSize, snapshot.MaxDepth, snapshot.MaxSymlinkSize, snapshot.ProtectedPaths}
+	currentDigestInput := struct {
 		Version        int      `json:"version"`
 		MaxEntries     int      `json:"max_entries"`
 		MaxFileBytes   int64    `json:"max_file_bytes"`
@@ -165,6 +185,12 @@ func CompileExportPolicy(config ExportPolicy, protectedPaths []string, excludedP
 		ProtectedPaths []string `json:"protected_paths"`
 		ExcludedPaths  []string `json:"excluded_paths"`
 	}{2, snapshot.MaxEntries, snapshot.MaxFileSize, snapshot.MaxTotalSize, snapshot.MaxDepth, snapshot.MaxSymlinkSize, snapshot.ProtectedPaths, snapshot.ExcludedPaths}
+	var digestInput any = currentDigestInput
+	if digestVersion == 1 {
+		digestInput = legacyDigestInput
+	} else if digestVersion != 2 {
+		return CompiledExportPolicy{}, fmt.Errorf("Project export policy digest version is invalid")
+	}
 	encoded, err := json.Marshal(digestInput)
 	if err != nil {
 		return CompiledExportPolicy{}, err

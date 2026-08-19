@@ -347,6 +347,8 @@ sunaba changes export --dir /path/to/project
 
 exportはVMをfreeze・破棄し、追加、変更、削除、renameをホスト側で再構成します。unsafeなpath、symlink、hardlink、special file、`.git/`、sunaba管理領域、上限超過はホスト作業ツリーへ到達する前に拒否されます。
 
+検証済みChange Setをhost-only stateへ保存できなかった場合は、secure/devのどちらでも停止VMとfrozen成果物を保持します。容量や権限の問題を解消してから同じ`changes export`を再実行すると、同一成果物のpending確定を再試行します。明示的なdiscardなしに通常cleanupが停止VMを削除することはありません。
+
 既定workspace以外に作ったGit cloneにdirty fileまたは未push commitがある場合、exportは作業損失を避けるため拒否します。dev foreground終了時に拒否された場合もVMは削除されず、direct egress、capability、専用networkを失った停止recovery状態になります。`sunaba status`で対象VMと回収コマンドを確認してください。
 
 状態を整理した後の通常exportは`changes export`で再試行します。External Gitのworking tree/historyは捨て、main workspaceだけをChange Set化する場合に限り、損失を理解したうえで明示します。

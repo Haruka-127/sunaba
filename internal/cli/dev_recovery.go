@@ -11,12 +11,17 @@ import (
 	"sunaba/internal/devnetwork"
 	"sunaba/internal/policy"
 	"sunaba/internal/recovery"
+	"sunaba/internal/runtime"
 	"sunaba/internal/session"
+	"sunaba/internal/workspace"
 )
 
 func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string, discardExternalGit bool) error {
 	record, err := recovery.Load(projectState)
 	if err != nil {
+		return err
+	}
+	if err := removeRecoverySupervisorLocator(projectState); err != nil {
 		return err
 	}
 	if record.ProjectID != projectPolicy.ProjectID || record.ProjectRoot != projectPolicy.ProjectRoot {
@@ -32,6 +37,9 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
 	if err != nil {
 		return err
+	}
+	if record.PendingExport != nil {
+		return a.persistFrozenRecovery(ctx, projectState, record, compiled, recorder)
 	}
 	boundary, err := devnetwork.ActivateQuiesced(ctx, a.store.Root, record.ProjectID, record.VMID)
 	if err != nil {
@@ -71,6 +79,74 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 	return nil
 }
 
+func (a *app) persistFrozenRecovery(ctx context.Context, projectState string, record recovery.State, compiled policy.CompiledExportPolicy, recorder *audit.Recorder) error {
+	pendingCommitted := false
+	pendingPath := filepath.Join(projectState, "pending", "change.json")
+	if _, statErr := os.Lstat(pendingPath); statErr == nil {
+		existing, loadErr := loadPending(projectState, policy.ProjectPolicy{ProjectID: record.ProjectID, ProjectRoot: record.ProjectRoot})
+		if loadErr != nil {
+			return loadErr
+		}
+		if existing.Version != pendingChangeVersion || existing.VMID != record.Container || existing.SessionID != record.SessionID || existing.Baseline.Digest != record.Baseline.Digest || existing.Merged.Digest != record.PendingExport.MergedDigest || existing.ChangeSet.Digest != record.PendingExport.ChangeSetDigest || existing.ExportPolicyDigest != record.ExportPolicyDigest {
+			return fmt.Errorf("existing pending Change Set does not match frozen export recovery")
+		}
+		pendingCommitted = true
+		containerState, stateErr := a.runtime.ContainerState(ctx, record.Container)
+		if stateErr != nil {
+			return stateErr
+		}
+		if containerState == runtime.StateNotFound {
+			return recovery.Remove(projectState, record)
+		}
+		if containerState != runtime.StateStopped {
+			return fmt.Errorf("frozen export recovery VM has unexpected state %s", containerState)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	var boundary *devnetwork.Boundary
+	var err error
+	if record.RuntimeMode() == "dev" {
+		boundary, err = devnetwork.RecoverQuiesced(ctx, a.store.Root, record.ProjectID, record.VMID)
+		if err != nil {
+			return fmt.Errorf("recover deny-all network for frozen export: %w", err)
+		}
+		defer boundary.Close(context.Background())
+	}
+	var devNetworkName string
+	var devNetworkClose func(context.Context) error
+	if boundary != nil {
+		devNetworkName, devNetworkClose = boundary.Network.Name, boundary.Close
+	}
+	active, err := session.AdoptRecovery(ctx, session.RecoveryConfig{
+		Store: a.store, Runtime: a.runtime, Record: record, Audit: recorder,
+		SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest,
+		DevNetworkName: devNetworkName, DevNetworkClose: devNetworkClose,
+		GitGateway: record.GitGateway, WebGateway: record.WebGateway,
+	})
+	if err != nil {
+		return err
+	}
+	result := session.ExportResult{
+		MergedRoot: record.PendingExport.MergedRoot,
+		Merged:     workspace.SnapshotManifest{Digest: record.PendingExport.MergedDigest},
+		ChangeSet:  workspace.ChangeSet{Digest: record.PendingExport.ChangeSetDigest},
+	}
+	if !pendingCommitted {
+		if _, err := persistPending(projectState, active, result); err != nil {
+			return errors.Join(err, active.DetachForRecovery(ctx))
+		}
+	}
+	if destroyErr := active.Destroy(ctx); destroyErr != nil {
+		state, stateErr := a.runtime.ContainerState(ctx, record.Container)
+		if stateErr != nil || state != runtime.StateNotFound {
+			return errors.Join(destroyErr, stateErr)
+		}
+		return errors.Join(destroyErr, recovery.Remove(projectState, record))
+	}
+	return recovery.Remove(projectState, record)
+}
+
 func (a *app) discardDevRecovery(ctx context.Context, projectID, projectState string) error {
 	record, err := recovery.Load(projectState)
 	if errors.Is(err, os.ErrNotExist) {
@@ -86,7 +162,7 @@ func (a *app) discardDevRecovery(ctx context.Context, projectID, projectState st
 	if err != nil {
 		return err
 	}
-	if info.Name != record.Container || info.State != "stopped" || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != record.ProjectID || info.Labels["dev.sunaba.vm"] != record.VMID || info.Labels["dev.sunaba.mode"] != "dev" {
+	if info.Name != record.Container || info.State != "stopped" || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != record.ProjectID || info.Labels["dev.sunaba.vm"] != record.VMID || info.Labels["dev.sunaba.mode"] != record.RuntimeMode() {
 		return fmt.Errorf("refusing to discard a VM whose runtime ownership does not match recovery metadata")
 	}
 	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))

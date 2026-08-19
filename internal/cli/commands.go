@@ -166,9 +166,6 @@ func (a *app) configCommand() *urfavecli.Command {
 	for _, action := range []string{"path", "edit", "validate", "diff", "apply", "show"} {
 		action := action
 		flags := projectSelectorFlags()
-		if action == "export" {
-			flags = projectSelectorFlags(&urfavecli.BoolFlag{Name: "discard-external-git", Usage: "Explicitly discard guarded External Git state after exporting the main workspace", OnlyOnce: true})
-		}
 		if action == "show" {
 			flags = append(flags, &urfavecli.BoolFlag{Name: "effective", Usage: "Show the compiled effective policy", OnlyOnce: true})
 		}
@@ -274,6 +271,9 @@ func (a *app) changesCommand() *urfavecli.Command {
 	for _, action := range []string{"export", "review", "apply"} {
 		action := action
 		flags := projectSelectorFlags()
+		if action == "export" {
+			flags = projectSelectorFlags(&urfavecli.BoolFlag{Name: "discard-external-git", Usage: "Explicitly discard guarded External Git state after exporting the main workspace", OnlyOnce: true})
+		}
 		if action == "review" {
 			flags = projectSelectorFlags(
 				&urfavecli.BoolFlag{Name: "stat", Usage: "Show metadata and risk summary without file content", OnlyOnce: true},

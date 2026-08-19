@@ -137,7 +137,7 @@ func loadPending(projectState string, projectPolicy policy.ProjectPolicy) (pendi
 			return pendingChange{}, fmt.Errorf("pending Change Set saved export policy is invalid")
 		}
 	} else {
-		compiled, err = policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+		compiled, err = policy.CompileLegacyExportPolicyV1(projectPolicy.Export, projectPolicy.ProtectedPaths)
 		if err != nil {
 			return pendingChange{}, err
 		}

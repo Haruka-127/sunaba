@@ -74,10 +74,10 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		return nil, fmt.Errorf("a pending Change Set exists; apply or discard it before starting another Agent Session")
 	}
 	if _, err := recovery.Load(projectState); err == nil {
-		return nil, fmt.Errorf("a stopped dev VM is retained after a refused export; run 'sunaba status' and recover or explicitly discard it before starting another Agent Session")
+		return nil, fmt.Errorf("a stopped VM is retained after an incomplete export; run 'sunaba status' and recover or explicitly discard it before starting another Agent Session")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil {
-			return nil, fmt.Errorf("dev export recovery metadata is unsafe: %w", err)
+			return nil, fmt.Errorf("export recovery metadata is unsafe: %w", err)
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return nil, statErr
 		}
@@ -116,17 +116,30 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		return nil, err
 	}
 	if len(cleanupResult.Refused) > 0 {
+		var blocked []string
+		for _, name := range cleanupResult.Refused {
+			info, inspectErr := a.runtime.Inspect(ctx, name)
+			if inspectErr != nil {
+				return nil, inspectErr
+			}
+			if info.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && info.Labels["dev.sunaba.project"] == projectPolicy.ProjectID {
+				blocked = append(blocked, name)
+			}
+		}
+		if len(blocked) > 0 {
+			return nil, fmt.Errorf("stopped Project VM requires recovery or explicit discard before a new VM can be created: %s", strings.Join(blocked, ", "))
+		}
 		fmt.Fprintf(a.errors, "WARNING: cleanup refused resources without matching current ownership/lease: %s\n", strings.Join(cleanupResult.Refused, ", "))
 	}
 	vmID, err := newVMID()
 	if err != nil {
 		return nil, err
 	}
-	runtimeBase := ""
+	var runtimeBase string
 	if projectPolicy.Mode == "dev" {
 		runtimeBase, err = recovery.NewRuntimeBase(projectState, vmID)
 	} else {
-		runtimeBase, err = makeRuntimeBase()
+		runtimeBase, err = recovery.NewSecureRuntimeBase(projectPolicy.ProjectID, vmID)
 	}
 	if err != nil {
 		return nil, err
@@ -350,13 +363,16 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
 	destroyed := false
+	recoveryRetained := false
 	defer func() {
 		if !destroyed {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
 		}
-		_ = os.RemoveAll(managed.runtimeBase)
+		if !recoveryRetained {
+			_ = os.RemoveAll(managed.runtimeBase)
+		}
 	}()
 	idleTimeout := managed.initialActivation.idleTimeout
 	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, idleTimeout, managed.activationFactory, managed.gitBroker)
@@ -395,6 +411,7 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-controlled.exit:
+			recoveryRetained = controlled.recoveryRetained()
 			destroyed = true
 			return nil
 		case <-expiry.C:

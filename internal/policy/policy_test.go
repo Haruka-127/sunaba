@@ -246,6 +246,19 @@ func TestLegacyV2MigratesStringRemotesToNamedV4Remotes(t *testing.T) {
 	}
 }
 
+func TestCompileLegacyExportPolicyV1ReproducesMainDigest(t *testing.T) {
+	compiled, err := CompileLegacyExportPolicyV1(ExportPolicy{
+		MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30,
+	}, []string{".git"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mainDigest = "0675d7a2514d6c6031a7b40f0d4d0a1a095433549503c921a48bdf9370fe054f"
+	if compiled.Digest != mainDigest || len(compiled.Snapshot.ExcludedPaths) != 0 {
+		t.Fatalf("legacy policy=%+v", compiled)
+	}
+}
+
 func TestLegacyV3MigratesOnlyOldDefaultModelLimits(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC)

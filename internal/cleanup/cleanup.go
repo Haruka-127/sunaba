@@ -52,7 +52,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		}
 		projectState := filepath.Join(cfg.Store.Root, "projects", projectID)
 		if retained, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
-			if retained.ProjectID == projectID && retained.VMID == vmID && retained.Container == info.Name && info.State == runtime.StateStopped {
+			if retained.ProjectID == projectID && retained.VMID == vmID && retained.Container == info.Name && info.State == runtime.StateStopped && info.Labels["dev.sunaba.mode"] == retained.RuntimeMode() {
 				result.Kept = append(result.Kept, info.Name)
 				continue
 			}
@@ -69,6 +69,14 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		}
 		if err != nil {
 			return result, fmt.Errorf("acquire cleanup guard for %s: %w", info.Name, err)
+		}
+		// A guardless stopped VM can contain work whose recovery record failed
+		// to persist. Absence of that record is never terminal evidence that the
+		// user authorized deletion.
+		if info.State == runtime.StateStopped {
+			_ = guard.Close()
+			result.Refused = append(result.Refused, info.Name)
+			continue
 		}
 		record, err := registry.FindLatestForVM(projectID, info.Name)
 		if err != nil || record.ProjectID != projectID || record.VMID != info.Name || record.Use != "model" {

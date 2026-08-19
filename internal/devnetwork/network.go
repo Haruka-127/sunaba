@@ -54,6 +54,40 @@ func ActivateQuiesced(ctx context.Context, stateRoot, projectID, sessionID strin
 	return activate(ctx, stateRoot, projectID, sessionID, true)
 }
 
+// RecoverQuiesced adopts an exact previously-owned boundary after a process
+// crash. If the earlier owner already deleted it, only the global dev lock is
+// held; frozen host-side recovery never creates or attaches a new network.
+func RecoverQuiesced(ctx context.Context, stateRoot, projectID, sessionID string) (_ *Boundary, err error) {
+	lock, err := acquireExclusiveLock(stateRoot)
+	if err != nil {
+		return nil, err
+	}
+	boundary := &Boundary{manager: NewManager(), lock: lock}
+	defer func() {
+		if err != nil {
+			_ = boundary.Close(context.Background())
+		}
+	}()
+	name, err := networkName(projectID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	boundary.Network, err = boundary.manager.inspect(ctx, name)
+	if errors.Is(err, errNotFound) {
+		return boundary, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if boundary.Network.ProjectID != projectID || boundary.Network.SessionID != sessionID {
+		return nil, fmt.Errorf("existing dev network ownership labels do not match recovery")
+	}
+	if err := boundary.Quiesce(ctx); err != nil {
+		return nil, err
+	}
+	return boundary, nil
+}
+
 func activate(ctx context.Context, stateRoot, projectID, sessionID string, quiesced bool) (_ *Boundary, err error) {
 	lock, err := acquireExclusiveLock(stateRoot)
 	if err != nil {
@@ -159,12 +193,9 @@ func NewManager() *Manager {
 }
 
 func (m *Manager) Create(ctx context.Context, projectID, sessionID string) (Network, error) {
-	if !identityPattern.MatchString(projectID) || !identityPattern.MatchString(sessionID) {
-		return Network{}, fmt.Errorf("dev network requires safe Project and session identities")
-	}
-	name := "sunaba-" + projectID + "-" + sessionID + "-net"
-	if len(name) > 127 {
-		return Network{}, fmt.Errorf("dev network name is too long")
+	name, err := networkName(projectID, sessionID)
+	if err != nil {
+		return Network{}, err
 	}
 	if _, err := m.inspect(ctx, name); err == nil {
 		return Network{}, fmt.Errorf("refusing to reuse existing dev network %q", name)
@@ -186,6 +217,17 @@ func (m *Manager) Create(ctx context.Context, projectID, sessionID string) (Netw
 		return Network{}, fmt.Errorf("new dev network ownership labels do not match")
 	}
 	return network, nil
+}
+
+func networkName(projectID, sessionID string) (string, error) {
+	if !identityPattern.MatchString(projectID) || !identityPattern.MatchString(sessionID) {
+		return "", fmt.Errorf("dev network requires safe Project and session identities")
+	}
+	name := "sunaba-" + projectID + "-" + sessionID + "-net"
+	if len(name) > 127 {
+		return "", fmt.Errorf("dev network name is too long")
+	}
+	return name, nil
 }
 
 func (m *Manager) Verify(ctx context.Context, expected Network) error {

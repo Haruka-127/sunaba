@@ -24,6 +24,7 @@ import (
 	"sunaba/internal/dependency"
 	"sunaba/internal/firewall"
 	"sunaba/internal/image"
+	"sunaba/internal/lease"
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
@@ -158,19 +159,34 @@ func (a *app) projectInit(ctx context.Context, projectArgument, mode, modelAuth 
 }
 
 func (a *app) up(ctx context.Context, dir, mode string) error {
+	if mode != "" && mode != "secure" && mode != "dev" {
+		return fmt.Errorf("mode must be secure or dev")
+	}
 	projectPolicy, path, projectState, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
-	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
-	if err != nil {
-		return err
-	}
 	if mode != "" {
-		if mode != "secure" && mode != "dev" {
-			return fmt.Errorf("mode must be secure or dev")
-		}
-		if projectPolicy.Mode != mode {
+		// Re-read, check the runtime boundary, and persist while holding the
+		// same writer lock used by VM creation. Otherwise a stale `up --mode`
+		// can overwrite a concurrent config apply or race an old-policy VM.
+		err = func() error {
+			configLock, lockErr := a.store.AcquireConfigLock(projectPolicy.ProjectID)
+			if lockErr != nil {
+				return lockErr
+			}
+			defer configLock.Close()
+			current, currentPath, currentState, loadErr := a.loadPolicyLocked(dir)
+			if loadErr != nil {
+				return loadErr
+			}
+			if current.ProjectID != projectPolicy.ProjectID || current.ProjectRoot != projectPolicy.ProjectRoot || currentPath != path || currentState != projectState {
+				return fmt.Errorf("Project policy identity changed during mode update")
+			}
+			projectPolicy = current
+			if projectPolicy.Mode == mode {
+				return nil
+			}
 			if err := refuseActivePolicyChange(projectState); err != nil {
 				return err
 			}
@@ -185,10 +201,15 @@ func (a *app) up(ctx context.Context, dir, mode string) error {
 			}
 			projectPolicy.Mode = mode
 			projectPolicy.UpdatedAt = time.Now().UTC()
-			if err := a.savePolicyAndConfig(path, projectPolicy); err != nil {
-				return err
-			}
+			return a.savePolicyAndConfigLocked(path, projectPolicy)
+		}()
+		if err != nil {
+			return err
 		}
+	}
+	activeLock, err := a.requireActiveProjectDependency(projectPolicy)
+	if err != nil {
+		return err
 	}
 	if projectPolicy.Mode == "dev" {
 		fmt.Fprintln(a.errors, "WARNING: dev mode permits direct Internet egress during the active Agent Session and does not provide exfiltration prevention.")
@@ -538,17 +559,17 @@ func (a *app) status(ctx context.Context, dir string) error {
 	recoveryState := "none"
 	if retained, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
 		if retained.ProjectID != projectPolicy.ProjectID || retained.ProjectRoot != projectPolicy.ProjectRoot {
-			listErr = errors.Join(listErr, fmt.Errorf("dev export recovery identity does not match Project policy"))
+			listErr = errors.Join(listErr, fmt.Errorf("export recovery identity does not match Project policy"))
 		} else {
 			info, inspectErr := a.runtime.Inspect(ctx, retained.Container)
-			if inspectErr != nil || info.Name != retained.Container || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != retained.ProjectID || info.Labels["dev.sunaba.vm"] != retained.VMID || info.Labels["dev.sunaba.mode"] != "dev" {
-				listErr = errors.Join(listErr, fmt.Errorf("dev export recovery VM does not match its host ownership record"))
+			if inspectErr != nil || info.Name != retained.Container || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != retained.ProjectID || info.Labels["dev.sunaba.vm"] != retained.VMID || info.Labels["dev.sunaba.mode"] != retained.RuntimeMode() {
+				listErr = errors.Join(listErr, fmt.Errorf("export recovery VM does not match its host ownership record"))
 			} else {
 				recoveryState = fmt.Sprintf("stopped VM %s retained after refused export; retry 'sunaba changes export', explicitly discard only External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'", retained.Container)
 			}
 		}
 	} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
-		listErr = errors.Join(listErr, fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr))
+		listErr = errors.Join(listErr, fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr))
 	}
 	gitState := "disabled"
 	if len(projectPolicy.Git.Remotes) > 0 {
@@ -626,7 +647,7 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 			}
 			recoveryExported = true
 		} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr)
+			return fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
 		}
 		pending, pendingErr := loadPending(projectState, projectPolicy)
 		if pendingErr != nil {
@@ -637,7 +658,7 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 				return err
 			}
 			if recoveryExported {
-				fmt.Fprintln(a.output, "Recovery export completed with no Project changes; the retained dev VM was removed.")
+				fmt.Fprintln(a.output, "Recovery export completed with no Project changes; the retained VM was removed.")
 				return nil
 			}
 			client, err := openSupervisorClient(projectState)
@@ -648,7 +669,7 @@ func (a *app) changes(ctx context.Context, action, dir string, reviewOptions wor
 				return err
 			}
 			exportContext, cancel := context.WithTimeout(ctx, 12*time.Minute)
-			err = client.operation(exportContext, "export")
+			err = client.export(exportContext, discardExternalGit)
 			cancel()
 			client.close()
 			if err != nil {
@@ -757,7 +778,7 @@ func pendingSnapshotPolicy(pending pendingChange, projectPolicy policy.ProjectPo
 		}
 		return compiled.Snapshot, nil
 	}
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+	compiled, err := policy.CompileLegacyExportPolicyV1(projectPolicy.Export, projectPolicy.ProtectedPaths)
 	if err != nil {
 		return workspace.SnapshotPolicy{}, err
 	}
@@ -802,13 +823,16 @@ func (a *app) recreate(ctx context.Context, dir string, discard bool) error {
 	}
 	if _, recoveryErr := recovery.Load(projectState); recoveryErr == nil {
 		if !discard {
-			return fmt.Errorf("a stopped dev VM is retained after a refused export; retry 'sunaba changes export' or pass --discard-pending explicitly")
+			return fmt.Errorf("a stopped VM is retained after an incomplete export; retry 'sunaba changes export' or pass --discard-pending explicitly")
+		}
+		if err := removeRecoverySupervisorLocator(projectState); err != nil {
+			return err
 		}
 		if err := a.discardDevRecovery(ctx, projectPolicy.ProjectID, projectState); err != nil {
 			return err
 		}
 	} else if _, statErr := os.Lstat(recovery.Path(projectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr)
+		return fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
 	}
 	if client, err := openSupervisorClient(projectState); err == nil {
 		operation := "export"
@@ -834,7 +858,13 @@ func (a *app) recreate(ctx context.Context, dir string, discard bool) error {
 		}
 	} else if !errors.Is(err, errNoSupervisor) {
 		return err
-	} else if err := a.cleanupOrphans(ctx); err != nil {
+	}
+	if discard {
+		if err := a.discardUnrecordedStoppedVMs(ctx, projectPolicy.ProjectID); err != nil {
+			return err
+		}
+	}
+	if err := a.cleanupOrphans(ctx); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.output, "Project %s will start its next Agent Session from a clean host snapshot after any pending Change Set is applied or discarded.\n", projectPolicy.ProjectID)
@@ -874,13 +904,13 @@ func (a *app) down(ctx context.Context, selector projectSelector) error {
 	} else {
 		if retained, recoveryErr := recovery.Load(target.ProjectState); recoveryErr == nil {
 			info, inspectErr := a.runtime.Inspect(ctx, retained.Container)
-			if retained.ProjectID != target.ProjectID || inspectErr != nil || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != retained.ProjectID || info.Labels["dev.sunaba.vm"] != retained.VMID || info.Labels["dev.sunaba.mode"] != "dev" {
-				return fmt.Errorf("dev export recovery VM does not match its host ownership record")
+			if retained.ProjectID != target.ProjectID || inspectErr != nil || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != retained.ProjectID || info.Labels["dev.sunaba.vm"] != retained.VMID || info.Labels["dev.sunaba.mode"] != retained.RuntimeMode() {
+				return fmt.Errorf("export recovery VM does not match its host ownership record")
 			}
-			fmt.Fprintln(a.output, "Dev export recovery VM is already stopped with direct egress and session capabilities revoked; retry 'sunaba changes export', use 'sunaba changes export --discard-external-git' to keep only the main workspace, or explicitly discard the VM.")
+			fmt.Fprintln(a.output, "Export recovery VM is already stopped with session capabilities revoked; retry 'sunaba changes export' or explicitly discard the VM. For a dev External Git refusal, '--discard-external-git' keeps only the main workspace.")
 			return nil
 		} else if _, statErr := os.Lstat(recovery.Path(target.ProjectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr)
+			return fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
 		}
 		if err := a.cleanupOrphans(ctx); err != nil {
 			return err
@@ -907,13 +937,16 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 	}
 	if _, recoveryErr := recovery.Load(target.ProjectState); recoveryErr == nil {
 		if !discard {
-			return fmt.Errorf("a stopped dev VM contains unexported changes; run 'sunaba changes export' or pass --discard-pending")
+			return fmt.Errorf("a stopped VM contains unexported changes; run 'sunaba changes export' or pass --discard-pending")
+		}
+		if err := removeRecoverySupervisorLocator(target.ProjectState); err != nil {
+			return err
 		}
 		if err := a.discardDevRecovery(ctx, target.ProjectID, target.ProjectState); err != nil {
 			return err
 		}
 	} else if _, statErr := os.Lstat(recovery.Path(target.ProjectState)); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("dev export recovery metadata is unsafe: %w", recoveryErr)
+		return fmt.Errorf("export recovery metadata is unsafe: %w", recoveryErr)
 	}
 	if client, err := openSupervisorClient(target.ProjectState); err == nil {
 		info, infoErr := client.info(ctx)
@@ -949,6 +982,11 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 	} else if !errors.Is(err, errNoSupervisor) {
 		return err
 	}
+	if discard {
+		if err := a.discardUnrecordedStoppedVMs(ctx, target.ProjectID); err != nil {
+			return err
+		}
+	}
 	if err := a.cleanupOrphans(ctx); err != nil {
 		return err
 	}
@@ -981,6 +1019,72 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 		return fmt.Errorf("Project state was removed, but its host configuration could not be removed: %w", err)
 	}
 	fmt.Fprintf(a.output, "Destroyed Project state and host configuration %s. Host Project files were not removed.\n", target.ProjectID)
+	return nil
+}
+
+func (a *app) discardUnrecordedStoppedVMs(ctx context.Context, projectID string) error {
+	items, err := a.runtime.List(ctx)
+	if err != nil {
+		return err
+	}
+	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
+	if err != nil {
+		return err
+	}
+	registry := &lease.Registry{Root: filepath.Join(a.store.Root, "leases")}
+	for _, listed := range items {
+		if listed.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || listed.Labels["dev.sunaba.project"] != projectID {
+			continue
+		}
+		info, err := a.runtime.Inspect(ctx, listed.Name)
+		if err != nil {
+			return err
+		}
+		if info.State != runtime.StateStopped {
+			continue
+		}
+		vmID, mode := info.Labels["dev.sunaba.vm"], info.Labels["dev.sunaba.mode"]
+		if vmID == "" || (mode != "secure" && mode != "dev") || info.Name != "sunaba-"+projectID+"-"+vmID || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != projectID {
+			return fmt.Errorf("refusing to discard stopped VM without exact Project ownership: %s", listed.Name)
+		}
+		guard, err := registry.AcquireGuard(vmID)
+		if errors.Is(err, lease.ErrGuardHeld) {
+			return fmt.Errorf("refusing to discard stopped VM still owned by a live Supervisor: %s", info.Name)
+		}
+		if err != nil {
+			return err
+		}
+		event := audit.BoundaryEvent{Category: "recovery", Action: "stopped_vm.discard", Outcome: "started", ProjectID: projectID, VMID: info.Name}
+		if err := recorder.Append(event); err != nil {
+			_ = guard.Close()
+			return err
+		}
+		removeErr := a.runtime.Remove(ctx, info.Name)
+		if removeErr == nil {
+			runtimeBase := recovery.RuntimeBase(filepath.Join(a.store.Root, "projects", projectID), vmID)
+			if mode == "secure" {
+				runtimeBase = recovery.SecureRuntimeBase(projectID, vmID)
+			}
+			if _, statErr := os.Lstat(runtimeBase); statErr == nil {
+				if verifyPrivateDirectory(runtimeBase) != nil {
+					removeErr = fmt.Errorf("refusing to remove unsafe stopped VM runtime: %s", runtimeBase)
+				} else {
+					removeErr = os.RemoveAll(runtimeBase)
+				}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				removeErr = statErr
+			}
+		}
+		event.Outcome = "allowed"
+		if removeErr != nil {
+			event.Outcome = "failed"
+		}
+		auditErr := recorder.Append(event)
+		closeErr := guard.Close()
+		if removeErr != nil || auditErr != nil || closeErr != nil {
+			return errors.Join(removeErr, auditErr, closeErr)
+		}
+	}
 	return nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"sunaba/internal/audit"
 	"sunaba/internal/dependency"
 	"sunaba/internal/gitgateway"
+	"sunaba/internal/lease"
 	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
@@ -69,6 +71,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		{"config", "--help"},
 		{"git", "remote", "--help"},
 		{"changes", "--help"},
+		{"changes", "export", "--help"},
 		{"up", "--help"},
 		{"exec", "--help"},
 		{"destroy", "--help"},
@@ -78,7 +81,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		}
 	}
 	text := output.String()
-	for _, expected := range []string{"setup", "--config-only", "doctor", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "shell", "exec", "--cwd", "remote", "add", "web", "approvals", "changes", "export", "review", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
+	for _, expected := range []string{"setup", "--config-only", "doctor", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "shell", "exec", "--cwd", "remote", "add", "web", "approvals", "changes", "export", "--discard-external-git", "review", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -87,6 +90,11 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		if strings.Contains(text, obsolete) {
 			t.Fatalf("help retained obsolete prototype behavior %q", obsolete)
 		}
+	}
+	parseOnly := &app{output: io.Discard, errors: io.Discard}
+	err := parseOnly.run(context.Background(), []string{"changes", "export", "--discard-external-git", "--dir", filepath.Join(t.TempDir(), "missing")})
+	if err == nil || strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("changes export discard flag was not parsed by the public command: %v", err)
 	}
 }
 
@@ -439,12 +447,57 @@ func TestRecoveryByProjectIDRejectsMismatchedSupervisorIdentity(t *testing.T) {
 
 type projectListRuntime struct {
 	runtime.Runtime
-	items []runtime.Info
-	err   error
+	items    []runtime.Info
+	err      error
+	listHook func()
 }
 
 func (r *projectListRuntime) List(context.Context) ([]runtime.Info, error) {
+	if r.listHook != nil {
+		r.listHook()
+	}
 	return append([]runtime.Info(nil), r.items...), r.err
+}
+
+func TestUpModeHoldsConfigLockAcrossRuntimeBoundaryCheck(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: filepath.Join(base, "state")}
+	var output bytes.Buffer
+	a := &app{store: store, output: &output, errors: &output}
+	prepareTestSetup(t, a)
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
+		t.Fatal(err)
+	}
+	projectID := state.ProjectID(project)
+	var competingLockErr error
+	fake := &projectListRuntime{
+		items: []runtime.Info{{
+			Name: "sunaba-" + projectID + "-vm123456", State: runtime.StateStopped,
+			Labels: map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": "vm123456", "dev.sunaba.mode": "secure"},
+		}},
+		listHook: func() {
+			lock, err := store.AcquireConfigLock(projectID)
+			competingLockErr = err
+			if lock != nil {
+				_ = lock.Close()
+			}
+		},
+	}
+	a.runtime = fake
+	err = a.run(context.Background(), []string{"up", "--dir", project, "--mode", "dev"})
+	if err == nil || !strings.Contains(err.Error(), "mode change requires export/recreate") {
+		t.Fatalf("mode update did not reach guarded runtime check: %v", err)
+	}
+	if competingLockErr == nil || !strings.Contains(competingLockErr.Error(), "already being changed") {
+		t.Fatalf("runtime check was outside config transaction lock: %v", competingLockErr)
+	}
 }
 
 func TestProjectListFindsPausedSupervisorAndOwnedForegroundVM(t *testing.T) {
@@ -865,13 +918,14 @@ type fakePushBroker struct {
 }
 
 type fakeSessionControlTarget struct {
-	paused    int
-	resumed   int
-	destroyed int
-	exported  int
-	commands  [][]string
-	output    string
-	exportErr error
+	paused             int
+	resumed            int
+	destroyed          int
+	exported           int
+	commands           [][]string
+	output             string
+	exportErr          error
+	discardExternalGit bool
 }
 
 func (f *fakeSessionControlTarget) Pause(context.Context) error { f.paused++; return nil }
@@ -882,6 +936,10 @@ func (f *fakeSessionControlTarget) ResumeWith(context.Context, session.Activatio
 func (f *fakeSessionControlTarget) StopAndExport(context.Context) (session.ExportResult, error) {
 	f.exported++
 	return session.ExportResult{}, f.exportErr
+}
+func (f *fakeSessionControlTarget) SetDiscardExternalGitForExport(discard bool) error {
+	f.discardExternalGit = discard
+	return nil
 }
 
 func TestSupervisorExpiryAllowsFreshSessionButRejectsExpiredShell(t *testing.T) {
@@ -974,6 +1032,40 @@ func TestSupervisorExportWithoutChangesDestroysPersistentVM(t *testing.T) {
 	}
 }
 
+func TestSupervisorExportBindsExternalGitDiscardIntent(t *testing.T) {
+	projectState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase := testutil.PrivateTempDir(t, "sunaba-export-options-")
+	target := &fakeSessionControlTarget{}
+	controlled := &controlledSession{
+		active: target, projectID: "project", sessionID: "session", container: "sunaba-project-session",
+		runtimeRoot: filepath.Join(runtimeBase, "sunaba-vm-vm"), workspacePath: "/workspace/sunaba-session",
+		projectState: projectState, expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute,
+		lastActivity: time.Now(), state: "paused", exit: make(chan struct{}),
+	}
+	control, err := startApprovalControl(projectState, runtimeBase, nil, controlled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	client, err := openSupervisorClient(projectState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.close()
+	if err := client.export(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if !target.discardExternalGit || target.exported != 1 || target.destroyed != 1 {
+		t.Fatalf("discard=%t exported=%d destroyed=%d", target.discardExternalGit, target.exported, target.destroyed)
+	}
+}
+
 func TestDevRecoveryPersistenceFailureNeverAuthorizesDestroy(t *testing.T) {
 	projectState, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -1026,6 +1118,16 @@ func TestExplicitDevRecoveryDiscardRequiresExactStoppedVMOwnership(t *testing.T)
 	if err := recovery.Save(projectState, record); err != nil {
 		t.Fatal(err)
 	}
+	locator := filepath.Join(projectState, approvalControlLocator)
+	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeRecoverySupervisorLocator(projectState); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(locator); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale recovery locator remained: %v", err)
+	}
 	fake := &discardRecoveryRuntime{info: runtime.Info{Name: container, State: runtime.StateStopped, Labels: map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": vmID, "dev.sunaba.mode": "dev"}}}
 	a := &app{store: store, runtime: fake, output: io.Discard, errors: io.Discard}
 	fake.info.Labels["dev.sunaba.vm"] = "substituted"
@@ -1038,6 +1140,170 @@ func TestExplicitDevRecoveryDiscardRequiresExactStoppedVMOwnership(t *testing.T)
 	}
 	if _, err := os.Lstat(recovery.Path(projectState)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovery record remained: %v", err)
+	}
+}
+
+func TestExplicitDiscardRemovesUnrecordedStoppedSecureVM(t *testing.T) {
+	storeRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: storeRoot}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	const vmID = "vm123456"
+	projectID := state.ProjectID(storeRoot)
+	projectState := filepath.Join(storeRoot, "projects", projectID)
+	if err := os.MkdirAll(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := recovery.NewSecureRuntimeBase(projectID, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(runtimeBase, "sunaba-vm-"+vmID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	container := "sunaba-" + projectID + "-" + vmID
+	fake := &discardRecoveryRuntime{info: runtime.Info{Name: container, State: runtime.StateStopped, Labels: map[string]string{
+		"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": vmID, "dev.sunaba.mode": "secure",
+	}}}
+	a := &app{store: store, runtime: fake, output: io.Discard, errors: io.Discard}
+	if err := a.discardUnrecordedStoppedVMs(context.Background(), projectID); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.removed {
+		t.Fatal("explicit discard did not remove the exact stopped VM")
+	}
+	if _, err := os.Lstat(runtimeBase); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("explicit discard left runtime state: %v", err)
+	}
+}
+
+func TestFrozenSecureExportRecoveryRetriesTheSameChangeSet(t *testing.T) {
+	storeRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: storeRoot}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const vmID, sessionID = "vm123456", "session1"
+	projectID := state.ProjectID(projectRoot)
+	projectState := filepath.Join(storeRoot, "projects", projectID)
+	if err := os.MkdirAll(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := recovery.NewSecureRuntimeBase(projectID, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
+	snapshotRoot := filepath.Join(runtimeRoot, "snapshot")
+	mergedRoot := filepath.Join(runtimeRoot, "sunaba-quarantine-"+sessionID, "sunaba-merged-"+sessionID)
+	for _, directory := range []string{snapshotRoot, mergedRoot} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(mergedRoot, "result.txt"), []byte("retained\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	projectPolicy := policy.ProjectPolicy{
+		ProjectID: projectID, ProjectRoot: projectRoot,
+		Export:         policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30},
+		ProtectedPaths: []string{".git", ".sunaba"},
+	}
+	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := workspace.BuildSnapshotManifest(projectRoot, compiled.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := workspace.BuildSnapshotManifest(mergedRoot, compiled.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := workspace.BuildChangeSet(baseline, merged, compiled.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := "sunaba-" + projectID + "-" + vmID
+	record := recovery.State{
+		Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID,
+		Container: container, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID,
+		Mode: "secure", Baseline: baseline, ExportPolicyDigest: compiled.Digest,
+		PendingExport: &recovery.PendingExport{MergedRoot: mergedRoot, MergedDigest: merged.Digest, ChangeSetDigest: changes.Digest},
+		Reason:        "pending write failed", CreatedAt: time.Now().UTC(),
+	}
+	if err := recovery.Save(projectState, record); err != nil {
+		t.Fatal(err)
+	}
+	active := &session.Session{
+		ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: container,
+		Baseline: baseline, SnapshotRoot: snapshotRoot, SnapshotPolicy: compiled.Snapshot,
+		ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest,
+	}
+	if _, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedRoot, Merged: merged, ChangeSet: changes}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &discardRecoveryRuntime{info: runtime.Info{Name: container, State: runtime.StateStopped, Labels: map[string]string{
+		"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": vmID, "dev.sunaba.mode": "secure",
+	}}}
+	recorder, err := audit.NewRecorder(filepath.Join(storeRoot, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &app{store: store, runtime: fake, output: io.Discard, errors: io.Discard}
+	if err := a.persistFrozenRecovery(context.Background(), projectState, record, compiled, recorder); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := loadPending(projectState, projectPolicy)
+	if err != nil || pending.ChangeSet.Digest != changes.Digest || !fake.removed {
+		t.Fatalf("pending=%+v removed=%t error=%v", pending.ChangeSet, fake.removed, err)
+	}
+	if _, err := os.Lstat(recovery.Path(projectState)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery record remained after retry: %v", err)
+	}
+
+	// Simulate a crash after the exact pending commit and VM removal but before
+	// recovery metadata retirement. The next retry must retire the stale record
+	// without requiring the missing VM.
+	runtimeBase, err = recovery.NewSecureRuntimeBase(projectID, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot = filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
+	mergedRoot = filepath.Join(runtimeRoot, "sunaba-quarantine-"+sessionID, "sunaba-merged-"+sessionID)
+	for _, directory := range []string{filepath.Join(runtimeRoot, "snapshot"), mergedRoot} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record.RuntimeBase, record.RuntimeRoot = runtimeBase, runtimeRoot
+	record.PendingExport.MergedRoot = mergedRoot
+	if err := recovery.Save(projectState, record); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.persistFrozenRecovery(context.Background(), projectState, record, compiled, recorder); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(recovery.Path(projectState)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing-VM recovery record remained after retry: %v", err)
 	}
 }
 
@@ -1060,6 +1326,9 @@ func (f *discardRecoveryRuntime) BuildImage(context.Context, string, string, map
 	return nil
 }
 func (f *discardRecoveryRuntime) ContainerState(context.Context, string) (runtime.State, error) {
+	if f.removed {
+		return runtime.StateNotFound, nil
+	}
 	return f.info.State, nil
 }
 func (f *discardRecoveryRuntime) Create(context.Context, runtime.ContainerSpec) error { return nil }
@@ -1087,7 +1356,10 @@ func TestStaleSupervisorRecoveryRemovesOnlyBoundPrivateRuntime(t *testing.T) {
 	if err := os.Chmod(projectState, 0700); err != nil {
 		t.Fatal(err)
 	}
-	runtimeBase := testutil.PrivateTempDir(t, "sunaba-runtime-stale-")
+	runtimeBase, err := recovery.NewRuntimeBase(projectState, "vm123456")
+	if err != nil {
+		t.Fatal(err)
+	}
 	locator := filepath.Join(projectState, approvalControlLocator)
 	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
 		t.Fatal(err)
@@ -1101,6 +1373,130 @@ func TestStaleSupervisorRecoveryRemovesOnlyBoundPrivateRuntime(t *testing.T) {
 		}
 	}
 }
+
+func TestStaleSecureSupervisorRecoveryAcceptsOnlyBoundShortRuntime(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const projectID, vmID = "0123456789ab", "vm123456"
+	projectState := filepath.Join(root, projectID)
+	if err := os.Mkdir(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := recovery.NewSecureRuntimeBase(projectID, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+	locator := filepath.Join(projectState, approvalControlLocator)
+	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStaleSupervisor(projectState); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{locator, runtimeBase} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale secure path remained %s: %v", path, err)
+		}
+	}
+}
+
+func TestClosedSupervisorSocketIsRecognizedAsStale(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const projectID, vmID = "0123456789ab", "vm123456"
+	projectState := filepath.Join(root, projectID)
+	if err := os.Mkdir(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := recovery.NewSecureRuntimeBase(projectID, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+	socket := filepath.Join(runtimeBase, approvalControlSocket)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := os.Chmod(socket, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateJSON(filepath.Join(projectState, approvalControlLocator), approvalLocator{Version: 1, Socket: socket}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSupervisorClient(projectState); !errors.Is(err, errStaleSupervisor) {
+		t.Fatalf("closed Unix socket was not recognized as stale: %v", err)
+	}
+	if err := removeStaleSupervisor(projectState); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStaleSupervisorRecoveryRefusesExactHeldVMGuard(t *testing.T) {
+	storeRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: storeRoot}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	const projectID, vmID = "0123456789ab", "vm123456"
+	projectState := filepath.Join(storeRoot, "projects", projectID)
+	if err := os.MkdirAll(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := recovery.NewSecureRuntimeBase(projectID, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+	socket := filepath.Join(runtimeBase, approvalControlSocket)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := os.Chmod(socket, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	locator := filepath.Join(projectState, approvalControlLocator)
+	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: socket}); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := (&lease.Registry{Root: filepath.Join(storeRoot, "leases")}).AcquireGuard(vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	container := "sunaba-" + projectID + "-" + vmID
+	fake := &discardRecoveryRuntime{info: runtime.Info{Name: container, State: runtime.StateStopped, Labels: map[string]string{
+		"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": vmID, "dev.sunaba.mode": "secure",
+	}}}
+	a := &app{store: store, runtime: fake, output: io.Discard, errors: io.Discard}
+	if err := a.recoverStaleSupervisor(context.Background(), projectState); err == nil || !strings.Contains(err.Error(), "live owner") {
+		t.Fatalf("held VM guard did not block stale recovery: %v", err)
+	}
+	if _, err := os.Lstat(locator); err != nil {
+		t.Fatalf("blocked stale recovery removed locator: %v", err)
+	}
+}
+
 func (f *fakeSessionControlTarget) Destroy(context.Context) error { f.destroyed++; return nil }
 func (f *fakeSessionControlTarget) ExecOutput(_ context.Context, command []string) (string, error) {
 	f.commands = append(f.commands, append([]string(nil), command...))
@@ -1276,6 +1672,14 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err := os.WriteFile(filepath.Join(mergedSource, "file.txt"), []byte("after\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	for _, directory := range []string{filepath.Join(project, "excluded"), filepath.Join(mergedSource, "excluded")} {
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "legacy.txt"), []byte("legacy artifact\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	baseline, err := workspace.BuildSnapshotManifest(project, workspace.DefaultSnapshotPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -1322,11 +1726,18 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	legacyV3.Version = selfContainedPendingChangeVersion
 	legacyV3.SnapshotPolicy = workspace.SnapshotPolicy{}
 	legacyV3.ExportPolicy = workspace.ExportPolicy{}
+	legacyV3.ExportPolicyDigest = "0675d7a2514d6c6031a7b40f0d4d0a1a095433549503c921a48bdf9370fe054f"
 	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), legacyV3); err != nil {
 		t.Fatal(err)
 	}
-	if migrated, err := loadPending(projectState, testPolicy); err != nil || migrated.ChangeSet.Digest != persisted.ChangeSet.Digest {
+	legacyCurrentPolicy := testPolicy
+	legacyCurrentPolicy.Snapshot.Exclude = []string{"excluded"}
+	migrated, err := loadPending(projectState, legacyCurrentPolicy)
+	if err != nil || migrated.ChangeSet.Digest != persisted.ChangeSet.Digest {
 		t.Fatalf("pending v3 compatibility failed: loaded=%+v error=%v", migrated, err)
+	}
+	if _, err := buildPendingReview(migrated, legacyCurrentPolicy, workspace.ReviewOptions{StatOnly: true}, false); err != nil {
+		t.Fatalf("pending v3 review incorrectly applied current Snapshot exclusions: %v", err)
 	}
 	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), persisted); err != nil {
 		t.Fatal(err)
@@ -1407,6 +1818,7 @@ func TestLegacyPendingChangeRemainsReviewableWhenHostMatchesBaseline(t *testing.
 	persisted.Version = legacyPendingChangeVersion
 	persisted.BaselineRoot = ""
 	persisted.Baseline = baseline
+	persisted.ExportPolicyDigest = "0675d7a2514d6c6031a7b40f0d4d0a1a095433549503c921a48bdf9370fe054f"
 	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), persisted); err != nil {
 		t.Fatal(err)
 	}

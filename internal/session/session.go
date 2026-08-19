@@ -334,7 +334,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	return s, nil
 }
 
-// AdoptRecovery acquires process ownership of an exact stopped dev VM. It does
+// AdoptRecovery acquires process ownership of an exact stopped VM. It does
 // not create or resume an Agent Session and therefore issues no capability.
 func AdoptRecovery(ctx context.Context, cfg RecoveryConfig) (_ *Session, err error) {
 	record := cfg.Record
@@ -351,7 +351,7 @@ func AdoptRecovery(ctx context.Context, cfg RecoveryConfig) (_ *Session, err err
 	})
 	s.cfg = Config{
 		Store: cfg.Store, Runtime: cfg.Runtime, ProjectRoot: record.ProjectRoot, RuntimeBase: record.RuntimeBase,
-		VMID: record.VMID, SessionID: record.SessionID, Mode: "dev", Audit: cfg.Audit,
+		VMID: record.VMID, SessionID: record.SessionID, Mode: record.RuntimeMode(), Audit: cfg.Audit,
 		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicy: cfg.ExportPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
 		DevNetworkName: cfg.DevNetworkName, DevNetworkQuiesce: cfg.DevNetworkQuiesce, DevNetworkClose: cfg.DevNetworkClose,
 	}
@@ -380,8 +380,8 @@ func AdoptRecovery(ctx context.Context, cfg RecoveryConfig) (_ *Session, err err
 	if err != nil {
 		return nil, err
 	}
-	if info.Name != record.Container || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != record.ProjectID || info.Labels["dev.sunaba.vm"] != record.VMID || info.Labels["dev.sunaba.mode"] != "dev" {
-		return nil, fmt.Errorf("stopped dev recovery VM ownership does not match its record")
+	if info.Name != record.Container || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != record.ProjectID || info.Labels["dev.sunaba.vm"] != record.VMID || info.Labels["dev.sunaba.mode"] != record.RuntimeMode() {
+		return nil, fmt.Errorf("stopped recovery VM ownership does not match its record")
 	}
 	actual, err := workspace.BuildSnapshotManifest(s.SnapshotRoot, cfg.SnapshotPolicy)
 	if err != nil || actual.Digest != record.Baseline.Digest {
@@ -1200,12 +1200,12 @@ func (s *Session) stopDevForRecovery(ctx context.Context) error {
 	} else if current == runtime.StateRunning {
 		recoveryErr = errors.Join(recoveryErr, s.cfg.Runtime.Stop(ctx, s.Container))
 	} else if current != runtime.StateStopped {
-		recoveryErr = errors.Join(recoveryErr, fmt.Errorf("dev recovery VM has unsupported state %s", current))
+		recoveryErr = errors.Join(recoveryErr, fmt.Errorf("recovery VM has unsupported state %s", current))
 	}
 	s.paused = true
 	current, err = s.cfg.Runtime.ContainerState(ctx, s.Container)
 	if err != nil || current != runtime.StateStopped {
-		recoveryErr = errors.Join(recoveryErr, fmt.Errorf("dev recovery VM is not stopped: state=%s error=%v", current, err))
+		recoveryErr = errors.Join(recoveryErr, fmt.Errorf("recovery VM is not stopped: state=%s error=%v", current, err))
 	}
 	recoveryErr = errors.Join(recoveryErr, s.closeDevNetwork(ctx))
 	if emitErr := s.emit("session.recovery_retained", "export-refused"); emitErr != nil {
@@ -1219,9 +1219,32 @@ func (s *Session) RecoveryState(reason string) recovery.State {
 		Version: recovery.Version, ProjectID: s.ProjectID, ProjectRoot: s.ProjectRoot, VMID: s.VMID,
 		SessionID: s.SessionID, Container: s.Container, RuntimeBase: s.cfg.RuntimeBase, RuntimeRoot: s.Root,
 		WorkspacePath: s.WorkspacePath, Baseline: s.Baseline, ExportPolicyDigest: s.ExportPolicyDigest,
+		Mode:       s.cfg.Mode,
 		GitGateway: s.cfg.GitGateway != nil, WebGateway: s.cfg.WebGateway != nil,
 		Reason: reason, CreatedAt: time.Now().UTC(),
 	}
+}
+
+func (s *Session) SupportsFrozenRecovery() bool {
+	return s != nil && (s.cfg.Mode == "dev" || s.cfg.Mode == "secure")
+}
+
+func (s *Session) SetDiscardExternalGitForExport(discard bool) error {
+	if s == nil {
+		return fmt.Errorf("session export policy is unavailable")
+	}
+	s.discardExternalGit = discard
+	return nil
+}
+
+func (s *Session) RecoveryStateWithPendingExport(reason string, result ExportResult) recovery.State {
+	state := s.RecoveryState(reason)
+	state.PendingExport = &recovery.PendingExport{
+		MergedRoot:      result.MergedRoot,
+		MergedDigest:    result.Merged.Digest,
+		ChangeSetDigest: result.ChangeSet.Digest,
+	}
+	return state
 }
 
 // DetachForRecovery releases process-scoped locks only after the host recovery
@@ -1229,10 +1252,10 @@ func (s *Session) RecoveryState(reason string) recovery.State {
 func (s *Session) DetachForRecovery(ctx context.Context) error {
 	current, err := s.cfg.Runtime.ContainerState(ctx, s.Container)
 	if err != nil || current != runtime.StateStopped {
-		return fmt.Errorf("refusing to detach a dev recovery VM that is not stopped: state=%s error=%v", current, err)
+		return fmt.Errorf("refusing to detach a recovery VM that is not stopped: state=%s error=%v", current, err)
 	}
-	if s.cfg.Mode != "dev" || s.leaseCreated || s.gatewayActive.Load() {
-		return fmt.Errorf("refusing to detach an active or non-dev session for recovery")
+	if (s.cfg.Mode != "dev" && s.cfg.Mode != "secure") || s.leaseCreated || s.gatewayActive.Load() {
+		return fmt.Errorf("refusing to detach an active session for recovery")
 	}
 	if err := s.closeDevNetwork(ctx); err != nil {
 		return err
