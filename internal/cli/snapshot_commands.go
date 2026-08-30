@@ -22,6 +22,12 @@ import (
 
 const snapshotApprovalFile = "snapshot-approval.json"
 
+var (
+	errSnapshotApprovalMissing = errors.New("first Snapshot is not approved")
+	errSnapshotApprovalInvalid = errors.New("Snapshot approval is invalid or belongs to a different exclusion policy")
+	errSnapshotApprovalChanged = errors.New("Project changed after Snapshot approval")
+)
+
 type snapshotApproval struct {
 	Version            int       `json:"version"`
 	InitialDigest      string    `json:"initial_digest"`
@@ -81,16 +87,16 @@ func (a *app) snapshotApprove(dir, digest string) error {
 func verifySnapshotApproval(projectState string, compiled policy.CompiledExportPolicy, manifest workspace.SnapshotManifest) (snapshotApproval, error) {
 	data, err := readOwnedPrivateFile(filepath.Join(projectState, snapshotApprovalFile), 16<<10)
 	if err != nil {
-		return snapshotApproval{}, fmt.Errorf("first Snapshot is not approved; run 'sunaba snapshot preview' and approve its exact digest")
+		return snapshotApproval{}, fmt.Errorf("%w; run 'sunaba snapshot preview' and approve its exact digest", errSnapshotApprovalMissing)
 	}
 	var approval snapshotApproval
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&approval); err != nil || decoder.Decode(&struct{}{}) != io.EOF || approval.Version != 1 || approval.ExportPolicyDigest != compiled.Digest || approval.ApprovedAt.IsZero() {
-		return snapshotApproval{}, fmt.Errorf("Snapshot approval is invalid or belongs to a different exclusion policy; preview and approve again")
+		return snapshotApproval{}, fmt.Errorf("%w; preview and approve again", errSnapshotApprovalInvalid)
 	}
 	if approval.InitialDigest != manifest.Digest {
-		return snapshotApproval{}, fmt.Errorf("Project changed after Snapshot approval; preview and approve the new digest")
+		return snapshotApproval{}, fmt.Errorf("%w; preview and approve the new digest", errSnapshotApprovalChanged)
 	}
 	return approval, nil
 }

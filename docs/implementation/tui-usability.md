@@ -10,7 +10,7 @@
 | 2 | Keychain実装を削除し、owner-only file、atomic replacement、process間lockへAPI keyとOAuthを独立保存 | `internal/secretstore/store.go`、`internal/openauth/codex_test.go`、`scripts/verify.sh`の禁止API scan |
 | 3 | OAuth既定のglobal設定へ認証方式を移し、Project schema migrationとSession開始時snapshotを実装 | `internal/usersettings/`、`internal/projectconfig/config_test.go`、`internal/policy/policy_test.go`、`internal/session/model_auth_test.go` |
 | 4 | Bun 1.3.14、OpenTUI 0.5.9、standalone `sunaba-ui`をexact version/digestで固定。旧bootstrap lockを厳密に識別して確認後にtransactional migrationし、Go authorityとone-shot helperをowner/PID/UID/Project/nonceへ束縛 | `internal/dependency/manifest.json`、`ui/bun.lock`、`internal/tui/`、`internal/cli/version_commands_test.go`、`scripts/build-ui.sh` |
-| 5 | canonical Project自動選択、bounded selector pagination、状態別Home、helper終了後だけOpenCodeへterminalをhandoffし終了後にfresh Homeを生成 | `internal/cli/tui_coordinator.go`、`internal/cli/tui_coordinator_test.go` |
+| 5 | canonical Project自動選択、bounded selector pagination、状態別Home、Start前のdigest-bound Snapshot review、helper終了後だけOpenCodeへterminalをhandoffし終了後にfresh Homeを生成 | `internal/cli/tui_coordinator.go`、`internal/cli/tui_coordinator_test.go` |
 | 6 | Continue前に永続化しないSetup、推奨Web詳細、明示選択Git remote、global AI接続、Settingsを実装 | `internal/cli/tui_coordinator.go`、`TestTUISetupDoesNotPersistBeforeContinue` |
 | 7 | 変更fileだけのindex、A/M/D/R、mode/symlink/binary/large metadata、wide/narrow diff、pagination、Change Set identity再検証、全体applyを実装 | `internal/workspace/review_screen.go`、`internal/workspace/review_screen_test.go`、`internal/cli/tui_coordinator.go` |
 | 8 | Recoveryに削除対象、保持対象、回復不能work、安全なexport/recreate順を表示。Git pushの既存one-shot host approvalをHomeから案内 | `internal/cli/tui_coordinator.go`、`internal/trustedui/approval_test.go`、`internal/approval/approval_test.go` |
@@ -48,6 +48,7 @@ integration build-tag commandはcompile-onlyであり、Apple Container VMの実
 
 - helperは表示とbounded event変換だけを担当し、Project、credential、policy、network、shellへ直接アクセスしない。
 - Go側は表示済みrevision、action、Project、helper PID/UID、nonceを照合し、action受領後も既存serviceのlockとvalidationを通す。
+- Start前のSnapshot reviewは内容やsecret値を渡さず、表示したexact digestを承認時に再計算してから既存のapproval fileへ保存する。Backでは保存しない。
 - credential値はhost-only fileだけに保存し、argv、environment、Project設定、VM、audit、logへ渡さない。
 - Keychain API、`/usr/bin/security`、Security.frameworkを製品経路から削除し、旧itemを読取、移行、自動削除しない。
 - partial apply、toolchain/cacheの利用者領域への永続化、Session開始時の自動updateは追加していない。

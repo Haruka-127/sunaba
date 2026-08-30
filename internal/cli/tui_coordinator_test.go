@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -367,14 +368,40 @@ func TestTUIHelperExitPrecedesOpenCodeAndReturnsToFreshHome(t *testing.T) {
 	if err := configs.Save(project.policy.ProjectID, config, rules); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(project.policy.ProjectRoot, ".env"), []byte("TOKEN=not-rendered\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 
-	order := make([]string, 0, 3)
+	order := make([]string, 0, 4)
 	revisions := make([]uint64, 0, 2)
 	homeCount := 0
 	a := &app{store: store, configs: configs, input: strings.NewReader(""), output: io.Discard, errors: io.Discard}
 	a.uiExchange = func(_ context.Context, projectID string, view hosttui.View) (hosttui.Event, error) {
-		if projectID != project.policy.ProjectID || view.ScreenID != "home" {
+		if projectID != project.policy.ProjectID {
 			t.Fatalf("unexpected helper exchange project=%q view=%+v", projectID, view)
+		}
+		if view.ScreenID == "setup" {
+			if view.Title != "Review and approve the Snapshot before Start" {
+				t.Fatalf("unexpected Snapshot review=%+v", view)
+			}
+			fieldText := make(map[string]string, len(view.Fields))
+			for _, field := range view.Fields {
+				fieldText[field.ID] = field.Text
+			}
+			allFields := strings.Join(mapsValues(fieldText), " ")
+			if fieldText["reason"] != "The first Snapshot has not been approved." || strings.Contains(fieldText["reason"], "snapshot preview") ||
+				len(fieldText["digest"]) != 64 || !strings.Contains(fieldText["sensitive.0"], ".env") || strings.Contains(allFields, "TOKEN=") {
+				t.Fatalf("unsafe or incomplete Snapshot review fields=%+v", view.Fields)
+			}
+			view.Binding = hosttui.Binding{ProcessID: 1, ProjectID: project.policy.ProjectID, Nonce: strings.Repeat("a", 64)}
+			if _, err := hosttui.PrepareView(view); err != nil {
+				t.Fatalf("Snapshot review violates the production UI protocol: %v", err)
+			}
+			order = append(order, "helper-snapshot-exited")
+			return tuiEvent(view, "approve-start"), nil
+		}
+		if view.ScreenID != "home" {
+			t.Fatalf("unexpected helper view=%+v", view)
 		}
 		homeCount++
 		revisions = append(revisions, view.Revision)
@@ -394,12 +421,72 @@ func TestTUIHelperExitPrecedesOpenCodeAndReturnsToFreshHome(t *testing.T) {
 	if err := (&tuiCoordinator{app: a, width: 100}).projectLoop(context.Background(), project); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(order, []string{"helper-home-1-exited", "opencode", "helper-home-2-exited"}) {
+	if !slices.Equal(order, []string{"helper-home-1-exited", "helper-snapshot-exited", "opencode", "helper-home-2-exited"}) {
 		t.Fatalf("lifecycle order=%v", order)
 	}
 	if len(revisions) != 2 || revisions[0] == revisions[1] || revisions[1] <= revisions[0] {
 		t.Fatalf("Home was not rebuilt with a fresh revision: %v", revisions)
 	}
+	_, projectState, compiled, manifest, err := a.snapshotManifest(project.policy.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifySnapshotApproval(projectState, compiled, manifest); err != nil {
+		t.Fatalf("Snapshot review did not persist its exact approval: %v", err)
+	}
+	approvalPath := filepath.Join(projectState, snapshotApprovalFile)
+	before, err := os.ReadFile(approvalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project.policy.ProjectRoot, ".env"), []byte("TOKEN=changed-but-not-rendered\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.uiExchange = func(_ context.Context, projectID string, view hosttui.View) (hosttui.Event, error) {
+		if projectID != project.policy.ProjectID || view.ScreenID != "setup" || view.Fields[0].ID != "reason" || view.Fields[0].Text != "The host Project changed after the previous Snapshot approval." {
+			t.Fatalf("changed Project did not require a new Snapshot review: project=%q view=%+v", projectID, view)
+		}
+		return tuiEvent(view, "back"), nil
+	}
+	approved, err := (&tuiCoordinator{app: a, width: 100}).ensureSnapshotApproval(context.Background(), project)
+	if err != nil || approved {
+		t.Fatalf("changed Snapshot approved=%t error=%v", approved, err)
+	}
+	after, err := os.ReadFile(approvalPath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("Back mutated Snapshot approval: before=%q after=%q error=%v", before, after, err)
+	}
+}
+
+func TestTUIFailureFlattensMultilineDiagnostics(t *testing.T) {
+	a := &app{input: strings.NewReader(""), output: io.Discard, errors: io.Discard}
+	a.uiExchange = func(_ context.Context, projectID string, view hosttui.View) (hosttui.Event, error) {
+		if projectID != "project" || view.ScreenID != "recovery" {
+			t.Fatalf("failure binding=%q view=%+v", projectID, view)
+		}
+		got := view.Fields[0].Text
+		if strings.ContainsAny(got, "\r\n") || strings.Contains(got, "<U+000A>") || !strings.Contains(got, "first · second") {
+			t.Fatalf("multiline failure was not flattened: %q", got)
+		}
+		view.Binding = hosttui.Binding{ProcessID: 1, ProjectID: projectID, Nonce: strings.Repeat("b", 64)}
+		prepared, err := hosttui.PrepareView(view)
+		if err != nil || !strings.Contains(prepared.Fields[0].Text, "<U+001B>") || strings.Contains(prepared.Fields[0].Text, "<U+000A>") {
+			t.Fatalf("prepared failure=%+v error=%v", prepared.Fields[0], err)
+		}
+		return tuiEvent(view, "exit"), nil
+	}
+	exit, err := (&tuiCoordinator{app: a, width: 100}).failure(context.Background(), "project", errors.New("first\n\nsecond\x1b"), "preserved", "retry")
+	if err != nil || !exit {
+		t.Fatalf("exit=%t error=%v", exit, err)
+	}
+}
+
+func mapsValues(values map[string]string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	return result
 }
 
 func tuiRegisterProject(t *testing.T, store *state.Store, root string) tuiProject {

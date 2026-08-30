@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"sunaba/internal/dependency"
 	"sunaba/internal/openauth"
@@ -448,6 +449,20 @@ func (c *tuiCoordinator) projectLoop(ctx context.Context, project tuiProject) er
 		}
 		switch event.ActionID {
 		case "start", "resume":
+			if event.ActionID == "start" {
+				approved, approvalErr := c.ensureSnapshotApproval(ctx, project)
+				if approvalErr != nil {
+					if exit, showErr := c.failure(ctx, project.policy.ProjectID, approvalErr, "No VM was created and the host Project was not changed.", "Return Home and review the Snapshot again. Use the advanced snapshot CLI only if the TUI review remains unavailable."); showErr != nil {
+						return showErr
+					} else if exit {
+						return nil
+					}
+					continue
+				}
+				if !approved {
+					continue
+				}
+			}
 			// The one-shot helper has fully exited before authority starts OpenCode.
 			runAgent := c.app.agent
 			if c.app.agentRun != nil {
@@ -531,11 +546,86 @@ func (c *tuiCoordinator) home(ctx context.Context, project tuiProject) (hosttui.
 		{ID: "push", Label: "Git push approvals", Text: "During OpenCode, use sunaba approvals in a separate host terminal."},
 	}
 	if c.warning != "" {
-		fields = append(fields, hosttui.TextField{ID: "warning", Label: "Warning", Text: c.warning})
+		fields = append(fields, hosttui.TextField{ID: "warning", Label: "Warning", Text: singleLineTUIMessage(c.warning)})
 		c.warning = ""
 	}
 	actions := tuiHomeActions(record, pending, recoveryExists(project.state))
 	return c.exchange(ctx, project.policy.ProjectID, c.view("home", "Choose the recommended available action", fields, actions))
+}
+
+func (c *tuiCoordinator) ensureSnapshotApproval(ctx context.Context, project tuiProject) (bool, error) {
+	projectPolicy, projectState, compiled, manifest, err := c.app.snapshotManifest(project.policy.ProjectRoot)
+	if err != nil {
+		return false, err
+	}
+	if projectPolicy.ProjectID != project.policy.ProjectID || projectState != project.state {
+		return false, fmt.Errorf("Project identity changed while preparing the Snapshot review")
+	}
+	_, approvalErr := verifySnapshotApproval(projectState, compiled, manifest)
+	if approvalErr == nil {
+		return true, nil
+	}
+	preview := workspace.BuildSnapshotPreview(manifest)
+	fields := []hosttui.TextField{
+		{ID: "reason", Label: "Approval required", Text: snapshotApprovalTUIReason(approvalErr)},
+		{ID: "digest", Label: "Exact Snapshot digest", Text: preview.Digest},
+		{ID: "entries", Label: "Included metadata", Text: fmt.Sprintf("%d entries (%d files), %d total bytes", preview.EntryCount, preview.FileCount, preview.TotalSize)},
+		{ID: "excluded", Label: "Excluded paths", Text: fmt.Sprintf("%d paths from the active host policy", len(compiled.Snapshot.ExcludedPaths))},
+		{ID: "contents", Label: "Content disclosure", Text: "File contents, secret values, and per-file hashes are not displayed by this review."},
+	}
+	const largeLimit = 10
+	for index, file := range preview.LargeFiles[:min(len(preview.LargeFiles), largeLimit)] {
+		fields = append(fields, hosttui.TextField{ID: fmt.Sprintf("large.%d", index), Label: "Large file warning", Text: fmt.Sprintf("%s (%d bytes)", boundedTUIPath(file.Path), file.Size)})
+	}
+	if len(preview.LargeFiles) > largeLimit {
+		fields = append(fields, hosttui.TextField{ID: "large.more", Label: "Additional large files", Text: fmt.Sprintf("%d more; use 'sunaba snapshot preview' for the bounded CLI list", len(preview.LargeFiles)-largeLimit)})
+	}
+	const sensitiveLimit = 20
+	for index, path := range preview.SensitivePaths[:min(len(preview.SensitivePaths), sensitiveLimit)] {
+		fields = append(fields, hosttui.TextField{ID: fmt.Sprintf("sensitive.%d", index), Label: "Sensitive filename warning", Text: boundedTUIPath(path)})
+	}
+	if len(preview.SensitivePaths) > sensitiveLimit {
+		fields = append(fields, hosttui.TextField{ID: "sensitive.more", Label: "Additional sensitive filenames", Text: fmt.Sprintf("%d more; use 'sunaba snapshot preview' for the bounded CLI list", len(preview.SensitivePaths)-sensitiveLimit)})
+	}
+	view := c.view("setup", "Review and approve the Snapshot before Start", fields, []hosttui.Action{
+		noInputAction("approve-start", "Approve and Start"), noInputAction("back", "Back to Home"),
+	})
+	event, exchangeErr := c.exchange(ctx, project.policy.ProjectID, view)
+	if exchangeErr != nil {
+		return false, exchangeErr
+	}
+	if event.Kind != hosttui.EventAction || event.ActionID != "approve-start" {
+		return false, nil
+	}
+	if err := c.app.snapshotApprove(project.policy.ProjectRoot, preview.Digest); err != nil {
+		return false, fmt.Errorf("approve displayed Snapshot: %w", err)
+	}
+	return true, nil
+}
+
+func snapshotApprovalTUIReason(err error) string {
+	switch {
+	case errors.Is(err, errSnapshotApprovalMissing):
+		return "The first Snapshot has not been approved."
+	case errors.Is(err, errSnapshotApprovalInvalid):
+		return "The saved approval is invalid or belongs to a different exclusion policy."
+	case errors.Is(err, errSnapshotApprovalChanged):
+		return "The host Project changed after the previous Snapshot approval."
+	default:
+		return singleLineTUIMessage(err.Error())
+	}
+}
+
+func boundedTUIPath(value string) string {
+	const maximumBytes = 512
+	if len(value) <= maximumBytes {
+		return value
+	}
+	cut := maximumBytes
+	for cut > 0 && !utf8.ValidString(value[:cut]) {
+		cut--
+	}
+	return value[:cut] + "…"
 }
 
 func tuiHomeActions(record projectListRecord, pending string, hasRecovery bool) []hosttui.Action {
@@ -895,12 +985,23 @@ func (c *tuiCoordinator) recovery(ctx context.Context, project tuiProject) error
 
 func (c *tuiCoordinator) failure(ctx context.Context, projectID string, cause error, preservation, next string) (bool, error) {
 	view := c.view("recovery", "The requested action was refused or failed", []hosttui.TextField{
-		{ID: "failure", Label: "Failure", Text: cause.Error()},
+		{ID: "failure", Label: "Failure", Text: singleLineTUIMessage(cause.Error())},
 		{ID: "preserved", Label: "Work preservation", Text: preservation},
 		{ID: "next", Label: "Next action", Text: next},
 	}, []hosttui.Action{noInputAction("back", "Back to Home"), noInputAction("exit", "Exit")})
 	event, err := c.exchange(ctx, projectID, view)
 	return event.ActionID == "exit" || event.Kind == hosttui.EventExit, err
+}
+
+func singleLineTUIMessage(value string) string {
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == '\n' || r == '\r' })
+	for index := range parts {
+		parts[index] = strings.TrimSpace(parts[index])
+	}
+	if len(parts) == 0 {
+		return "No additional diagnostics were provided."
+	}
+	return strings.Join(parts, " · ")
 }
 
 func recoveryExists(projectState string) bool {

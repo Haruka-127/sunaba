@@ -29,14 +29,14 @@
 
 5. Continue後、固定OpenCode artifact、bundled `sunaba-ui`、guest artifact、Agent imageが検証・準備されます。OAuth URLとcodeが表示されたら手動でブラウザを開きます。中断した場合はSettingsで再認証できます。
 
-6. 初回VM用のSnapshot metadataをpreviewして承認します。
+6. Homeで`Start`を選び、初回VM用のSnapshot metadataを確認します。内容やsecret値は表示されません。件数、size、警告、exact digestを確認し、問題がなければ`Approve and Start`を選びます。CLIで先に確認・承認する場合だけ次を使います。
 
    ```sh
    sunaba snapshot preview
    sunaba snapshot approve --digest <表示されたexact digest>
    ```
 
-7. `sunaba`へ戻り、Homeの`Start`を選びます。OpenCode終了後は新しいHomeへ戻り、VM内の作業は隔離されたまま保持されます。
+7. OpenCode終了後は新しいHomeへ戻り、VM内の作業は隔離されたまま保持されます。
 
 ## 日常のsecure mode作業
 

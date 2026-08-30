@@ -102,7 +102,9 @@ Project pathはsymlinkを解決したcanonical absolute pathとして登録さ�
 ${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/projects/<ProjectID>/
 ```
 
-新しいVMを作る前はSnapshot metadataをpreviewし、exact digestを承認します。内容やsecret値はpreviewへ表示しません。
+新しいVMを作る前はSnapshot metadataをpreviewし、exact digestを承認します。内容やsecret値はpreviewへ表示しません。TUIで`Start`を選ぶと、未承認、除外設定変更、承認後のProject変更を開始前に検出し、件数、size、警告、exact digestを確認する画面を表示します。`Approve and Start`を選んだ場合だけ、表示したdigestを再検証して承認し、Agent開始へ進みます。
+
+高度なCLI経路:
 
 ```sh
 sunaba snapshot preview --dir /path/to/project
@@ -115,7 +117,7 @@ host Projectが変わった後は、次のVM作成前にpreviewと承認をや�
 
 Homeは現在実行できるactionだけを表示します。主なactionは`Start`、`Resume`、`Review changes`、`Settings`、`Recovery`です。
 
-StartまたはResumeを選ぶと、sunaba TUIはterminalを完全にrestoreして終了し、Go側が固定artifactのOpenCode TUIを開始します。同じterminalで2つのTUIを同時に動かしません。OpenCode終了後、Session capability、relay、server password等を失効し、新しいsunaba TUIでHomeへ戻ります。
+StartまたはResumeを選ぶと、必要なSnapshot承認を完了した後、sunaba TUIはterminalを完全にrestoreして終了し、Go側が固定artifactのOpenCode TUIを開始します。同じterminalで2つのTUIを同時に動かしません。OpenCode終了後、Session capability、relay、server password等を失効し、新しいsunaba TUIでHomeへ戻ります。
 
 OpenCodeを終了してもVM workspaceは保持されます。自動export、自動apply、自動destroyは行いません。次回Resumeするか、Changesへ進んでください。
 
