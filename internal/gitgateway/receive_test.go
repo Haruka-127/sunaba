@@ -224,3 +224,35 @@ func runGit(gitPath, directory string, args ...string) (string, error) {
 	output, err := command.CombinedOutput()
 	return string(output), err
 }
+
+func TestInstallPreReceiveHookIsIdempotent(t *testing.T) {
+	quarantine, _, _, _ := testBareRepository(t)
+	gitPath, _ := exec.LookPath("git")
+	helperRoot := testutil.PrivateTempDir(t, "sunaba-git-hook-helper-")
+	first := filepath.Join(helperRoot, "helper-first")
+	second := filepath.Join(helperRoot, "helper-second")
+	if err := os.WriteFile(first, []byte("#!/bin/sh\nexit 0\nold\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("#!/bin/sh\nexit 0\nnew\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := installPreReceiveHook(quarantine, first, gitPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := installPreReceiveHook(quarantine, second, gitPath); err != nil {
+		t.Fatalf("second session could not reuse the quarantine repository: %v", err)
+	}
+	hookPath := filepath.Join(quarantine, "sunaba-hooks", "pre-receive")
+	content, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(content), "new\n") {
+		t.Fatalf("pre-receive helper was not refreshed: %q", content)
+	}
+	info, err := os.Lstat(hookPath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+		t.Fatalf("installed hook mode=%v error=%v", info.Mode(), err)
+	}
+}
