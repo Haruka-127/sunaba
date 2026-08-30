@@ -171,7 +171,10 @@ func (a *app) exchangeUIView(ctx context.Context, projectID string, view hosttui
 	}
 	waitErr := <-wait
 	if eventErr != nil {
-		return hosttui.Event{}, eventErr
+		if waitErr != nil {
+			return hosttui.Event{}, errors.Join(fmt.Errorf("sunaba-ui did not return a complete event: %w", eventErr), fmt.Errorf("sunaba-ui exited unsuccessfully: %w", waitErr))
+		}
+		return hosttui.Event{}, fmt.Errorf("sunaba-ui did not return a complete event: %w", eventErr)
 	}
 	if waitErr != nil {
 		return hosttui.Event{}, fmt.Errorf("sunaba-ui exited unsuccessfully: %w", waitErr)

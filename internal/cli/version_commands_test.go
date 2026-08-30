@@ -271,6 +271,71 @@ func TestProtocolV1UIFullLockRequiresExactSetupMigration(t *testing.T) {
 	}
 }
 
+func TestPreviousProtocolV2ArtifactRequiresExactSetupMigration(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	a := &app{
+		store: &state.Store{Root: filepath.Join(base, "data", "sunaba")}, configs: &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")},
+		runtime: &projectListRuntime{}, output: io.Discard, errors: io.Discard,
+	}
+	if err := a.store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := a.versionStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := versions.SaveConfig(versionconfig.BootstrapConfig()); err != nil {
+		t.Fatal(err)
+	}
+	pinned := dependency.MustPinned()
+	previous := versionconfig.Lock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 10, ResolvedAt: time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC),
+		Manifest: dependency.PreviousSunabaUIV2Manifest(pinned),
+	}
+	paths, _ := versions.Paths()
+	if err := writePrivateJSON(paths.Lock, previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.activeVersionLock(); !errors.Is(err, errLegacyDependencyMigrationRequired) {
+		t.Fatalf("previous protocol-v2 artifact classification error=%v", err)
+	}
+	migrated, previousDigest, _, err := loadLegacyBootstrapLock(versions, pinned)
+	if err != nil || previousDigest == "" || migrated.Generation != previous.Generation || !reflect.DeepEqual(migrated.Manifest, pinned) {
+		t.Fatalf("migrated=%+v digest=%q error=%v", migrated, previousDigest, err)
+	}
+	projectRoot := filepath.Join(base, "project")
+	if err := os.Mkdir(projectRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectPolicy, err := policy.New(projectRoot, previousDigest, pinned.OpenCode.Version, pinned.AppleContainer.Version, pinned.AgentImage.Tag, "secure", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectState := filepath.Join(a.store.Root, "projects", projectPolicy.ProjectID)
+	if err := os.Mkdir(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Save(filepath.Join(projectState, "policy.json"), projectPolicy); err != nil {
+		t.Fatal(err)
+	}
+	projects, migrationNeeded, err := a.inventoryBootstrapProjectsForSetup(context.Background(), pinned, previousDigest)
+	if err != nil || len(projects) != 1 || !migrationNeeded {
+		t.Fatalf("projects=%+v migrationNeeded=%t error=%v", projects, migrationNeeded, err)
+	}
+	previous.Manifest.SunabaUI.SHA256 = strings.Repeat("f", 64)
+	if err := writePrivateJSON(paths.Lock, previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.activeVersionLock(); err == nil || errors.Is(err, errLegacyDependencyMigrationRequired) {
+		t.Fatalf("modified protocol-v2 dependency lock classification error=%v", err)
+	}
+	if encoded, err := json.Marshal(previous); err != nil {
+		t.Fatal(err)
+	} else if _, _, err := decodeLegacyBootstrapLock(encoded, pinned); err == nil {
+		t.Fatal("modified protocol-v2 dependency lock was accepted for migration")
+	}
+}
+
 func TestLegacyBootstrapLockMigrationRollsBackPreparedFailure(t *testing.T) {
 	base, _ := filepath.EvalSymlinks(t.TempDir())
 	a := &app{

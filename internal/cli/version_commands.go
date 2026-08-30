@@ -66,8 +66,16 @@ func (a *app) activeVersionLock() (versionconfig.Lock, error) {
 
 func (a *app) loadVersionLock(store *versionconfig.Store) (versionconfig.Lock, error) {
 	lock, err := store.LoadLock()
-	if err == nil || errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) {
 		return lock, err
+	}
+	if err == nil {
+		if contractErr := dependency.ValidateCompiledUIContract(lock.Manifest); contractErr == nil {
+			return lock, nil
+		} else if _, _, _, migrationErr := loadLegacyBootstrapLock(store, dependency.MustPinned()); migrationErr != nil {
+			return lock, contractErr
+		}
+		return lock, errLegacyDependencyMigrationRequired
 	}
 	if _, _, _, migrationErr := loadLegacyBootstrapLock(store, dependency.MustPinned()); migrationErr == nil {
 		return lock, errLegacyDependencyMigrationRequired
@@ -691,14 +699,19 @@ func loadLegacyBootstrapLock(store *versionconfig.Store, pinned dependency.Manif
 
 func decodeLegacyBootstrapLock(data []byte, pinned dependency.Manifest) (versionconfig.Lock, string, error) {
 	var previous versionconfig.Lock
-	if err := securefs.DecodeStrictJSON(data, &previous); err == nil && previous.SchemaVersion == versionconfig.SchemaVersion && previous.Generation > 0 && !previous.ResolvedAt.IsZero() && previous.ResolvedAt.Location() == time.UTC && reflect.DeepEqual(previous.Manifest, dependency.LegacySunabaUIV1Manifest(pinned)) {
-		encoded, err := json.Marshal(previous.Manifest)
-		if err != nil {
-			return versionconfig.Lock{}, "", err
+	if err := securefs.DecodeStrictJSON(data, &previous); err == nil && previous.SchemaVersion == versionconfig.SchemaVersion && previous.Generation > 0 && !previous.ResolvedAt.IsZero() && previous.ResolvedAt.Location() == time.UTC {
+		for _, exactPreviousManifest := range []dependency.Manifest{dependency.LegacySunabaUIV1Manifest(pinned), dependency.PreviousSunabaUIV2Manifest(pinned)} {
+			if !reflect.DeepEqual(previous.Manifest, exactPreviousManifest) {
+				continue
+			}
+			encoded, err := json.Marshal(previous.Manifest)
+			if err != nil {
+				return versionconfig.Lock{}, "", err
+			}
+			digest := sha256.Sum256(encoded)
+			previous.Manifest = pinned
+			return previous, hex.EncodeToString(digest[:]), nil
 		}
-		digest := sha256.Sum256(encoded)
-		previous.Manifest = pinned
-		return previous, hex.EncodeToString(digest[:]), nil
 	}
 	var legacy legacyVersionLock
 	if err := securefs.DecodeStrictJSON(data, &legacy); err != nil || legacy.SchemaVersion != versionconfig.SchemaVersion || legacy.Generation == 0 || legacy.ResolvedAt.IsZero() || legacy.ResolvedAt.Location() != time.UTC {

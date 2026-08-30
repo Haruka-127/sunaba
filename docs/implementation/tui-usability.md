@@ -9,7 +9,7 @@
 | 1 | credential file、global settings、UI protocol、managed artifactのstrict contractを追加 | `internal/secretstore/store_test.go`、`internal/usersettings/settings_test.go`、`internal/tui/protocol_test.go`、`internal/dependency/dependency_test.go` |
 | 2 | Keychain実装を削除し、owner-only file、atomic replacement、process間lockへAPI keyとOAuthを独立保存 | `internal/secretstore/store.go`、`internal/openauth/codex_test.go`、`scripts/verify.sh`の禁止API scan |
 | 3 | OAuth既定のglobal設定へ認証方式を移し、Project schema migrationとSession開始時snapshotを実装 | `internal/usersettings/`、`internal/projectconfig/config_test.go`、`internal/policy/policy_test.go`、`internal/session/model_auth_test.go` |
-| 4 | Bun 1.3.14、OpenTUI 0.5.9、standalone `sunaba-ui` protocol v2をexact version/digestで固定。旧bootstrap lockとexact protocol v1 lockを厳密に識別し、その検証済みsource digestに一致するProject policyだけを確認後にtransactional migrationする。Go authorityとone-shot helperをowner/PID/UID/Project/nonceへ束縛 | `internal/dependency/manifest.json`、`ui/bun.lock`、`internal/tui/`、`internal/cli/version_commands_test.go`、`scripts/build-ui.sh` |
+| 4 | Bun 1.3.14、OpenTUI 0.5.9、standalone `sunaba-ui` protocol v2をexact version/digestで固定。旧bootstrap lock、exact protocol v1 lock、直前のexact protocol v2 artifact lockを厳密に識別し、その検証済みsource digestに一致するProject policyだけを確認後にtransactional migrationする。Go authorityとone-shot helperをowner/PID/UID/Project/nonceへ束縛 | `internal/dependency/manifest.json`、`ui/bun.lock`、`internal/tui/`、`internal/cli/version_commands_test.go`、`scripts/build-ui.sh` |
 | 5 | canonical Project自動選択、bounded selector pagination、状態別Home、Start前のdigest-bound Snapshot review、helper終了後だけOpenCodeへterminalをhandoffし終了後にfresh Homeを生成 | `internal/cli/tui_coordinator.go`、`internal/cli/tui_coordinator_test.go` |
 | 6 | Continue前に永続化しないSetup、推奨Web詳細、明示選択Git remote、global AI接続、Settingsを実装 | `internal/cli/tui_coordinator.go`、`TestTUISetupDoesNotPersistBeforeContinue` |
 | 7 | 改行を含まない構造化diff row/cell、変更fileだけのindex、A/M/D/R、mode/symlink/binary/large metadata、line番号付きwide/narrow diff、file/diff/action focus、scroll viewport、固定footer、pagination、確認前後のChange Set identity再検証、全体applyを実装 | `internal/workspace/review_screen.go`、`internal/tui/protocol.go`、`internal/cli/tui_coordinator.go`、`ui/src/changes.ts`、`ui/test/changes.test.ts` |
@@ -23,7 +23,7 @@
 ./scripts/build-ui.sh
 ```
 
-2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 15件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v2生成物SHA-256は`e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176`である。利用者環境へのglobal installは行っていない。
+2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 15件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v2生成物SHA-256は`2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2`である。helperはterminal restore後もresponse frameのtransport closeまでmainを生存させる。利用者環境へのglobal installは行っていない。
 
 ## 自動gate
 

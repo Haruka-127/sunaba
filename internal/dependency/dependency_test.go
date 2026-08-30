@@ -71,6 +71,26 @@ func TestBootstrapAndUpdateGateBindExactUIArtifact(t *testing.T) {
 	}
 }
 
+func TestCompiledUIContractRejectsPreviousAndSubstitutedArtifacts(t *testing.T) {
+	for name, manifest := range map[string]Manifest{
+		"previous protocol-v2 artifact": PreviousSunabaUIV2Manifest(MustPinned()),
+		"substituted artifact": func() Manifest {
+			manifest := MustPinned()
+			manifest.SunabaUI.SHA256 = strings.Repeat("f", 64)
+			return manifest
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateCompiledUIContract(manifest); err == nil {
+				t.Fatal("non-current UI artifact passed the compiled contract")
+			}
+		})
+	}
+	if err := ValidateCompiledUIContract(MustPinned()); err != nil {
+		t.Fatalf("current UI artifact was rejected: %v", err)
+	}
+}
+
 func TestRuntimeManifestAcceptsAnotherExactV1Release(t *testing.T) {
 	manifest := MustPinned()
 	manifest.OpenCode.Version = "1.99.0"

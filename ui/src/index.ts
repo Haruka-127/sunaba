@@ -4,7 +4,7 @@ import { createFinisher } from "./lifecycle"
 import { changesActionIndexes, initialChangesState, renderChanges, type ChangesFocus, type ChangesState, type Segment } from "./changes"
 
 type Launch = { socket: string; projectID: string; nonce: string }
-type Transport = { socket: Bun.Socket<undefined>; view: View }
+type Transport = { socket: Bun.Socket<undefined>; view: View; closed: Promise<Error | undefined> }
 
 function launchArguments(args: string[]): Launch {
   const values = new Map<string, string>()
@@ -25,6 +25,10 @@ async function connect(launch: Launch): Promise<Transport> {
   return await new Promise((resolve, reject) => {
     let received = new Uint8Array()
     let settled = false
+    let resolveClosed!: (error: Error | undefined) => void
+    const closed = new Promise<Error | undefined>((closedResolve) => {
+      resolveClosed = closedResolve
+    })
     void Bun.connect<undefined>({
       unix: launch.socket,
       socket: {
@@ -45,7 +49,8 @@ async function connect(launch: Launch): Promise<Transport> {
             if (!decoded.payload) return
             const view = parseView(decoded.payload, launch)
             settled = true
-            resolve({ socket, view })
+            socket.ref()
+            resolve({ socket, view, closed })
           } catch (error) {
             settled = true
             socket.end()
@@ -53,13 +58,24 @@ async function connect(launch: Launch): Promise<Transport> {
           }
         },
         error(_socket, error) {
-          if (!settled) reject(error)
+          if (!settled) {
+            settled = true
+            reject(error)
+          } else resolveClosed(error)
         },
-        close() {
-          if (!settled) reject(new Error("Go authority closed before sending a view"))
+        close(_socket, error) {
+          if (!settled) {
+            settled = true
+            reject(error ?? new Error("Go authority closed before sending a view"))
+          } else resolveClosed(error)
         },
       },
-    }).catch(reject)
+    }).catch((error) => {
+      if (!settled) {
+        settled = true
+        reject(error)
+      }
+    })
   })
 }
 
@@ -117,9 +133,25 @@ async function run(transport: Transport): Promise<void> {
   let inputMode = false
   let input = ""
   let changesState = transport.view.changes ? initialChangesState(transport.view) : undefined
+  let resolveCompletion!: () => void
+  let rejectCompletion!: (error: unknown) => void
+  const completion = new Promise<void>((resolve, reject) => {
+    resolveCompletion = resolve
+    rejectCompletion = reject
+  })
 
-  const finishOnce = createFinisher<UIEvent>(() => renderer?.destroy(), (event) => transport.socket.end(encodeFrame(event)))
-  const finish = (event: UIEvent) => { if (finished) return; finished = true; finishOnce(event) }
+  const finishOnce = createFinisher<UIEvent>(() => renderer?.destroy(), async (event) => {
+    const frame = encodeFrame(event)
+    const written = transport.socket.end(frame)
+    if (written !== frame.byteLength) throw new Error("failed to write the complete UI response")
+    const closeError = await transport.closed
+    if (closeError) throw closeError
+  })
+  const finish = (event: UIEvent) => {
+    if (finished) return
+    finished = true
+    void finishOnce(event).then(resolveCompletion, rejectCompletion)
+  }
 
   try {
     renderer = await createCliRenderer({
@@ -232,6 +264,7 @@ async function run(transport: Transport): Promise<void> {
     const message = error instanceof Error ? error.message : "terminal initialization failed"
     finish(makeEvent(transport.view, "terminal_error", "", "", message.slice(0, 4096).replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "?")))
   }
+  await completion
 }
 
 async function main(): Promise<void> {
