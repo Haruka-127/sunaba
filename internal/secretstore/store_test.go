@@ -111,6 +111,18 @@ func TestCredentialStoreUsesXDGDataHomeAndHomeFallback(t *testing.T) {
 	}
 }
 
+func TestCredentialStoreNormalizesAbsoluteXDGDataHome(t *testing.T) {
+	root := canonicalTempDir(t)
+	t.Setenv("XDG_DATA_HOME", root+string(filepath.Separator)+".")
+	if err := StoreOpenAIKey(context.Background(), testAPIKey); err != nil {
+		t.Fatalf("normalized XDG_DATA_HOME: %v", err)
+	}
+	path := filepath.Join(root, "sunaba", credentialDirectoryName, credentialFileName)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("credential path %s: %v", path, err)
+	}
+}
+
 func TestUpdateCodexOAuthPreservesAPIKey(t *testing.T) {
 	prepareCredentialStore(t)
 	if err := StoreOpenAIKey(context.Background(), testAPIKey); err != nil {

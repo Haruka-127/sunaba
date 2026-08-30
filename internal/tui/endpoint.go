@@ -53,15 +53,17 @@ func newNonce() (string, error) {
 }
 
 // NewEndpoint creates an owner-only, one-connection socket beneath tempRoot.
-// Callers should normally pass os.TempDir(); an explicit root keeps tests and
-// lifecycle ownership bounded.
+// Callers should normally pass os.TempDir(); platform APIs may return that path
+// with a trailing separator, so normalize it before enforcing the OS-temp
+// boundary. An explicit root keeps tests and lifecycle ownership bounded.
 func NewEndpoint(tempRoot, projectID string) (*Endpoint, error) {
 	if len(projectID) == 0 || len(projectID) > 128 || hasUnsafeInput(projectID) {
 		return nil, errors.New("invalid UI Project binding")
 	}
-	if !filepath.IsAbs(tempRoot) || filepath.Clean(tempRoot) != tempRoot {
-		return nil, errors.New("UI temporary root must be absolute and clean")
+	if !filepath.IsAbs(tempRoot) {
+		return nil, errors.New("UI temporary root must be absolute")
 	}
+	tempRoot = filepath.Clean(tempRoot)
 	canonicalRoot, err := filepath.EvalSymlinks(tempRoot)
 	if err != nil || !filepath.IsAbs(canonicalRoot) || !isOSTemporaryRoot(canonicalRoot) {
 		return nil, errors.New("UI temporary root must be a canonical OS temporary directory")
@@ -114,6 +116,7 @@ func isOSTemporaryRoot(root string) bool {
 		if err != nil {
 			continue
 		}
+		canonical = filepath.Clean(canonical)
 		if root == canonical || len(root) > len(canonical) && root[:len(canonical)] == canonical && root[len(canonical)] == filepath.Separator {
 			return true
 		}

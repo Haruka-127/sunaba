@@ -326,9 +326,10 @@ func credentialDirectory() (string, error) {
 		}
 		dataHome = filepath.Join(home, ".local", "share")
 	}
-	if len(dataHome) > maximumCredentialPath || !filepath.IsAbs(dataHome) || filepath.Clean(dataHome) != dataHome || strings.IndexFunc(dataHome, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
-		return "", fmt.Errorf("XDG data directory must be a clean absolute path")
+	if len(dataHome) > maximumCredentialPath || !filepath.IsAbs(dataHome) || strings.IndexFunc(dataHome, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return "", fmt.Errorf("XDG data directory must be an absolute path without control characters")
 	}
+	dataHome = filepath.Clean(dataHome)
 	path := filepath.Join(dataHome, "sunaba", credentialDirectoryName)
 	if len(path) > maximumCredentialPath {
 		return "", fmt.Errorf("OpenAI credential directory path is too long")

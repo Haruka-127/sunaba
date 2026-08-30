@@ -12,7 +12,13 @@ import (
 )
 
 func TestEndpointOwnerOnlySingleConnectionAndCleanup(t *testing.T) {
-	root := filepath.Clean(os.TempDir())
+	// macOS commonly returns TMPDIR with a trailing slash. Passing the platform
+	// value unchanged is the production path and must not be rejected merely for
+	// that representation.
+	root := os.TempDir()
+	if filepath.Clean(root) == root {
+		root += string(filepath.Separator)
+	}
 	endpoint, err := NewEndpoint(root, "project-1")
 	if err != nil {
 		t.Fatal(err)
@@ -64,6 +70,16 @@ func TestEndpointOwnerOnlySingleConnectionAndCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(directory); !os.IsNotExist(err) {
 		t.Fatalf("temporary directory remains: %v", err)
+	}
+}
+
+func TestEndpointNormalizesOnlyWithinOSTemporaryBoundary(t *testing.T) {
+	if _, err := NewEndpoint("relative/temp", "project-1"); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative temporary root error=%v", err)
+	}
+	nonTemporary := filepath.Join(filepath.Dir(filepath.Clean(os.TempDir())), "sunaba-not-temp")
+	if _, err := NewEndpoint(nonTemporary, "project-1"); err == nil || !strings.Contains(err.Error(), "OS temporary") {
+		t.Fatalf("non-temporary root error=%v", err)
 	}
 }
 
