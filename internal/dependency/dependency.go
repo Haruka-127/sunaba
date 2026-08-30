@@ -13,27 +13,29 @@ import (
 )
 
 const (
-	AppleContainerVersion   = "1.2.2"
-	AppleContainerCommit    = "0190097d06df0b9065f4c2d2c7873c649d81d493"
-	OpenCodeVersion         = "1.18.18"
-	OpenCodeCommit          = "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
-	BunVersion              = "1.3.14"
-	BunArchiveSHA256        = "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620"
-	BunExecutableSHA256     = "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233"
-	OpenTUIVersion          = "0.5.9"
-	OpenTUISHA256           = "d9c9b952ff39a79ed52a7f2cb364977d9859b55cdc346bdbfa55b3d4bff77940"
-	OpenTUIIntegrity        = "sha512-d0EWYyp6djitu1N1R0o75NrLl4TxY3oJEmRNrX9vSKKC5/jriGQdSV6lJmwiB77O0cxtBnPzWztAV79vA1J2fA=="
-	SunabaUIVersion         = "4"
-	SunabaUISHA256          = "af4c787730e125b98535e50cc1ac818410083a529411006c2ef29af305c15fd2"
-	ProtocolV2UIVersion     = "2"
-	PreviousSunabaUISHA256  = "bda47df068d6b187399b8aaa3efd1fbc3155cb8957a17e2e8a63bec4e9277f7a"
-	EarlierSunabaUIV2SHA256 = "97c224d92c992415014742908a71400c5500233e63aff4e543ee2be29e19f1e2"
-	OlderSunabaUIV2SHA256   = "454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509"
-	OldestSunabaUIV2SHA256  = "2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2"
-	InitialSunabaUIV2SHA256 = "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
-	LegacySunabaUIVersion   = "1"
-	LegacySunabaUISHA256    = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
-	UrfaveCLIVersion        = "v3.10.1"
+	AppleContainerVersion    = "1.2.2"
+	AppleContainerCommit     = "0190097d06df0b9065f4c2d2c7873c649d81d493"
+	OpenCodeVersion          = "1.18.18"
+	OpenCodeCommit           = "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
+	BunVersion               = "1.3.14"
+	BunArchiveSHA256         = "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620"
+	BunExecutableSHA256      = "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233"
+	OpenTUIVersion           = "0.5.9"
+	OpenTUISHA256            = "d9c9b952ff39a79ed52a7f2cb364977d9859b55cdc346bdbfa55b3d4bff77940"
+	OpenTUIIntegrity         = "sha512-d0EWYyp6djitu1N1R0o75NrLl4TxY3oJEmRNrX9vSKKC5/jriGQdSV6lJmwiB77O0cxtBnPzWztAV79vA1J2fA=="
+	SunabaUIVersion          = "4"
+	SunabaUISHA256           = "af4c787730e125b98535e50cc1ac818410083a529411006c2ef29af305c15fd2"
+	ProtocolV3UIVersion      = "3"
+	PreviousSunabaUIV3SHA256 = "24d6451d295b836cda3258ff283d900d009b174c402e4b4f4f263835ab9d95ed"
+	ProtocolV2UIVersion      = "2"
+	PreviousSunabaUISHA256   = "bda47df068d6b187399b8aaa3efd1fbc3155cb8957a17e2e8a63bec4e9277f7a"
+	EarlierSunabaUIV2SHA256  = "97c224d92c992415014742908a71400c5500233e63aff4e543ee2be29e19f1e2"
+	OlderSunabaUIV2SHA256    = "454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509"
+	OldestSunabaUIV2SHA256   = "2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2"
+	InitialSunabaUIV2SHA256  = "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
+	LegacySunabaUIVersion    = "1"
+	LegacySunabaUISHA256     = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
+	UrfaveCLIVersion         = "v3.10.1"
 )
 
 //go:embed manifest.json
@@ -355,9 +357,17 @@ func LegacySunabaUIV1Manifest(pinned Manifest) Manifest {
 	return pinned
 }
 
-// PreviousSunabaUIV2Manifest returns the immediately previous protocol-v2
-// bootstrap manifest. Exact full-manifest comparison is required before setup
-// may migrate its lock and Project policy.
+// PreviousSunabaUIV3Manifest returns the exact protocol-v3 bootstrap
+// manifest shipped immediately before protocol v4.
+func PreviousSunabaUIV3Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.Version = ProtocolV3UIVersion
+	pinned.SunabaUI.SHA256 = PreviousSunabaUIV3SHA256
+	return pinned
+}
+
+// PreviousSunabaUIV2Manifest returns the latest protocol-v2 bootstrap
+// manifest. Exact standalone identity and current platform inputs are required
+// before setup may migrate its lock and Project policy.
 func PreviousSunabaUIV2Manifest(pinned Manifest) Manifest {
 	pinned.SunabaUI.Version = ProtocolV2UIVersion
 	pinned.SunabaUI.SHA256 = PreviousSunabaUISHA256
@@ -400,13 +410,40 @@ func InitialSunabaUIV2Manifest(pinned Manifest) Manifest {
 // Digest-only matches are intentionally insufficient for setup migration.
 func MigratableBootstrapUIManifests(pinned Manifest) []Manifest {
 	return []Manifest{
-		LegacySunabaUIV1Manifest(pinned),
+		PreviousSunabaUIV3Manifest(pinned),
 		PreviousSunabaUIV2Manifest(pinned),
 		EarlierSunabaUIV2Manifest(pinned),
 		OlderSunabaUIV2Manifest(pinned),
 		OldestSunabaUIV2Manifest(pinned),
 		InitialSunabaUIV2Manifest(pinned),
+		LegacySunabaUIV1Manifest(pinned),
 	}
+}
+
+// MigrateKnownUIManifest upgrades only a known exact historical standalone UI
+// artifact. OpenCode may be a separately verified v1 release, while every
+// platform, base-image, Go-module and UI build input must still match the
+// compiled bootstrap contract.
+func MigrateKnownUIManifest(previous, pinned Manifest) (Manifest, bool, error) {
+	known := false
+	for _, candidate := range MigratableBootstrapUIManifests(pinned) {
+		if previous.SunabaUI == candidate.SunabaUI {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return Manifest{}, false, nil
+	}
+	if previous.AppleContainer != pinned.AppleContainer || previous.BaseImage != pinned.BaseImage || previous.Bun != pinned.Bun || previous.OpenTUI != pinned.OpenTUI || !reflect.DeepEqual(previous.GoModules, pinned.GoModules) || previous.Provenance.AppleContainer != pinned.Provenance.AppleContainer || previous.Provenance.BaseImage != pinned.Provenance.BaseImage || !reflect.DeepEqual(previous.Provenance.BuildInputs, pinned.Provenance.BuildInputs) {
+		return Manifest{}, false, fmt.Errorf("historical sunaba-ui lock changed a platform or build input")
+	}
+	migrated := previous
+	migrated.SunabaUI = pinned.SunabaUI
+	if err := ValidateRuntimeManifest(migrated); err != nil {
+		return Manifest{}, false, fmt.Errorf("historical sunaba-ui lock is not a valid runtime manifest: %w", err)
+	}
+	return migrated, true, nil
 }
 
 func validateCandidateSyntax(m Manifest) error {

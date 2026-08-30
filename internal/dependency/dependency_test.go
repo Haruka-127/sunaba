@@ -1,6 +1,7 @@
 package dependency
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -73,6 +74,7 @@ func TestBootstrapAndUpdateGateBindExactUIArtifact(t *testing.T) {
 
 func TestCompiledUIContractRejectsPreviousAndSubstitutedArtifacts(t *testing.T) {
 	for name, manifest := range map[string]Manifest{
+		"previous protocol-v3 artifact": PreviousSunabaUIV3Manifest(MustPinned()),
 		"previous protocol-v2 artifact": PreviousSunabaUIV2Manifest(MustPinned()),
 		"earlier protocol-v2 artifact":  EarlierSunabaUIV2Manifest(MustPinned()),
 		"older protocol-v2 artifact":    OlderSunabaUIV2Manifest(MustPinned()),
@@ -95,10 +97,45 @@ func TestCompiledUIContractRejectsPreviousAndSubstitutedArtifacts(t *testing.T) 
 	}
 }
 
+func TestKnownUIManifestMigrationPreservesVerifiedDynamicOpenCode(t *testing.T) {
+	pinned := MustPinned()
+	previous := PreviousSunabaUIV3Manifest(pinned)
+	previous.OpenCode.Version = "1.99.0"
+	previous.OpenCode.Host.URL = "https://github.com/anomalyco/opencode/releases/download/v1.99.0/" + previous.OpenCode.Host.Artifact
+	previous.OpenCode.Guest.URL = "https://github.com/anomalyco/opencode/releases/download/v1.99.0/" + previous.OpenCode.Guest.Artifact
+	previous.AgentImage.Tag = "sunaba-base:1.99.0-secure.1"
+	previous.Provenance.OpenCode.Tag = "v1.99.0"
+	previous.Provenance.OpenCode.Commit = strings.Repeat("1", 40)
+	migrated, recognized, err := MigrateKnownUIManifest(previous, pinned)
+	if err != nil || !recognized {
+		t.Fatalf("recognized=%t error=%v", recognized, err)
+	}
+	if migrated.OpenCode != previous.OpenCode || migrated.Provenance.OpenCode != previous.Provenance.OpenCode || migrated.SunabaUI != pinned.SunabaUI {
+		t.Fatalf("dynamic OpenCode identity changed during UI migration: %+v", migrated)
+	}
+	changed := previous
+	changed.BaseImage.IndexSHA256 = strings.Repeat("e", 64)
+	changed.BaseImage.Reference = "docker.io/library/debian:bookworm-slim@sha256:" + changed.BaseImage.IndexSHA256
+	changed.Provenance.BaseImage.Digest = "sha256:" + changed.BaseImage.IndexSHA256
+	if _, recognized, err := MigrateKnownUIManifest(changed, pinned); err == nil || recognized {
+		t.Fatalf("changed platform input was migratable: recognized=%t error=%v", recognized, err)
+	}
+	unknown := previous
+	unknown.SunabaUI.SHA256 = strings.Repeat("f", 64)
+	if _, recognized, err := MigrateKnownUIManifest(unknown, pinned); err != nil || recognized {
+		t.Fatalf("unknown UI artifact classification: recognized=%t error=%v", recognized, err)
+	}
+}
+
 func TestMigratableBootstrapUIManifestsAreExactAndDistinct(t *testing.T) {
 	pinned := MustPinned()
+	history := MigratableBootstrapUIManifests(pinned)
+	currentVersion, err := strconv.Atoi(pinned.SunabaUI.Version)
+	if err != nil || len(history) == 0 || history[0].SunabaUI.Version != strconv.Itoa(currentVersion-1) {
+		t.Fatalf("immediately previous UI generation is missing: current=%q history=%+v", pinned.SunabaUI.Version, history)
+	}
 	seen := map[StandaloneArtifact]bool{pinned.SunabaUI: true}
-	for _, previous := range MigratableBootstrapUIManifests(pinned) {
+	for _, previous := range history {
 		if seen[previous.SunabaUI] {
 			t.Fatalf("duplicate migratable UI artifact: %+v", previous.SunabaUI)
 		}

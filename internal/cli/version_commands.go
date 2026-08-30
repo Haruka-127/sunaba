@@ -555,13 +555,18 @@ func (a *app) setup(ctx context.Context, configOnly bool) error {
 		fmt.Fprintln(a.output, "Version declaration is ready. Run 'sunaba update check' and 'sunaba update apply' after selecting a version.")
 		return nil
 	}
-	if config.OpenCode.Strategy != "exact" || config.OpenCode.Value != dependency.OpenCodeVersion {
-		return fmt.Errorf("initial setup can apply bootstrap OpenCode %s only; run 'sunaba update check' and 'sunaba update apply' for %s", dependency.OpenCodeVersion, config.OpenCode.Value)
-	}
-	manifest := dependency.MustPinned()
-	setupLock, err := loadBootstrapLockState(versions, manifest)
+	bootstrapManifest := dependency.MustPinned()
+	setupLock, err := loadBootstrapLockState(versions, bootstrapManifest)
 	if err != nil {
 		return err
+	}
+	manifest := bootstrapManifest
+	if setupLock.Missing {
+		if config.OpenCode.Strategy != "exact" || config.OpenCode.Value != dependency.OpenCodeVersion {
+			return fmt.Errorf("initial setup can apply bootstrap OpenCode %s only; run 'sunaba update check' and 'sunaba update apply' for %s", dependency.OpenCodeVersion, config.OpenCode.Value)
+		}
+	} else {
+		manifest = setupLock.Lock.Manifest
 	}
 	lock := setupLock.Lock
 	legacyMigration := setupLock.SourceManifestDigest != ""
@@ -722,17 +727,22 @@ func loadLegacyBootstrapLock(store *versionconfig.Store, pinned dependency.Manif
 func decodeLegacyBootstrapLock(data []byte, pinned dependency.Manifest) (versionconfig.Lock, string, error) {
 	var previous versionconfig.Lock
 	if err := securefs.DecodeStrictJSON(data, &previous); err == nil && previous.SchemaVersion == versionconfig.SchemaVersion && previous.Generation > 0 && !previous.ResolvedAt.IsZero() && previous.ResolvedAt.Location() == time.UTC {
-		for _, exactPreviousManifest := range dependency.MigratableBootstrapUIManifests(pinned) {
-			if !reflect.DeepEqual(previous.Manifest, exactPreviousManifest) {
-				continue
-			}
+		currentShape := previous.Manifest.Bun.Version != "" || previous.Manifest.OpenTUI.Package != "" || previous.Manifest.SunabaUI.Version != "" || previous.Manifest.SunabaUI.SHA256 != ""
+		migratedManifest, recognized, migrationErr := dependency.MigrateKnownUIManifest(previous.Manifest, pinned)
+		if migrationErr != nil {
+			return versionconfig.Lock{}, "", migrationErr
+		}
+		if recognized {
 			encoded, err := json.Marshal(previous.Manifest)
 			if err != nil {
 				return versionconfig.Lock{}, "", err
 			}
 			digest := sha256.Sum256(encoded)
-			previous.Manifest = pinned
+			previous.Manifest = migratedManifest
 			return previous, hex.EncodeToString(digest[:]), nil
+		}
+		if currentShape {
+			return versionconfig.Lock{}, "", fmt.Errorf("version lock does not match a known exact sunaba-ui migration source")
 		}
 	}
 	var legacy legacyVersionLock

@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -351,6 +353,87 @@ func TestPreviousProtocolV2ArtifactRequiresExactSetupMigration(t *testing.T) {
 		t.Fatal(err)
 	} else if _, _, err := decodeLegacyBootstrapLock(encoded, pinned); err == nil {
 		t.Fatal("modified protocol-v2 dependency lock was accepted for migration")
+	}
+}
+
+func TestPreviousProtocolV3ArtifactUsesTheSharedBootstrapMigration(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	versions := &versionconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	if err := versions.Init(); err != nil {
+		t.Fatal(err)
+	}
+	pinned := dependency.MustPinned()
+	previous := versionconfig.Lock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 11, ResolvedAt: time.Date(2026, 8, 30, 22, 34, 1, 0, time.UTC),
+		Manifest: dependency.PreviousSunabaUIV3Manifest(pinned),
+	}
+	paths, err := versions.Paths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateJSON(paths.Lock, previous); err != nil {
+		t.Fatal(err)
+	}
+	lockState, err := loadBootstrapLockState(versions, pinned)
+	if err != nil || lockState.SourceManifestDigest == "" || lockState.Lock.Generation != previous.Generation || lockState.Lock.Manifest.SunabaUI != pinned.SunabaUI {
+		t.Fatalf("state=%+v error=%v", lockState, err)
+	}
+	encoded, err := json.Marshal(previous.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDigest := sha256.Sum256(encoded)
+	if lockState.SourceManifestDigest != hex.EncodeToString(wantDigest[:]) {
+		t.Fatalf("source digest=%q want=%x", lockState.SourceManifestDigest, wantDigest)
+	}
+	legacyBinding := state.DependencyBinding{
+		Generation: previous.Generation, ManifestSHA256: lockState.SourceManifestDigest,
+		OpenCodeVersion: pinned.OpenCode.Version, AppleContainerVersion: pinned.AppleContainer.Version, AgentImage: pinned.AgentImage.Tag,
+	}
+	if err := validateBootstrapGlobalState(state.GlobalConfig{SchemaVersion: 2, Active: &legacyBinding}, lockState, lockState.Lock.Manifest); err != nil {
+		t.Fatalf("matching protocol-v3 active binding was rejected: %v", err)
+	}
+	previous.Manifest.SunabaUI.Arch = "x64"
+	encoded, err = json.Marshal(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := decodeLegacyBootstrapLock(encoded, pinned); err == nil || !strings.Contains(err.Error(), "known exact sunaba-ui") {
+		t.Fatalf("changed protocol-v3 platform was accepted or misclassified: %v", err)
+	}
+}
+
+func TestProtocolV3MigrationPreservesUpdatedOpenCodeIdentity(t *testing.T) {
+	pinned := dependency.MustPinned()
+	previousManifest := dependency.PreviousSunabaUIV3Manifest(pinned)
+	previousManifest.OpenCode.Version = "1.99.0"
+	previousManifest.OpenCode.Host.URL = "https://github.com/anomalyco/opencode/releases/download/v1.99.0/" + previousManifest.OpenCode.Host.Artifact
+	previousManifest.OpenCode.Guest.URL = "https://github.com/anomalyco/opencode/releases/download/v1.99.0/" + previousManifest.OpenCode.Guest.Artifact
+	previousManifest.AgentImage.Tag = "sunaba-base:1.99.0-secure.1"
+	previousManifest.Provenance.OpenCode.Tag = "v1.99.0"
+	previousManifest.Provenance.OpenCode.Commit = strings.Repeat("1", 40)
+	previous := versionconfig.Lock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 12,
+		ResolvedAt: time.Date(2026, 8, 30, 23, 0, 0, 0, time.UTC), Manifest: previousManifest,
+	}
+	encoded, err := json.Marshal(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, sourceDigest, err := decodeLegacyBootstrapLock(encoded, pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Manifest.OpenCode != previousManifest.OpenCode || migrated.Manifest.Provenance.OpenCode != previousManifest.Provenance.OpenCode || migrated.Manifest.SunabaUI != pinned.SunabaUI {
+		t.Fatalf("updated OpenCode identity changed during UI migration: %+v", migrated.Manifest)
+	}
+	setupLock := bootstrapLockState{Lock: migrated, SourceManifestDigest: sourceDigest, SourceRaw: encoded}
+	binding := state.DependencyBinding{
+		Generation: previous.Generation, ManifestSHA256: sourceDigest,
+		OpenCodeVersion: previousManifest.OpenCode.Version, AppleContainerVersion: previousManifest.AppleContainer.Version, AgentImage: previousManifest.AgentImage.Tag,
+	}
+	if err := validateBootstrapGlobalState(state.GlobalConfig{SchemaVersion: 2, Active: &binding}, setupLock, migrated.Manifest); err != nil {
+		t.Fatalf("updated OpenCode active binding was rejected: %v", err)
 	}
 }
 

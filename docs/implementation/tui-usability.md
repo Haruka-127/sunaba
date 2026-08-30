@@ -9,7 +9,7 @@
 | 1 | credential file、global settings、UI protocol、managed artifactのstrict contractを追加 | `internal/secretstore/store_test.go`、`internal/usersettings/settings_test.go`、`internal/tui/protocol_test.go`、`internal/dependency/dependency_test.go` |
 | 2 | Keychain実装を削除し、owner-only file、atomic replacement、process間lockへAPI keyとOAuthを独立保存 | `internal/secretstore/store.go`、`internal/openauth/codex_test.go`、`scripts/verify.sh`の禁止API scan |
 | 3 | OAuth既定のglobal設定へ認証方式を移し、Project schema migrationとSession開始時snapshotを実装 | `internal/usersettings/`、`internal/projectconfig/config_test.go`、`internal/policy/policy_test.go`、`internal/session/model_auth_test.go` |
-| 4 | Bun 1.3.14、OpenTUI 0.5.9、standalone `sunaba-ui` protocol v3をexact version/digestで固定。起動時とsetup本体で共通して旧bootstrap lock、exact protocol v1/v2 lockを厳密に識別し、その検証済みsource digestに一致するglobal bindingとProject policyだけを確認後にtransactional migrationする。Go authorityとone-shot helperをowner/PID/UID/Project/nonceへ束縛 | `internal/dependency/manifest.json`、`ui/bun.lock`、`internal/tui/`、`internal/cli/version_commands_test.go`、`scripts/build-ui.sh` |
+| 4 | Bun 1.3.14、OpenTUI 0.5.9、standalone `sunaba-ui` protocol v4をexact version/digestで固定。起動時とsetup本体で共通して旧bootstrap lock、exact protocol v1/v2/v3 lockを厳密に識別し、その検証済みsource digestに一致するglobal bindingとProject policyだけを確認後にtransactional migrationする。UI以外のplatform/build inputは現行contractとのexact一致を要求し、別途検証済みのOpenCode release identityは維持する。Go authorityとone-shot helperをowner/PID/UID/Project/nonceへ束縛 | `internal/dependency/manifest.json`、`internal/tui/`、`internal/dependency/dependency_test.go`、`internal/cli/version_commands_test.go`、`scripts/build-ui.sh` |
 | 5 | canonical Project自動選択、bounded selector pagination、状態別Home、Start前のdigest-bound Snapshot review、helper終了後だけOpenCodeへterminalをhandoffし終了後にfresh Homeを生成 | `internal/cli/tui_coordinator.go`、`internal/cli/tui_coordinator_test.go` |
 | 6 | Continue前に永続化しないSetup、推奨Web詳細、明示選択Git remote、global AI接続、Settingsを実装 | `internal/cli/tui_coordinator.go`、`TestTUISetupDoesNotPersistBeforeContinue` |
 | 7 | 改行を含まないcanonical diff row/cell、変更fileだけのindex、A/M/D/R、mode/symlink/binary/large metadata、line番号付きwide/narrow diff、file/diff/action focus、縦横scroll、hunk移動、host-authoritative bounded pagination、固定footer、確認前後のChange Set identity再検証、全体applyを実装 | `internal/workspace/review_screen.go`、`internal/tui/protocol.go`、`internal/cli/tui_coordinator.go`、`ui/src/changes.ts`、`ui/test/changes.test.ts` |
@@ -25,9 +25,11 @@
 
 2026-08-31にproject-local Bunで再実行し、OpenTUI helper test 21件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v4生成物SHA-256は`af4c787730e125b98535e50cc1ac818410083a529411006c2ef29af305c15fd2`である。helperはterminal restore後もresponse frameのtransport closeまでmainを生存させ、authority viewの配列契約違反はbinding検証済みの`terminal_error`としてfail closedで返す。Changesはcanonical rowからresponsive diffを描画し、長い行の横scroll、hunk移動、最大256 row・64 KiB単位のhost-authoritative page遷移により、安全上限内の変更を末尾まで確認できる。protocol v4ではbounded Bulk sectionとopaque action IDを追加し、descendant filenameを通常frameへ含めない。利用者環境へのglobal installは行っていない。
 
+protocol v4へのlock migrationでは、直前のprotocol v3 version/digestを既知sourceとして明示的に固定する。current-shaped lockを旧bootstrap metadataとして誤解釈せず、未知または改変済みのUI identityは既知source不一致として拒否する。OpenCodeだけが正規の更新経路で変更されているlockは、そのexact release identityを維持したままUI contractだけを移行する。将来のprotocol更新で直前版の登録を欠落させないことも`TestMigratableBootstrapUIManifestsAreExactAndDistinct`で検査する。
+
 ## 自動gate
 
-2026-08-30の最終状態で次を再実行した。
+2026-08-31の最終状態で次を再実行した。
 
 ```sh
 ./scripts/verify.sh
@@ -43,6 +45,8 @@ integration build-tag commandはcompile-onlyであり、Apple Container VMの実
 - integration build-tag compile-only: PASS
 - `git diff --check`: PASS
 - Markdown相対link: PASS
+
+通常gateにはprotocol v3 lockのexact migration、未知・改変済みUI artifactの拒否、更新済みOpenCode identityの維持、直前UI generation登録の回帰検査を含む。
 
 ## セキュリティ境界
 
