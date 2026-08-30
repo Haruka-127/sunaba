@@ -26,6 +26,8 @@ import (
 	"sunaba/internal/versionconfig"
 )
 
+var errLegacyDependencyMigrationRequired = errors.New("legacy dependency lock requires migration; run 'sunaba setup'")
+
 func (a *app) versionStore() (*versionconfig.Store, error) {
 	configs, err := a.projectConfigStore()
 	if err != nil {
@@ -41,7 +43,7 @@ func (a *app) activeVersionLock() (versionconfig.Lock, error) {
 	if err != nil {
 		return versionconfig.Lock{}, err
 	}
-	lock, err := store.LoadLock()
+	lock, err := a.loadVersionLock(store)
 	if errors.Is(err, os.ErrNotExist) {
 		return lock, fmt.Errorf("sunaba setup has not completed; run 'sunaba setup'")
 	}
@@ -60,6 +62,17 @@ func (a *app) activeVersionLock() (versionconfig.Lock, error) {
 		return lock, fmt.Errorf("active dependency state does not match versions.lock.json; run 'sunaba setup' to recover")
 	}
 	return lock, nil
+}
+
+func (a *app) loadVersionLock(store *versionconfig.Store) (versionconfig.Lock, error) {
+	lock, err := store.LoadLock()
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return lock, err
+	}
+	if _, _, _, migrationErr := loadLegacyBootstrapLock(store, dependency.MustPinned()); migrationErr == nil {
+		return lock, errLegacyDependencyMigrationRequired
+	}
+	return lock, err
 }
 
 func (a *app) requireActiveProjectDependency(projectPolicy policy.ProjectPolicy) (versionconfig.Lock, error) {
@@ -140,7 +153,7 @@ func (a *app) updateCheck(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	current, err := versions.LoadLock()
+	current, err := a.loadVersionLock(versions)
 	if errors.Is(err, os.ErrNotExist) {
 		current = versionconfig.BootstrapLock()
 	} else if err != nil {
@@ -178,7 +191,7 @@ func (a *app) updateApply(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	current, err := versions.LoadLock()
+	current, err := a.loadVersionLock(versions)
 	sourceActive := true
 	if errors.Is(err, os.ErrNotExist) {
 		global, globalErr := a.store.LoadGlobal()
@@ -776,7 +789,7 @@ func (a *app) showVersions() error {
 		Declaration versionconfig.Config `json:"declaration"`
 		Lock        *versionconfig.Lock  `json:"lock,omitempty"`
 	}{Declaration: config}
-	if lock, err := store.LoadLock(); err == nil {
+	if lock, err := a.loadVersionLock(store); err == nil {
 		result.Lock = &lock
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err

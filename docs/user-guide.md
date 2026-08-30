@@ -62,6 +62,8 @@ Webの通常表示ではorigin数を見せません。`Details`ではexact host/
 
 Continue後、sunabaは固定manifestのhost OpenCode artifactをdownloadしてarchive・executable digestとversionを検証し、bundled `sunaba-ui`もowner、mode、regular file、architecture、digestを検証して管理領域へ保存します。guest artifactとAgent imageも既存の検証経路で準備します。すべてのruntime dependencyはhost-only version lockへ束縛されます。
 
+Bun、OpenTUI、`sunaba-ui`がlockへ追加される前の旧版から更新した場合、引数なしの`sunaba`はProjectを開く前にdependency migrationの確認を表示します。`Continue`後、旧lock、active binding、登録済みProjectのdependency digestがbootstrap契約と完全一致する場合だけ一括移行します。CLIでは`sunaba setup`で同じ移行を実行できます。改変、混在形式、不完全なstateは推測で修復せず停止します。
+
 その後OAuth device flowを開始します。表示されたverification URLをブラウザで開いてcodeを入力してください。ブラウザは自動起動しません。OAuthを中断してもSetup全体は取り消さず、Homeに未設定と表示します。Agent Session開始時は認証が整うまでfail closedで拒否します。
 
 CLIで同じdependency setupだけを行う場合:

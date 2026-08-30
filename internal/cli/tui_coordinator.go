@@ -42,11 +42,48 @@ func (a *app) tui(ctx context.Context) error {
 		return fmt.Errorf("sunaba without a subcommand requires an interactive terminal; use an explicit subcommand or JSON-capable command")
 	}
 	coordinator := &tuiCoordinator{app: a, width: 100}
+	if _, err := a.activeVersionLock(); errors.Is(err, errLegacyDependencyMigrationRequired) {
+		proceed, migrationErr := coordinator.migrateLegacyDependencies(ctx)
+		if migrationErr != nil || !proceed {
+			return migrationErr
+		}
+	}
 	project, err := coordinator.chooseProject(ctx)
 	if err != nil || project == nil {
 		return err
 	}
 	return coordinator.projectLoop(ctx, *project)
+}
+
+func (a *app) runSetup(ctx context.Context, configOnly bool) error {
+	if a.setupRun != nil {
+		return a.setupRun(ctx, configOnly)
+	}
+	return a.setup(ctx, configOnly)
+}
+
+func (c *tuiCoordinator) migrateLegacyDependencies(ctx context.Context) (bool, error) {
+	fields := []hosttui.TextField{
+		{ID: "reason", Label: "Required update", Text: "The existing dependency lock predates the managed Bun, OpenTUI, and sunaba-ui artifacts."},
+		{ID: "scope", Label: "Changes", Text: "The dependency lock, active binding, and registered Project dependency digests are migrated together."},
+		{ID: "safety", Label: "Safety", Text: "Nothing is changed until Continue. Active Project operations or mismatched dependency state stop the migration."},
+	}
+	event, err := c.exchange(ctx, "global", c.view("setup", "Dependency setup must be upgraded before opening a Project", fields, []hosttui.Action{
+		noInputAction("continue", "Continue"), noInputAction("exit", "Exit"),
+	}))
+	if err != nil {
+		return false, err
+	}
+	if event.Kind != hosttui.EventAction || event.ActionID != "continue" {
+		return false, nil
+	}
+	if err := c.app.runSetup(ctx, false); err != nil {
+		return false, fmt.Errorf("migrate dependency setup: %w", err)
+	}
+	if _, err := c.app.activeVersionLock(); err != nil {
+		return false, fmt.Errorf("validate migrated dependency setup: %w", err)
+	}
+	return true, nil
 }
 
 func (a *app) hasInteractiveTerminal() bool {
@@ -366,7 +403,7 @@ func (c *tuiCoordinator) setupOrRegister(ctx context.Context) (*tuiProject, erro
 				continue
 			}
 		}
-		if err := c.app.setup(ctx, false); err != nil {
+		if err := c.app.runSetup(ctx, false); err != nil {
 			return nil, err
 		}
 		if err := c.app.projectInit(ctx, ".", "secure"); err != nil {

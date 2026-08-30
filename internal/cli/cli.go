@@ -49,6 +49,7 @@ type app struct {
 	errors         io.Writer
 	terminalCheck  func(io.Reader, io.Writer) bool
 	uiExchange     func(context.Context, string, hosttui.View) (hosttui.Event, error)
+	setupRun       func(context.Context, bool) error
 	agentRun       func(context.Context, string) error
 }
 

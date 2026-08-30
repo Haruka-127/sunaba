@@ -124,6 +124,18 @@ func TestLegacyBootstrapLockMigrationPreservesProjectState(t *testing.T) {
 	if _, err := versions.LoadLock(); err == nil {
 		t.Fatal("legacy lock unexpectedly passed the current lock schema")
 	}
+	if _, err := a.activeVersionLock(); !errors.Is(err, errLegacyDependencyMigrationRequired) || strings.Contains(err.Error(), "Bun build tool") {
+		t.Fatalf("legacy lock classification error=%v", err)
+	}
+	for name, check := range map[string]func() error{
+		"versions show": a.showVersions,
+		"update check":  func() error { return a.updateCheck(context.Background()) },
+		"update apply":  func() error { return a.updateApply(context.Background()) },
+	} {
+		if err := check(); !errors.Is(err, errLegacyDependencyMigrationRequired) || strings.Contains(err.Error(), "Bun build tool") {
+			t.Fatalf("%s legacy lock error=%v", name, err)
+		}
+	}
 	migrated, legacyDigest, legacyRaw, err := loadLegacyBootstrapLock(versions, pinned)
 	if err != nil {
 		t.Fatal(err)
@@ -315,6 +327,10 @@ func TestLegacyBootstrapLockMigrationRejectsChangedPinsAndNewFields(t *testing.T
 	}
 	if _, _, _, err := loadLegacyBootstrapLock(versions, pinned); err == nil {
 		t.Fatal("lock mixing legacy and current fields was migrated")
+	}
+	a := &app{store: &state.Store{Root: filepath.Join(base, "data", "sunaba")}, configs: &projectconfig.Store{Root: versions.Root}}
+	if _, err := a.activeVersionLock(); err == nil || errors.Is(err, errLegacyDependencyMigrationRequired) {
+		t.Fatalf("mixed-format lock classification error=%v", err)
 	}
 }
 

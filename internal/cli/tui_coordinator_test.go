@@ -16,6 +16,7 @@ import (
 	"sunaba/internal/projectconfig"
 	"sunaba/internal/state"
 	hosttui "sunaba/internal/tui"
+	"sunaba/internal/versionconfig"
 )
 
 func TestTUIRejectsNonInteractiveTerminalBeforeStateAccess(t *testing.T) {
@@ -243,6 +244,117 @@ func TestTUISetupDoesNotPersistBeforeContinue(t *testing.T) {
 	}
 	if _, err := os.Lstat(configs.Root); !os.IsNotExist(err) {
 		t.Fatalf("canceled Setup persisted configuration: %v", err)
+	}
+}
+
+func TestTUILegacyDependencyMigrationRequiresConfirmation(t *testing.T) {
+	base := tuiCanonicalTemp(t)
+	a := &app{
+		store:   &state.Store{Root: filepath.Join(base, "state", "sunaba")},
+		configs: &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")},
+		input:   strings.NewReader(""), output: io.Discard, errors: io.Discard,
+	}
+	versions, err := a.versionStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := dependency.MustPinned()
+	legacy := legacyVersionLock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 3,
+		ResolvedAt: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC), Manifest: legacyManifestFromCurrent(pinned),
+	}
+	paths, _ := versions.Paths()
+	if err := writePrivateJSON(paths.Lock, legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	setupCalls := 0
+	a.setupRun = func(context.Context, bool) error {
+		setupCalls++
+		lock := versionconfig.Lock{SchemaVersion: versionconfig.SchemaVersion, Generation: legacy.Generation, ResolvedAt: time.Now().UTC(), Manifest: pinned}
+		if err := versions.SaveLock(lock); err != nil {
+			return err
+		}
+		binding, err := state.NewDependencyBinding(lock.Generation, lock.Manifest)
+		if err != nil {
+			return err
+		}
+		return a.store.SaveGlobal(state.GlobalConfig{SchemaVersion: 2, Active: &binding})
+	}
+	a.uiExchange = func(_ context.Context, projectID string, view hosttui.View) (hosttui.Event, error) {
+		if projectID != "global" || view.ScreenID != "setup" || view.Title != "Dependency setup must be upgraded before opening a Project" || setupCalls != 0 {
+			t.Fatalf("migration prompt project=%q view=%+v setupCalls=%d", projectID, view, setupCalls)
+		}
+		view.Binding = hosttui.Binding{ProcessID: 1, ProjectID: "global", Nonce: strings.Repeat("a", 64)}
+		if _, err := hosttui.PrepareView(view); err != nil {
+			t.Fatalf("migration prompt violates the production UI protocol: %v", err)
+		}
+		return tuiEvent(view, "continue"), nil
+	}
+	proceed, err := (&tuiCoordinator{app: a, width: 100}).migrateLegacyDependencies(context.Background())
+	if err != nil || !proceed || setupCalls != 1 {
+		t.Fatalf("proceed=%t setupCalls=%d error=%v", proceed, setupCalls, err)
+	}
+	if _, err := a.activeVersionLock(); err != nil {
+		t.Fatalf("migrated lock is not active: %v", err)
+	}
+}
+
+func TestTUILegacyDependencyMigrationExitDoesNotMutate(t *testing.T) {
+	called := false
+	a := &app{input: strings.NewReader(""), output: io.Discard, errors: io.Discard}
+	a.setupRun = func(context.Context, bool) error {
+		called = true
+		return nil
+	}
+	a.uiExchange = func(_ context.Context, projectID string, view hosttui.View) (hosttui.Event, error) {
+		if projectID != "global" || view.ScreenID != "setup" || view.Title != "Dependency setup must be upgraded before opening a Project" {
+			t.Fatalf("migration prompt project=%q view=%+v", projectID, view)
+		}
+		return tuiEvent(view, "exit"), nil
+	}
+	proceed, err := (&tuiCoordinator{app: a, width: 100}).migrateLegacyDependencies(context.Background())
+	if err != nil || proceed || called {
+		t.Fatalf("proceed=%t setupCalled=%t error=%v", proceed, called, err)
+	}
+}
+
+func TestTUIStartupRoutesLegacyDependencyLockToMigration(t *testing.T) {
+	base := tuiCanonicalTemp(t)
+	a := &app{
+		store:   &state.Store{Root: filepath.Join(base, "state", "sunaba")},
+		configs: &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")},
+		input:   strings.NewReader(""), output: io.Discard, errors: io.Discard,
+		terminalCheck: func(io.Reader, io.Writer) bool { return true },
+	}
+	versions, err := a.versionStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := dependency.MustPinned()
+	legacy := legacyVersionLock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 4,
+		ResolvedAt: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC), Manifest: legacyManifestFromCurrent(pinned),
+	}
+	paths, _ := versions.Paths()
+	if err := writePrivateJSON(paths.Lock, legacy); err != nil {
+		t.Fatal(err)
+	}
+	tuiRegisterProject(t, a.store, filepath.Join(base, "project"))
+
+	exchanges := 0
+	a.uiExchange = func(_ context.Context, projectID string, view hosttui.View) (hosttui.Event, error) {
+		exchanges++
+		if projectID != "global" || view.ScreenID != "setup" || view.Title != "Dependency setup must be upgraded before opening a Project" {
+			t.Fatalf("startup bypassed migration prompt: project=%q view=%+v", projectID, view)
+		}
+		return tuiEvent(view, "exit"), nil
+	}
+	if err := a.tui(context.Background()); err != nil {
+		t.Fatalf("TUI startup returned the legacy manifest validation error: %v", err)
+	}
+	if exchanges != 1 {
+		t.Fatalf("migration prompt exchanges=%d", exchanges)
 	}
 }
 
