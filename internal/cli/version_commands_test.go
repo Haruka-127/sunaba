@@ -299,9 +299,27 @@ func TestPreviousProtocolV2ArtifactRequiresExactSetupMigration(t *testing.T) {
 	if _, err := a.activeVersionLock(); !errors.Is(err, errLegacyDependencyMigrationRequired) {
 		t.Fatalf("previous protocol-v2 artifact classification error=%v", err)
 	}
+	setupLock, err := loadBootstrapLockState(versions, pinned)
+	if err != nil || setupLock.Missing || setupLock.SourceManifestDigest == "" || setupLock.Lock.Generation != previous.Generation {
+		t.Fatalf("setup lock=%+v error=%v", setupLock, err)
+	}
 	migrated, previousDigest, _, err := loadLegacyBootstrapLock(versions, pinned)
 	if err != nil || previousDigest == "" || migrated.Generation != previous.Generation || !reflect.DeepEqual(migrated.Manifest, pinned) {
 		t.Fatalf("migrated=%+v digest=%q error=%v", migrated, previousDigest, err)
+	}
+	legacyBinding := state.DependencyBinding{
+		Generation: previous.Generation, ManifestSHA256: previousDigest,
+		OpenCodeVersion: pinned.OpenCode.Version, AppleContainerVersion: pinned.AppleContainer.Version, AgentImage: pinned.AgentImage.Tag,
+	}
+	globalState := state.GlobalConfig{SchemaVersion: 2, Active: &legacyBinding}
+	if err := validateBootstrapGlobalState(globalState, setupLock, pinned); err != nil {
+		t.Fatalf("matching protocol-v2 global binding was rejected: %v", err)
+	}
+	changedBinding := legacyBinding
+	changedBinding.ManifestSHA256 = strings.Repeat("e", 64)
+	globalState.Active = &changedBinding
+	if err := validateBootstrapGlobalState(globalState, setupLock, pinned); err == nil {
+		t.Fatal("modified protocol-v2 global binding was accepted")
 	}
 	projectRoot := filepath.Join(base, "project")
 	if err := os.Mkdir(projectRoot, 0700); err != nil {

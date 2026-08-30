@@ -65,22 +65,17 @@ func (a *app) activeVersionLock() (versionconfig.Lock, error) {
 }
 
 func (a *app) loadVersionLock(store *versionconfig.Store) (versionconfig.Lock, error) {
-	lock, err := store.LoadLock()
-	if errors.Is(err, os.ErrNotExist) {
-		return lock, err
+	lockState, err := loadBootstrapLockState(store, dependency.MustPinned())
+	if err != nil {
+		return versionconfig.Lock{}, err
 	}
-	if err == nil {
-		if contractErr := dependency.ValidateCompiledUIContract(lock.Manifest); contractErr == nil {
-			return lock, nil
-		} else if _, _, _, migrationErr := loadLegacyBootstrapLock(store, dependency.MustPinned()); migrationErr != nil {
-			return lock, contractErr
-		}
-		return lock, errLegacyDependencyMigrationRequired
+	if lockState.Missing {
+		return versionconfig.Lock{}, os.ErrNotExist
 	}
-	if _, _, _, migrationErr := loadLegacyBootstrapLock(store, dependency.MustPinned()); migrationErr == nil {
-		return lock, errLegacyDependencyMigrationRequired
+	if lockState.SourceManifestDigest != "" {
+		return lockState.Lock, errLegacyDependencyMigrationRequired
 	}
-	return lock, err
+	return lockState.Lock, nil
 }
 
 func (a *app) requireActiveProjectDependency(projectPolicy policy.ProjectPolicy) (versionconfig.Lock, error) {
@@ -564,34 +559,106 @@ func (a *app) setup(ctx context.Context, configOnly bool) error {
 		return fmt.Errorf("initial setup can apply bootstrap OpenCode %s only; run 'sunaba update check' and 'sunaba update apply' for %s", dependency.OpenCodeVersion, config.OpenCode.Value)
 	}
 	manifest := dependency.MustPinned()
-	lock, lockErr := versions.LoadLock()
-	legacyMigration := false
-	legacyManifestDigest := ""
-	var legacyLockRaw []byte
-	if lockErr != nil && !errors.Is(lockErr, os.ErrNotExist) {
-		migrated, digest, raw, migrationErr := loadLegacyBootstrapLock(versions, manifest)
-		if migrationErr != nil {
-			return errors.Join(lockErr, fmt.Errorf("migrate legacy bootstrap lock: %w", migrationErr))
-		}
-		lock, lockErr = migrated, nil
-		legacyMigration, legacyManifestDigest = true, digest
-		legacyLockRaw = raw
+	setupLock, err := loadBootstrapLockState(versions, manifest)
+	if err != nil {
+		return err
 	}
+	lock := setupLock.Lock
+	legacyMigration := setupLock.SourceManifestDigest != ""
 	globalState, err := a.store.LoadGlobal()
 	if err != nil {
 		return err
 	}
+	if err := validateBootstrapGlobalState(globalState, setupLock, manifest); err != nil {
+		return err
+	}
+	if err := opencode.CheckPrerequisitesFor(ctx, manifest); err != nil {
+		return err
+	}
+	if err := (dependencyArtifactInstaller{}).ensure(ctx, a.store.Root, manifest, ""); err != nil {
+		return err
+	}
+	if _, err := image.EnsureManifest(ctx, a.runtime, manifest); err != nil {
+		return err
+	}
+	alreadyActive := false
+	if !setupLock.Missing {
+		if lock.Manifest.OpenCode.Version != manifest.OpenCode.Version {
+			return fmt.Errorf("an active non-bootstrap lock already exists; use 'sunaba update check' and 'sunaba update apply'")
+		}
+		if !legacyMigration {
+			if _, err := a.activeVersionLock(); err == nil {
+				alreadyActive = true
+			}
+		}
+	}
+	generation := uint64(1)
+	if lock.Generation > 0 {
+		generation = lock.Generation
+	}
+	newLock := versionconfig.Lock{SchemaVersion: versionconfig.SchemaVersion, Generation: generation, ResolvedAt: time.Now().UTC(), Manifest: manifest}
+	projects, migrationNeeded, err := a.inventoryBootstrapProjectsForSetup(ctx, manifest, setupLock.SourceManifestDigest)
+	if err != nil {
+		return err
+	}
+	if alreadyActive && !migrationNeeded {
+		fmt.Fprintf(a.output, "Setup is already complete with OpenCode %s.\n", manifest.OpenCode.Version)
+		return nil
+	}
+	var commitErr error
+	if legacyMigration {
+		commitErr = a.commitLegacyDependencyMigration(newLock, projects, legacyDependencySource{Lock: setupLock.SourceRaw, Binding: *globalState.Active})
+	} else {
+		commitErr = a.commitDependencyUpdate(newLock, newLock, alreadyActive, projects)
+	}
+	if commitErr != nil {
+		return fmt.Errorf("commit setup dependency state: %w", commitErr)
+	}
+	fmt.Fprintf(a.output, "Setup complete. OpenCode %s is locked for the host TUI and guest Agent image.\n", manifest.OpenCode.Version)
+	return nil
+}
+
+type bootstrapLockState struct {
+	Lock                 versionconfig.Lock
+	Missing              bool
+	SourceManifestDigest string
+	SourceRaw            []byte
+}
+
+func loadBootstrapLockState(store *versionconfig.Store, pinned dependency.Manifest) (bootstrapLockState, error) {
+	lock, lockErr := store.LoadLock()
+	if errors.Is(lockErr, os.ErrNotExist) {
+		return bootstrapLockState{Missing: true}, nil
+	}
+	var contractErr error
+	if lockErr == nil {
+		contractErr = dependency.ValidateCompiledUIContract(lock.Manifest)
+		if contractErr == nil {
+			return bootstrapLockState{Lock: lock}, nil
+		}
+	} else {
+		contractErr = lockErr
+	}
+	migrated, digest, raw, migrationErr := loadLegacyBootstrapLock(store, pinned)
+	if migrationErr != nil {
+		return bootstrapLockState{}, errors.Join(contractErr, fmt.Errorf("migrate legacy bootstrap lock: %w", migrationErr))
+	}
+	return bootstrapLockState{Lock: migrated, SourceManifestDigest: digest, SourceRaw: raw}, nil
+}
+
+func validateBootstrapGlobalState(globalState state.GlobalConfig, setupLock bootstrapLockState, manifest dependency.Manifest) error {
 	if globalState.ImageVersion != "" && globalState.ImageVersion != manifest.OpenCode.Version {
 		return fmt.Errorf("legacy global state uses OpenCode %s and cannot be migrated as bootstrap %s", globalState.ImageVersion, manifest.OpenCode.Version)
 	}
+	legacyMigration := setupLock.SourceManifestDigest != ""
 	if globalState.Active != nil {
 		if globalState.ImageVersion != "" || globalState.SchemaVersion != 2 {
 			return fmt.Errorf("existing global dependency state is incomplete")
 		}
 		want, bindingErr := state.NewDependencyBinding(globalState.Active.Generation, manifest)
 		matchesCurrent := bindingErr == nil && *globalState.Active == want
-		matchesLegacy := legacyMigration && globalState.Active.Generation == lock.Generation &&
-			globalState.Active.ManifestSHA256 == legacyManifestDigest &&
+		matchesLegacy := legacyMigration && globalState.Active.Generation == setupLock.Lock.Generation &&
+			globalState.Active.ManifestSHA256 == setupLock.SourceManifestDigest &&
 			globalState.Active.OpenCodeVersion == manifest.OpenCode.Version &&
 			globalState.Active.AppleContainerVersion == manifest.AppleContainer.Version &&
 			globalState.Active.AgentImage == manifest.AgentImage.Tag
@@ -604,51 +671,6 @@ func (a *app) setup(ctx context.Context, configOnly bool) error {
 	if legacyMigration && globalState.Active == nil {
 		return fmt.Errorf("legacy version lock requires its matching active dependency binding")
 	}
-	if err := opencode.CheckPrerequisitesFor(ctx, manifest); err != nil {
-		return err
-	}
-	if err := (dependencyArtifactInstaller{}).ensure(ctx, a.store.Root, manifest, ""); err != nil {
-		return err
-	}
-	if _, err := image.EnsureManifest(ctx, a.runtime, manifest); err != nil {
-		return err
-	}
-	alreadyActive := false
-	if lockErr == nil {
-		if lock.Manifest.OpenCode.Version != manifest.OpenCode.Version {
-			return fmt.Errorf("an active non-bootstrap lock already exists; use 'sunaba update check' and 'sunaba update apply'")
-		}
-		if !legacyMigration {
-			if _, err := a.activeVersionLock(); err == nil {
-				alreadyActive = true
-			}
-		}
-	} else if !errors.Is(lockErr, os.ErrNotExist) {
-		return lockErr
-	}
-	generation := uint64(1)
-	if lock.Generation > 0 {
-		generation = lock.Generation
-	}
-	newLock := versionconfig.Lock{SchemaVersion: versionconfig.SchemaVersion, Generation: generation, ResolvedAt: time.Now().UTC(), Manifest: manifest}
-	projects, migrationNeeded, err := a.inventoryBootstrapProjectsForSetup(ctx, manifest, legacyManifestDigest)
-	if err != nil {
-		return err
-	}
-	if alreadyActive && !migrationNeeded {
-		fmt.Fprintf(a.output, "Setup is already complete with OpenCode %s.\n", manifest.OpenCode.Version)
-		return nil
-	}
-	var commitErr error
-	if legacyMigration {
-		commitErr = a.commitLegacyDependencyMigration(newLock, projects, legacyDependencySource{Lock: legacyLockRaw, Binding: *globalState.Active})
-	} else {
-		commitErr = a.commitDependencyUpdate(newLock, newLock, alreadyActive, projects)
-	}
-	if commitErr != nil {
-		return fmt.Errorf("commit setup dependency state: %w", commitErr)
-	}
-	fmt.Fprintf(a.output, "Setup complete. OpenCode %s is locked for the host TUI and guest Agent image.\n", manifest.OpenCode.Version)
 	return nil
 }
 
