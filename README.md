@@ -16,6 +16,7 @@ OpenCodeとその実行コマンドはVM内で自由に動かしながら、ホ�
 ## 主な特徴
 
 - プロジェクトごとに独立したAgent VMを使用
+- 引数なしの`sunaba`からSetup、Project選択、開始・再開、変更確認、設定、復旧を行える英語TUI
 - ホストの作業ツリーをVMへbind mountしない
 - OpenAIやGitの実credentialをVMへ渡さない
 - 既定のsecure modeでは、許可したGateway以外の外向き通信を拒否
@@ -33,34 +34,31 @@ OpenCodeとその実行コマンドはVM内で自由に動かしながら、ホ�
 - Go 1.22以降（ソースからビルドする場合）
 - OpenAI API key、またはCodexを利用できるChatGPT subscription
 
-Apple ContainerとOpenCodeは検証済みのexact versionへ固定されます。OpenCodeは利用者が明示的な`update check` / `update apply`でv1系の別versionへ更新できますが、`latest`へのsession時の自動追従、OpenCode v2、host TUIとguest serverのversion混在は使用できません。
+Apple ContainerとOpenCodeは検証済みのexact versionへ固定されます。OpenCode host artifactとbundled `sunaba-ui`はsunabaが管理するため、Bun、Node.js、OpenTUI、OpenCodeのglobal installは不要です。OpenCodeは利用者が明示的な`update check` / `update apply`でv1系の別versionへ更新できますが、`latest`へのsession時の自動追従、OpenCode v2、host TUIとguest serverのversion混在は使用できません。
 
 ## 最短の利用例
 
-ビルド後、3つのsunaba binaryがあるdirectoryを`PATH`へ追加するか、3つとも既存の`PATH`上へ配置してください。また、macOS側へ固定versionのOpenCodeをインストールし、`opencode`コマンドを実行できる状態にします。OAuthを使う最短例は次のとおりです。
+release bundleの4つのbinary（`sunaba`、`sunaba-ui`、`sunaba-guest-relay`、`sunaba-git-hook`）を同じdirectoryへ置き、そのdirectoryを`PATH`へ追加します。Apple Container systemを起動した後、Project directoryで次を実行します。
 
 ```sh
-sunaba setup
-sunaba credentials openai oauth login
-
 cd /path/to/project
-sunaba project init
-sunaba doctor
-sunaba config show --effective
-sunaba snapshot preview
-sunaba snapshot approve --digest <previewに表示されたexact digest>
-sunaba up
-sunaba agent
-sunaba changes export
-sunaba changes review
-sunaba changes apply
+sunaba
 ```
 
-`snapshot preview`は内容を表示せず、件数、容量、大容量file、秘密らしいfile名とdigestを示します。そのexact digestを承認しなければ、新しいVMは作られません。
+初回はSetupが、Secure mode、OAuth、開発用の標準Web accessを確認してから適用します。安全に検出できたGit remoteは候補に留まり、選択したものだけが登録されます。OAuthを中断してもSetup結果は保持され、Agent Session開始時だけ未認証として拒否されます。
 
-既定設定を変更する場合は、`snapshot preview`より前に`sunaba config edit`を実行します。API keyを使う場合は、OAuth loginの代わりに`sunaba credentials openai api-key set`を実行し、`project init --model-auth api-key`でProjectを登録します。
+通常画面はHome、Changes、Settingsの3つです。Homeの`Start`または`Resume`でsunaba TUIが完全に終了してOpenCodeへterminalを渡し、OpenCode終了後は新しいsunaba TUIでHomeへ戻ります。VM内の編集状態は自動apply・destroyされません。
 
-`agent`を終了しても、secure modeのVM内にある編集状態は保持されます。次回は新しいSession ID、token、password、TTLで同じVMを再開します。`changes export`はVMを停止・検証してChange Setを作成し、`changes review`は固定した変更前後の内容をhostへ書き込まずに表示します。`changes apply`は同じreviewを再表示し、ホスト側で承認した場合だけ作業ツリーへ反映します。apply後はhost Projectが変わるため、次のVMを作る前にpreviewとdigest承認をやり直します。
+Changesは変更fileだけを表示し、wide terminalではside-by-side、narrow terminalではunified diffを使います。`Apply all changes`は表示中のChange Set全体だけを、一回限りの内部承認へ束縛して反映します。digestやnonceの手入力は不要です。
+
+自動化・高度な設定・復旧では従来のサブコマンドも使用できます。API keyへ切り替える例:
+
+```sh
+sunaba credentials openai api-key set
+sunaba model auth api-key
+```
+
+認証方式は全Project共通で、変更は次のAgent Sessionから有効です。OAuthとAPI keyはhost-only credential fileへ別々に保存でき、別方式への自動fallbackはありません。
 
 exportがExternal Git状態や保存失敗で拒否された場合、sunabaは停止VMを自動削除しません。`sunaba status`でrecovery状態と再試行コマンドを確認してください。破棄を伴う`--discard-external-git`や`--discard-pending`は、損失を理解した場合だけ使用します。
 

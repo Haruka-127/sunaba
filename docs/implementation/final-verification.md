@@ -2,7 +2,7 @@
 
 この台帳はPhase単位の完了記録とは別に、最終終了条件を現在のcode、test、実機resourceへ照合する。`PASS`は記載した再現手順が当該境界を直接検証した場合だけ使う。過去の実機gateは証拠として保持するが、現在mainで再実行していない場合は`LIVE RECHECK`と明記し、unit testやintegration build-tagのコンパイルだけを実機通過と扱わない。
 
-現在の基準は2026-08-20のmain merge commit `f83bc7b1e4cc16de488b0f082b24f66fa2d5d0af`である。このcommitでは通常gate、全race、integration build-tagのコンパイルを再実行した。Apple Containerを起動する実機gate、clean-room、bounded fuzzは再実行していない。
+現在の基準は2026-08-30の`feat/opentui-ux`実装である。通常gate、全race、integration build-tagのコンパイル、OpenTUI standalone buildを再実行した。Apple Containerを起動する実機gate、実OpenAI request、clean-room、bounded fuzzは再実行していない。直前のmain基準は2026-08-20のmerge commit `f83bc7b1e4cc16de488b0f082b24f66fa2d5d0af`であり、その過去証拠は以下に保持する。
 
 ## 要件と証拠
 
@@ -17,9 +17,10 @@
 | Git Gateway | `TestPhase3GitGatewayInAgentVM`、`internal/gitgateway` smart HTTP/TOCTOU/partial-failure/fuzz test | 2026-08-11の実VMgateはPASS。current mainの番号/ID承認とExternal Git guardはunit/raceのみ。LIVE RECHECK |
 | Web Gateway | Phase 4 measurement/integration、`internal/webgateway` attack/compatibility/fuzz test | 過去の実VMattack/compatibility gateはPASS。current mainでは再実行していない。LIVE RECHECK |
 | Phase 5 hardening | dependency/provenance、migration、retention/redaction、ENOSPC/reboot/partial failure、4 bounded fuzz target | current mainの通常gateはPASS。clean-roomと4 bounded fuzz targetは再実行していない |
+| TUI利用性 Checkpoint 1〜10 | [`tui-usability.md`](./tui-usability.md)、`internal/tui`、`internal/cli/tui_coordinator_test.go`、`internal/secretstore`、`internal/usersettings`、`ui/test` | AUTO PASS。通常gate、全race、UI build、integration compileを2026-08-30に再実行。LIVE RECHECK |
 | dev active-session egress | `TestDevSessionNetworkBoundary`がactive public egress、host/LAN/peer/inbound拒否、稼働VMのdeny-all quiesce、stopを検査 | 2026-08-11の実機gateはPASS。current mainのdev recovery変更後は再実行していない。LIVE RECHECK |
 | 最終cleanup / user resource非干渉 | exact nameとowner/project/VM labelを再検証するcleanup、最終`container ls` / network / volume / process / temp inventory | 2026-08-11の実機作業後はPASS。current mainではcontainerを起動しておらず、新しい実機inventoryは未実施 |
-| Git運用 | `dev`上の意図別Conventional Commit、PR経由のmain統合、`git status` | PASS。mainへの直接commit/pushは行わず、明示承認を得たPR #2をmerge commitで統合した |
+| Git運用 | topic branch上の意図別Conventional Commit、`git status` | `feat/opentui-ux`で作業し、pushは行わない。2026-08-20以前のmain統合履歴は保持 |
 
 ## 最新の自動gate
 
@@ -27,9 +28,12 @@
 ./scripts/verify.sh
 ./scripts/verify-race.sh
 go test -tags=integration -run '^$' ./test/integration
+./scripts/build-ui.sh
 ```
 
-2026-08-20のcurrent mainで上記3 commandを実行し、通常gate、全race、integration build-tagのコンパイルがPASSした。通常gateはformat、全unit、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを検証する。`go test -tags=integration -run '^$'`はcompile-onlyであり、Apple Container VMを起動しない。
+2026-08-30の`feat/opentui-ux`で上記4 commandを再実行しPASSした。UI gateはOpenTUI helper test 10件、TypeScript typecheck、standalone build、固定SHA-256、Mach-O/owner/mode/architectureを検証した。通常gateは全unit、vet、host/guest build、CLI/help、Keychain禁止を含むstatic boundaryを検証した。全raceとintegration build-tagのcompile-onlyもPASSした。Apple Container、実credential、sudo、pfを使う実機操作は実行していない。
+
+2026-08-20の当時mainで先頭3 commandを実行し、通常gate、全race、integration build-tagのコンパイルがPASSした。通常gateはformat、全unit、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを検証する。`go test -tags=integration -run '^$'`はcompile-onlyであり、Apple Container VMを起動しない。
 
 `./scripts/verify-clean.sh`と`SUNABA_FUZZ=1 ./scripts/verify.sh`は以前のPhase 5 gateでPASSしているが、current mainでは再実行していない。実OpenAI credentialを使うbillable live requestも自動実行せず、mock upstream contractを正とする。
 
