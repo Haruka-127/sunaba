@@ -10,9 +10,26 @@ import (
 	"testing"
 	"time"
 
+	"sunaba/internal/policy"
 	"sunaba/internal/unixsocket"
 	"sunaba/internal/workspace"
 )
+
+func recoveryFixture(t *testing.T, projectRoot, runtimeRoot string) (workspace.SnapshotManifest, workspace.PartitionedManifest, []workspace.BulkRecord, policy.CompiledWorkspacePolicy) {
+	t.Helper()
+	export := policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}
+	compiled, err := policy.CompileWorkspacePolicy(export, []string{".git", ".sunaba"}, nil, workspace.DefaultBulkPolicyV1())
+	if err != nil {
+		t.Fatal(err)
+	}
+	partitioned, bulk, err := workspace.BuildPartitionedSnapshotManifest(projectRoot, compiled.Core.Snapshot, compiled.Bulk, compiled.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := partitioned.Core
+	baseline.Root = filepath.Join(runtimeRoot, "snapshot")
+	return baseline, partitioned, bulk, compiled
+}
 
 func uniqueTestVMID(t *testing.T) string {
 	t.Helper()
@@ -79,10 +96,6 @@ func TestLegacyRecoveryRuntimePathsRemainStrictlyReadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy())
-	if err != nil {
-		t.Fatal(err)
-	}
 	const projectID, sessionID = "0123456789ab", "session1"
 	vmID := uniqueTestVMID(t)
 	for _, test := range []struct {
@@ -99,11 +112,12 @@ func TestLegacyRecoveryRuntimePathsRemainStrictlyReadable(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(root, "snapshot"), 0700); err != nil {
 				t.Fatal(err)
 			}
+			baseline, partitioned, bulk, compiled := recoveryFixture(t, projectRoot, root)
 			record := State{
 				Version: Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID,
 				Container: "sunaba-" + projectID + "-" + vmID, RuntimeBase: test.base, RuntimeRoot: root,
-				WorkspacePath: "/workspace/sunaba-" + vmID, Mode: test.mode, Baseline: baseline,
-				ExportPolicyDigest: strings.Repeat("a", 64), Reason: "legacy recovery", CreatedAt: time.Now().UTC(),
+				WorkspacePath: "/workspace/sunaba-" + vmID, Mode: test.mode, Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: bulk,
+				ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled, Reason: "legacy recovery", CreatedAt: time.Now().UTC(),
 			}
 			if err := validate(projectState, record); err != nil {
 				t.Fatalf("legacy recovery path was rejected: %v", err)
@@ -138,11 +152,8 @@ func TestRecoveryRecordBindsPrivateRuntimeAndRejectsSubstitution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy())
-	if err != nil {
-		t.Fatal(err)
-	}
-	record := State{Version: Version, ProjectID: "0123456789ab", ProjectRoot: projectRoot, VMID: vmID, SessionID: "session1", Container: "sunaba-0123456789ab-" + vmID, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, ExportPolicyDigest: strings.Repeat("a", 64), GitGateway: true, WebGateway: true, Reason: "guard refused", CreatedAt: time.Now().UTC()}
+	baseline, partitioned, bulk, compiled := recoveryFixture(t, projectRoot, runtimeRoot)
+	record := State{Version: Version, ProjectID: "0123456789ab", ProjectRoot: projectRoot, VMID: vmID, SessionID: "session1", Container: "sunaba-0123456789ab-" + vmID, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: bulk, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled, GitGateway: true, WebGateway: true, Reason: "guard refused", CreatedAt: time.Now().UTC()}
 	if err := Save(projectState, record); err != nil {
 		t.Fatal(err)
 	}
@@ -185,11 +196,7 @@ func TestRecoveryRecordRoundTripsFrozenPendingExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := workspace.DefaultSnapshotPolicy()
-	baseline, err := workspace.BuildSnapshotManifest(projectRoot, policy)
-	if err != nil {
-		t.Fatal(err)
-	}
+	baseline, partitioned, bulk, compiled := recoveryFixture(t, projectRoot, runtimeRoot)
 	mergedRoot := filepath.Join(runtimeRoot, "sunaba-quarantine-"+sessionID, "sunaba-merged-"+sessionID)
 	if err := os.MkdirAll(mergedRoot, 0700); err != nil {
 		t.Fatal(err)
@@ -197,26 +204,26 @@ func TestRecoveryRecordRoundTripsFrozenPendingExport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(mergedRoot, "result.txt"), []byte("retained\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	merged, err := workspace.BuildSnapshotManifest(mergedRoot, policy)
+	merged, err := workspace.BuildSnapshotManifest(mergedRoot, compiled.Core.Snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, err := workspace.BuildChangeSet(baseline, merged, policy)
+	workSet, err := workspace.BuildPendingWorkSet(projectID, projectRoot, vmID, sessionID, compiled.Digest, partitioned.Core, merged, compiled.Core.Snapshot, compiled.Bulk, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
 	record := State{
 		Version: Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID,
 		Container: "sunaba-" + projectID + "-" + vmID, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot,
-		WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, ExportPolicyDigest: strings.Repeat("a", 64),
-		PendingExport: &PendingExport{MergedRoot: mergedRoot, MergedDigest: merged.Digest, ChangeSetDigest: changes.Digest},
+		WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: bulk, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled,
+		PendingExport: &PendingExport{MergedRoot: mergedRoot, WorkSet: workSet},
 		Reason:        "pending metadata failed", CreatedAt: time.Now().UTC(),
 	}
 	if err := Save(projectState, record); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := Load(projectState)
-	if err != nil || loaded.PendingExport == nil || loaded.PendingExport.ChangeSetDigest != changes.Digest || loaded.PendingExport.MergedDigest != merged.Digest {
+	if err != nil || loaded.PendingExport == nil || loaded.PendingExport.WorkSet.Digest != workSet.Digest {
 		t.Fatalf("loaded=%+v error=%v", loaded, err)
 	}
 }

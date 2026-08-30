@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	ProtocolVersion  = 3
+	ProtocolVersion  = 4
 	MaxFrameBytes    = 256 << 10
 	MaxTextBytes     = 64 << 10
 	MaxInputBytes    = 4 << 10
@@ -27,6 +27,7 @@ const (
 	MaxChangeFiles   = MaxActions - 6
 	MaxDiffRows      = 256
 	MaxDiffTotalRows = 8192
+	MaxBulkItems     = 20
 )
 
 var (
@@ -100,6 +101,25 @@ type ChangesView struct {
 	Rows                []DiffRow    `json:"rows"`
 }
 
+type BulkItem struct {
+	ActionID     string `json:"action_id"`
+	BulkID       string `json:"bulk_id"`
+	Root         string `json:"root"`
+	Reason       string `json:"reason"`
+	CaptureState string `json:"capture_state"`
+	Disposition  string `json:"disposition"`
+	Retention    string `json:"retention"`
+	Summary      string `json:"summary"`
+	DigestPrefix string `json:"digest_prefix"`
+}
+
+type BulkView struct {
+	Page             int        `json:"page"`
+	Pages            int        `json:"pages"`
+	SelectedActionID string     `json:"selected_action_id"`
+	Items            []BulkItem `json:"items"`
+}
+
 // View is immutable for a given ScreenID and Revision. All text must pass the
 // host sanitizer before it crosses the process boundary.
 type View struct {
@@ -112,6 +132,7 @@ type View struct {
 	Fields   []TextField  `json:"fields"`
 	Actions  []Action     `json:"actions"`
 	Changes  *ChangesView `json:"changes"`
+	Bulk     *BulkView    `json:"bulk"`
 }
 
 type TerminalCapability struct {
@@ -202,10 +223,47 @@ func (v View) Validate() error {
 		}
 		totalBytes += changesBytes
 	}
+	if v.Bulk != nil {
+		if v.ScreenID != "changes" || v.Changes != nil {
+			return errors.New("structured Bulk data is only valid as a Changes section")
+		}
+		bulkBytes, err := v.Bulk.validate(seenActions)
+		if err != nil {
+			return err
+		}
+		totalBytes += bulkBytes
+	}
 	if totalBytes > MaxFrameBytes/2 {
 		return errors.New("UI view content exceeds its aggregate size bound")
 	}
 	return nil
+}
+
+func (b BulkView) validate(actions map[string]struct{}) (int, error) {
+	if b.Page <= 0 || b.Pages < b.Page || len(b.Items) == 0 || len(b.Items) > MaxBulkItems || !idPattern.MatchString(b.SelectedActionID) {
+		return 0, errors.New("structured Bulk bounds are invalid")
+	}
+	total := len(b.SelectedActionID)
+	selected := false
+	seen := make(map[string]struct{}, len(b.Items))
+	for _, item := range b.Items {
+		total += len(item.ActionID) + len(item.BulkID) + len(item.Root) + len(item.Reason) + len(item.CaptureState) + len(item.Disposition) + len(item.Retention) + len(item.Summary) + len(item.DigestPrefix)
+		if !idPattern.MatchString(item.ActionID) || item.BulkID == "" || item.Root == "" || item.Reason == "" || item.CaptureState == "" || item.Disposition == "" || item.Summary == "" || len(item.DigestPrefix) > 64 || SanitizeDisplayText(item.BulkID) != item.BulkID || SanitizeDisplayText(item.Root) != item.Root || SanitizeDisplayText(item.Reason) != item.Reason || SanitizeDisplayText(item.CaptureState) != item.CaptureState || SanitizeDisplayText(item.Disposition) != item.Disposition || SanitizeDisplayText(item.Retention) != item.Retention || SanitizeDisplayText(item.Summary) != item.Summary || SanitizeDisplayText(item.DigestPrefix) != item.DigestPrefix {
+			return 0, errors.New("structured Bulk item is invalid")
+		}
+		if _, exists := actions[item.ActionID]; !exists {
+			return 0, errors.New("structured Bulk item is not bound to an authority action")
+		}
+		if _, duplicate := seen[item.ActionID]; duplicate {
+			return 0, errors.New("structured Bulk action is duplicated")
+		}
+		seen[item.ActionID] = struct{}{}
+		selected = selected || item.ActionID == b.SelectedActionID
+	}
+	if !selected {
+		return 0, errors.New("structured Bulk selection is not visible")
+	}
+	return total, nil
 }
 
 func (c ChangesView) validate(actions map[string]struct{}) (int, error) {
@@ -309,6 +367,22 @@ func PrepareView(view View) (View, error) {
 			row.Header = SanitizeDisplayText(row.Header)
 			row.Before.Text = SanitizeDisplayText(row.Before.Text)
 			row.After.Text = SanitizeDisplayText(row.After.Text)
+		}
+	}
+	if view.Bulk != nil {
+		if view.Bulk.Items == nil {
+			view.Bulk.Items = []BulkItem{}
+		}
+		for index := range view.Bulk.Items {
+			item := &view.Bulk.Items[index]
+			item.BulkID = SanitizeDisplayText(item.BulkID)
+			item.Root = SanitizeDisplayText(item.Root)
+			item.Reason = SanitizeDisplayText(item.Reason)
+			item.CaptureState = SanitizeDisplayText(item.CaptureState)
+			item.Disposition = SanitizeDisplayText(item.Disposition)
+			item.Retention = SanitizeDisplayText(item.Retention)
+			item.Summary = SanitizeDisplayText(item.Summary)
+			item.DigestPrefix = SanitizeDisplayText(item.DigestPrefix)
 		}
 	}
 	return view, view.Validate()

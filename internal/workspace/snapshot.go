@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -72,8 +73,10 @@ type manifestDigestInput struct {
 }
 
 type snapshotWalker struct {
-	policy SnapshotPolicy
-	result SnapshotManifest
+	policy          SnapshotPolicy
+	bulkPolicy      *BulkPolicy
+	bulkDiscoveries map[string]BulkDiscovery
+	result          SnapshotManifest
 }
 
 func BuildSnapshotManifest(root string, policy SnapshotPolicy) (SnapshotManifest, error) {
@@ -109,6 +112,98 @@ func BuildSnapshotManifest(root string, policy SnapshotPolicy) (SnapshotManifest
 		return SnapshotManifest{}, err
 	}
 	return finalizeSnapshotManifest(walker.result.Root, walker.result.Entries, walker.result.TotalSize)
+}
+
+// BuildPartitionedSnapshotManifest performs one safe fd-relative walk while
+// stopping before explicitly configured Bulk roots. Non-explicit large
+// directories may be scanned up to the host Bulk ceiling and are then moved
+// out of Core deterministically. Existing explicitly omitted roots are
+// represented as present_untracked; their descendants are neither hashed nor
+// copied into the VM.
+func BuildPartitionedSnapshotManifest(root string, snapshotPolicy SnapshotPolicy, bulkPolicy BulkPolicy, workspacePolicyDigest string) (PartitionedManifest, []BulkRecord, error) {
+	if err := snapshotPolicy.validate(); err != nil {
+		return PartitionedManifest{}, nil, err
+	}
+	bulkPolicy, err := CanonicalBulkPolicy(bulkPolicy)
+	if err != nil {
+		return PartitionedManifest{}, nil, err
+	}
+	if !validSHA256(workspacePolicyDigest) {
+		return PartitionedManifest{}, nil, fmt.Errorf("workspace policy digest is invalid")
+	}
+	bulkPolicy = bulkPolicyWithSnapshotCeilings(bulkPolicy, snapshotPolicy)
+	if bulkPolicy.DefaultsVersion == 0 {
+		manifest, err := BuildSnapshotManifest(root, snapshotPolicy)
+		if err != nil {
+			return PartitionedManifest{}, nil, err
+		}
+		partitioned, err := makePartitionedManifest(manifest, nil, nil, workspacePolicyDigest)
+		return partitioned, []BulkRecord{}, err
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return PartitionedManifest{}, nil, fmt.Errorf("resolve snapshot root: %w", err)
+	}
+	canonical, err = filepath.Abs(canonical)
+	if err != nil {
+		return PartitionedManifest{}, nil, err
+	}
+	rootFD, err := unix.Open(canonical, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return PartitionedManifest{}, nil, fmt.Errorf("open snapshot root: %w", err)
+	}
+	defer unix.Close(rootFD)
+	scanPolicy := bulkScanSnapshotPolicy(snapshotPolicy)
+	walker := snapshotWalker{
+		policy: scanPolicy, bulkPolicy: &bulkPolicy, bulkDiscoveries: make(map[string]BulkDiscovery),
+		result: SnapshotManifest{Version: manifestVersion, Root: canonical},
+	}
+	if err := walker.walkDirectory(rootFD, "", 0); err != nil {
+		return PartitionedManifest{}, nil, err
+	}
+	full, err := finalizeSnapshotManifest(canonical, walker.result.Entries, walker.result.TotalSize)
+	if err != nil {
+		return PartitionedManifest{}, nil, err
+	}
+	partitioned, _, structural, err := PartitionManifestPair(full, full, bulkPolicy, workspacePolicyDigest)
+	if err != nil {
+		return PartitionedManifest{}, nil, err
+	}
+	records := append([]BulkRecord(nil), structural...)
+	// Every Bulk root is omitted from the VM input in v1. A digest observed
+	// during classification is not an apply/delete guard unless an explicit
+	// baseline capture or seed is separately committed.
+	for index := range partitioned.BulkRoots {
+		partitioned.BulkRoots[index] = BulkManifestRef{Root: partitioned.BulkRoots[index].Root, State: "present_untracked"}
+		structural[index].Baseline = partitioned.BulkRoots[index]
+		structural[index].Result = partitioned.BulkRoots[index]
+		structural[index].Capture = BulkCapture{State: "frozen_vm"}
+		structural[index].Summary = BulkSummary{}
+		structural[index].BulkID = BulkRecordID(workspacePolicyDigest, structural[index].Root, structural[index].Baseline, structural[index].Result)
+	}
+	records = append([]BulkRecord(nil), structural...)
+	for root, discovery := range walker.bulkDiscoveries {
+		ref := BulkManifestRef{Root: root, State: "present_untracked"}
+		partitioned.BulkRoots = append(partitioned.BulkRoots, ref)
+		bulkID := digestStrings("sunaba.bulk.id.v1\x00", workspacePolicyDigest, root, "present_untracked", "present_untracked")
+		records = append(records, BulkRecord{
+			BulkID: bulkID, Root: root, Discovery: discovery, Baseline: ref, Result: ref,
+			Capture: BulkCapture{State: "frozen_vm"}, Disposition: DispositionUnresolved,
+		})
+	}
+	sort.Slice(partitioned.BulkRoots, func(i, j int) bool { return partitioned.BulkRoots[i].Root < partitioned.BulkRoots[j].Root })
+	sort.Slice(records, func(i, j int) bool { return records[i].Root < records[j].Root })
+	if len(records) > MaximumBulkRoots {
+		return PartitionedManifest{}, nil, fmt.Errorf("bulk root count exceeds %d", MaximumBulkRoots)
+	}
+	partitioned.Digest, err = partitionedManifestDigest(partitioned)
+	if err != nil {
+		return PartitionedManifest{}, nil, err
+	}
+	if err := validateCanonicalManifest(partitioned.Core, snapshotPolicy); err != nil {
+		return PartitionedManifest{}, nil, fmt.Errorf("Core snapshot exceeds its admission limits after Bulk partition: %w", err)
+	}
+	return partitioned, records, nil
 }
 
 func finalizeSnapshotManifest(root string, entries []SnapshotEntry, totalSize int64) (SnapshotManifest, error) {
@@ -178,6 +273,10 @@ func (w *snapshotWalker) walkDirectory(parentFD int, relative string, depth int)
 		modeType := uint32(before.Mode) & uint32(unix.S_IFMT)
 		switch modeType {
 		case uint32(unix.S_IFDIR):
+			if discovery, matched := w.matchExplicitBulkDirectory(entryPath); matched {
+				w.bulkDiscoveries[entryPath] = discovery
+				continue
+			}
 			w.result.Entries = append(w.result.Entries, SnapshotEntry{
 				Path: entryPath, Type: TypeDirectory, Mode: uint32(before.Mode) & 0777,
 			})
@@ -212,6 +311,32 @@ func (w *snapshotWalker) walkDirectory(parentFD int, relative string, depth int)
 		}
 	}
 	return nil
+}
+
+func (w *snapshotWalker) matchExplicitBulkDirectory(entryPath string) (BulkDiscovery, bool) {
+	if w.bulkPolicy == nil || w.bulkPolicy.DefaultsVersion == 0 {
+		return BulkDiscovery{}, false
+	}
+	for _, normal := range w.bulkPolicy.NormalRoots {
+		if entryPath == normal {
+			return BulkDiscovery{}, false
+		}
+	}
+	for _, rule := range w.bulkPolicy.Rules {
+		matched := rule.Selector.Kind == "literal" && entryPath == rule.Selector.Value
+		if rule.Selector.Kind == "component" && path.Base(entryPath) == rule.Selector.Value {
+			matched = true
+		}
+		if !matched {
+			continue
+		}
+		reason := "user-" + rule.Selector.Kind + "-rule"
+		if strings.HasPrefix(rule.ID, "builtin.") {
+			reason = "builtin-component-rule"
+		}
+		return BulkDiscovery{Reason: reason, RuleID: rule.ID, Hint: rule.Hint}, true
+	}
+	return BulkDiscovery{}, false
 }
 
 func (w *snapshotWalker) readRegularFile(parentFD int, name, entryPath string, before unix.Stat_t) (SnapshotEntry, error) {
@@ -294,7 +419,7 @@ func readLinkAt(parentFD int, name string, maximum int) (string, error) {
 }
 
 func validateEntryName(name string) error {
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+	if name == "" || name == "." || name == ".." || !utf8.ValidString(name) || strings.ContainsAny(name, "/\\\x00") {
 		return fmt.Errorf("invalid snapshot entry name %q", name)
 	}
 	return nil

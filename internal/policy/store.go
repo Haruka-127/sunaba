@@ -10,6 +10,7 @@ import (
 	"sunaba/internal/modelgateway"
 	"sunaba/internal/securefs"
 	"sunaba/internal/webgateway"
+	"sunaba/internal/workspace"
 )
 
 const maxPolicyBytes = 1 << 20
@@ -154,6 +155,14 @@ func LoadReadOnly(path string, now time.Time) (ProjectPolicy, bool, error) {
 			return ProjectPolicy{}, false, err
 		}
 		return current, false, current.Validate()
+	case 8:
+		var legacy ProjectPolicy
+		if err := decodeStrict(data, &legacy); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		legacy.SchemaVersion = CurrentSchemaVersion
+		legacy.Bulk = workspace.DefaultBulkPolicyV1()
+		return legacy, true, legacy.Validate()
 	case 7:
 		var legacy legacyPolicyV7
 		if err := decodeStrict(data, &legacy); err != nil {
@@ -248,7 +257,7 @@ func migrateV5(legacy legacyPolicyV5, now time.Time) (ProjectPolicy, error) {
 			MaxRequests: legacy.Web.MaxRequests, MaxConcurrent: legacy.Web.MaxConcurrent, MaxConnectSeconds: legacy.Web.MaxConnectSeconds,
 			MaxUploadBytes: legacy.Web.MaxUploadBytes, MaxDownloadBytes: legacy.Web.MaxDownloadBytes, MaxTotalBytes: legacy.Web.MaxTotalBytes,
 		},
-		Export: legacy.Export, Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
+		Export: legacy.Export, Bulk: workspace.DefaultBulkPolicyV1(), Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
 		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
 	}
 	migrateLegacyWebSelection(&policy.Web)
@@ -308,7 +317,7 @@ func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
 		SchemaVersion: CurrentSchemaVersion, ProjectID: legacy.ProjectID, ProjectRoot: legacy.ProjectRoot, Mode: legacy.Mode,
 		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: modelWithoutAuth(legacy.Model),
 		Git: GitPolicy{Remotes: remotes, PushApprovalRequired: legacy.Git.PushApprovalRequired},
-		Web: legacy.Web, Export: legacy.Export, Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
+		Web: legacy.Web, Export: legacy.Export, Bulk: workspace.DefaultBulkPolicyV1(), Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
 		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
 	}
 	upgradeLegacyModelDefaults(&policy.Model)
@@ -328,7 +337,7 @@ func fromLegacyProject(legacy legacyProjectPolicy) ProjectPolicy {
 	return ProjectPolicy{
 		SchemaVersion: legacy.SchemaVersion, ProjectID: legacy.ProjectID, ProjectRoot: legacy.ProjectRoot, Mode: legacy.Mode,
 		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: modelWithoutAuth(legacy.Model),
-		Git: legacy.Git, Web: legacy.Web, Export: legacy.Export, Snapshot: legacy.Snapshot, Audit: legacy.Audit,
+		Git: legacy.Git, Web: legacy.Web, Export: legacy.Export, Snapshot: legacy.Snapshot, Bulk: workspace.DefaultBulkPolicyV1(), Audit: legacy.Audit,
 		ProtectedPaths: append([]string(nil), legacy.ProtectedPaths...), CreatedAt: legacy.CreatedAt, UpdatedAt: legacy.UpdatedAt,
 	}
 }
@@ -401,8 +410,8 @@ func migrateV1(legacy legacyPolicyV1, now time.Time) (ProjectPolicy, error) {
 			MaxConnectSeconds: int64(webgateway.DefaultMaxConnectTime / time.Second), MaxUploadBytes: webgateway.DefaultMaxUploadBytes,
 			MaxDownloadBytes: webgateway.DefaultMaxDownloadBytes, MaxTotalBytes: webgateway.DefaultMaxTotalBytes,
 		},
-		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30},
-		Audit:  AuditPolicy{RetentionDays: legacy.AuditRetentionDays}, ProtectedPaths: []string{".git"},
+		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}, Bulk: workspace.DefaultBulkPolicyV1(),
+		Audit: AuditPolicy{RetentionDays: legacy.AuditRetentionDays}, ProtectedPaths: []string{".git"},
 		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
 	}
 	if policy.CreatedAt.IsZero() {

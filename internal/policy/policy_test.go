@@ -116,7 +116,7 @@ func TestPolicyRejectsWebQuotaAboveGatewayMaximum(t *testing.T) {
 	}
 }
 
-func TestLegacyV1MigratesAtomicallyToStrictV8(t *testing.T) {
+func TestLegacyV1MigratesAtomicallyToStrictV9(t *testing.T) {
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
 	legacy := legacyPolicyV1{
@@ -140,8 +140,8 @@ func TestLegacyV1MigratesAtomicallyToStrictV8(t *testing.T) {
 		t.Fatalf("migrated=%+v changed=%v error=%v", migrated, changed, err)
 	}
 	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), `"schema_version": 8`) || strings.Contains(string(data), `"auth"`) || strings.Contains(string(data), `"web_origins"`) {
-		t.Fatalf("policy file was not atomically replaced with v8: %s", data)
+	if !strings.Contains(string(data), `"schema_version": 9`) || strings.Contains(string(data), `"auth"`) || strings.Contains(string(data), `"web_origins"`) {
+		t.Fatalf("policy file was not atomically replaced with v9: %s", data)
 	}
 	if leftovers, _ := filepath.Glob(filepath.Join(directory, ".sunaba-policy-*.tmp")); len(leftovers) != 0 {
 		t.Fatalf("migration temporary files remained: %v", leftovers)
@@ -173,6 +173,7 @@ func TestLegacyV5WebRulesMigrateWithoutExpandingAccess(t *testing.T) {
 	}
 	legacyWeb := legacyDocument["web"].(map[string]any)
 	delete(legacyDocument, "snapshot")
+	delete(legacyDocument, "bulk")
 	delete(legacyWeb, "origin_presets")
 	delete(legacyWeb, "origin_preset_sha256")
 	delete(legacyWeb, "custom_rules")
@@ -205,6 +206,7 @@ func TestLegacyV6MigratesWithEmptySnapshotExclusions(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(document, "snapshot")
+	delete(document, "bulk")
 	encoded, _ = json.Marshal(document)
 	root, _ := filepath.EvalSymlinks(t.TempDir())
 	path := filepath.Join(root, "state", "policy.json")
@@ -233,6 +235,7 @@ func TestLegacyV7RemovesOnlyProjectAuthenticationAndV8RejectsAuth(t *testing.T) 
 		t.Fatal(err)
 	}
 	document["schema_version"] = float64(7)
+	delete(document, "bulk")
 	document["model"].(map[string]any)["auth"] = "api_key"
 	encoded, _ = json.Marshal(document)
 	root, _ := filepath.EvalSymlinks(t.TempDir())
@@ -318,6 +321,12 @@ func TestLegacyV3MigratesOnlyOldDefaultModelLimits(t *testing.T) {
 		legacy.SchemaVersion = 3
 		legacy.Model = model
 		encoded, _ := json.Marshal(legacy)
+		var document map[string]any
+		if err := json.Unmarshal(encoded, &document); err != nil {
+			t.Fatal(err)
+		}
+		delete(document, "bulk")
+		encoded, _ = json.Marshal(document)
 		root, _ := filepath.EvalSymlinks(t.TempDir())
 		path := filepath.Join(root, "state", "policy.json")
 		if err := os.Mkdir(filepath.Dir(path), 0700); err != nil {
@@ -361,6 +370,7 @@ func TestLegacyV4MigratesWithoutProjectAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(document["model"].(map[string]any), "auth")
+	delete(document, "bulk")
 	encoded, _ = json.Marshal(document)
 	root, _ := filepath.EvalSymlinks(t.TempDir())
 	path := filepath.Join(root, "state", "policy.json")
@@ -409,6 +419,15 @@ func TestLoadReadOnlyMigratesOnlyInMemory(t *testing.T) {
 	}
 	legacy.SchemaVersion = 4
 	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	delete(document, "bulk")
+	encoded, err = json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}

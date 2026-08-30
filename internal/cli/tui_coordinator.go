@@ -580,7 +580,7 @@ func (c *tuiCoordinator) home(ctx context.Context, project tuiProject) (hosttui.
 }
 
 func (c *tuiCoordinator) ensureSnapshotApproval(ctx context.Context, project tuiProject) (bool, error) {
-	projectPolicy, projectState, compiled, manifest, err := c.app.snapshotManifest(project.policy.ProjectRoot)
+	projectPolicy, projectState, compiled, manifest, bulk, err := c.app.snapshotManifest(project.policy.ProjectRoot)
 	if err != nil {
 		return false, err
 	}
@@ -591,12 +591,13 @@ func (c *tuiCoordinator) ensureSnapshotApproval(ctx context.Context, project tui
 	if approvalErr == nil {
 		return true, nil
 	}
-	preview := workspace.BuildSnapshotPreview(manifest)
+	preview := workspace.BuildSnapshotPreview(manifest.Core)
 	fields := []hosttui.TextField{
 		{ID: "reason", Label: "Approval required", Text: snapshotApprovalTUIReason(approvalErr)},
-		{ID: "digest", Label: "Exact Snapshot digest", Text: preview.Digest},
-		{ID: "entries", Label: "Included metadata", Text: fmt.Sprintf("%d entries (%d files), %d total bytes", preview.EntryCount, preview.FileCount, preview.TotalSize)},
-		{ID: "excluded", Label: "Excluded paths", Text: fmt.Sprintf("%d paths from the active host policy", len(compiled.Snapshot.ExcludedPaths))},
+		{ID: "digest", Label: "Exact Snapshot digest", Text: manifest.Digest},
+		{ID: "entries", Label: "Core input", Text: fmt.Sprintf("%d entries (%d files), %d total bytes", preview.EntryCount, preview.FileCount, preview.TotalSize)},
+		{ID: "bulk", Label: "Bulk input", Text: fmt.Sprintf("%d directories; existing contents are not copied into the VM and remain unchanged on the host", len(bulk))},
+		{ID: "excluded", Label: "Excluded paths", Text: fmt.Sprintf("%d paths are not retained by sunaba", len(compiled.Core.Snapshot.ExcludedPaths))},
 		{ID: "contents", Label: "Content disclosure", Text: "File contents, secret values, and per-file hashes are not displayed by this review."},
 	}
 	const largeLimit = 10
@@ -623,7 +624,7 @@ func (c *tuiCoordinator) ensureSnapshotApproval(ctx context.Context, project tui
 	if event.Kind != hosttui.EventAction || event.ActionID != "approve-start" {
 		return false, nil
 	}
-	if err := c.app.snapshotApprove(project.policy.ProjectRoot, preview.Digest); err != nil {
+	if err := c.app.snapshotApprove(project.policy.ProjectRoot, manifest.Digest); err != nil {
 		return false, fmt.Errorf("approve displayed Snapshot: %w", err)
 	}
 	return true, nil
@@ -890,6 +891,19 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 	initialDiffFocus := false
 	initialDiffEnd := false
 	for {
+		if len(review.Items) == 0 && len(pending.WorkSet.Bulk) > 0 {
+			if err := c.bulkChanges(ctx, project, pending); err != nil {
+				return err
+			}
+			pending, err = loadPending(project.state, project.policy)
+			if err != nil {
+				return err
+			}
+			if !pendingPlanResolvable(pending) {
+				return nil
+			}
+			return c.confirmAndApplyWorkSet(ctx, project, pending, review, workspace.ReviewScreen{})
+		}
 		screen, err := workspace.BuildReviewScreen(review, c.width, selected)
 		if err != nil {
 			return err
@@ -924,7 +938,13 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 		if diffPage+1 < len(diffPages) {
 			actions = append(actions, noInputAction("diff.next", "Next diff page"))
 		}
-		actions = append(actions, noInputAction("apply-all", "Apply all "+fileCountLabel(len(screen.Files))), noInputAction("back", "Keep pending and back"))
+		if len(pending.WorkSet.Bulk) > 0 {
+			actions = append(actions, noInputAction("bulk", fmt.Sprintf("Bulk paths (%d unresolved)", countUnresolvedBulk(pending.Resolution))))
+		}
+		if pendingPlanResolvable(pending) {
+			actions = append(actions, noInputAction("apply-all", "Apply current plan"))
+		}
+		actions = append(actions, noInputAction("back", "Keep pending and back"))
 		view := c.view("changes", "Review the host-generated Change Set", nil, actions)
 		view.Changes = reviewChangesView(screen, visible, page+1, (len(screen.Files)+pageSize-1)/pageSize, start, diffRows[diffWindow.start:diffWindow.end], diffWindow.start, len(diffRows), diffPage+1, len(diffPages), initialDiffFocus, initialDiffEnd)
 		identity := pendingIdentity(pending)
@@ -934,6 +954,16 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 		}
 		if event.Kind != hosttui.EventAction || event.ActionID == "back" {
 			return nil
+		}
+		if event.ActionID == "bulk" {
+			if err := c.bulkChanges(ctx, project, pending); err != nil {
+				return err
+			}
+			pending, err = loadPending(project.state, project.policy)
+			if err != nil {
+				return err
+			}
+			continue
 		}
 		if event.ActionID == "diff.prev" {
 			diffPage--
@@ -952,23 +982,7 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 			if err != nil || pendingIdentity(latest) != identity {
 				return fmt.Errorf("the pending Change Set changed after it was displayed; review it again")
 			}
-			confirm := c.view("changes", "Apply the reviewed Change Set?", []hosttui.TextField{
-				{ID: "summary", Label: "Pending changes", Text: reviewSummary(screen.Files)},
-				{ID: "scope", Label: "Apply scope", Text: "All files in this host-generated Change Set; partial apply is not performed."},
-				{ID: "safety", Label: "Revalidation", Text: "Project baseline and Change Set identity are checked again immediately before apply."},
-			}, []hosttui.Action{noInputAction("confirm-apply", "Confirm apply all "+fileCountLabel(len(screen.Files))), noInputAction("back", "Back to review")})
-			confirmation, err := c.exchange(ctx, project.policy.ProjectID, confirm)
-			if err != nil {
-				return err
-			}
-			if confirmation.Kind != hosttui.EventAction || confirmation.ActionID != "confirm-apply" {
-				continue
-			}
-			latest, err = loadPending(project.state, project.policy)
-			if err != nil || pendingIdentity(latest) != identity {
-				return fmt.Errorf("the pending Change Set changed after confirmation; review it again")
-			}
-			return c.app.applyPendingApproved(project.policy, project.state, latest, review)
+			return c.confirmAndApplyWorkSet(ctx, project, latest, review, screen)
 		}
 		if event.ActionID == "page.prev" {
 			page--
@@ -993,6 +1007,218 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 			initialDiffFocus = false
 			initialDiffEnd = false
 		}
+	}
+}
+
+func (c *tuiCoordinator) bulkChanges(ctx context.Context, project tuiProject, pending pendingChange) error {
+	page := 0
+	for {
+		latest, err := loadPending(project.state, project.policy)
+		if err != nil {
+			return err
+		}
+		if latest.WorkSet.Digest != pending.WorkSet.Digest {
+			return nil
+		}
+		pending = latest
+		const pageSize = hosttui.MaxBulkItems
+		pages := max(1, (len(pending.WorkSet.Bulk)+pageSize-1)/pageSize)
+		if page >= pages {
+			page = 0
+		}
+		start := page * pageSize
+		end := min(start+pageSize, len(pending.WorkSet.Bulk))
+		dispositions := make(map[string]string, len(pending.Resolution.Bulk))
+		for _, resolution := range pending.Resolution.Bulk {
+			dispositions[resolution.BulkID] = resolution.Disposition
+		}
+		actions := make([]hosttui.Action, 0, pageSize+3)
+		items := make([]hosttui.BulkItem, 0, end-start)
+		for index := start; index < end; index++ {
+			record := pending.WorkSet.Bulk[index]
+			actionID := fmt.Sprintf("bulk.%d", index)
+			actions = append(actions, noInputAction(actionID, "Review "+boundedTUIPath(record.Root)))
+			identity := workspace.BulkIdentity(record)
+			prefix := identity
+			if len(prefix) > 12 {
+				prefix = prefix[:12]
+			}
+			items = append(items, hosttui.BulkItem{
+				ActionID: actionID, BulkID: record.BulkID, Root: record.Root, Reason: record.Discovery.Reason,
+				CaptureState: record.Capture.State, Disposition: dispositions[record.BulkID],
+				Retention: bulkRetentionLabel(record), Summary: fmt.Sprintf("%d entries · %d bytes", record.Summary.Files+record.Summary.Directories+record.Summary.Symlinks, record.Summary.LogicalBytes), DigestPrefix: prefix,
+			})
+		}
+		if page > 0 {
+			actions = append(actions, noInputAction("bulk.prev", "Previous Bulk paths"))
+		}
+		if end < len(pending.WorkSet.Bulk) {
+			actions = append(actions, noInputAction("bulk.next", "Next Bulk paths"))
+		}
+		actions = append(actions, noInputAction("back", "Back to Normal changes"))
+		view := c.view("changes", fmt.Sprintf("Bulk paths are retained separately · %d unresolved", countUnresolvedBulk(pending.Resolution)), nil, actions)
+		view.Bulk = &hosttui.BulkView{Page: page + 1, Pages: pages, SelectedActionID: items[0].ActionID, Items: items}
+		event, err := c.exchange(ctx, project.policy.ProjectID, view)
+		if err != nil {
+			return err
+		}
+		if event.Kind != hosttui.EventAction || event.ActionID == "back" {
+			return nil
+		}
+		if event.ActionID == "bulk.prev" {
+			page--
+			continue
+		}
+		if event.ActionID == "bulk.next" {
+			page++
+			continue
+		}
+		var index int
+		if _, err := fmt.Sscanf(event.ActionID, "bulk.%d", &index); err == nil && index >= 0 && index < len(pending.WorkSet.Bulk) {
+			if err := c.bulkDetail(ctx, project, pending, pending.WorkSet.Bulk[index]); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (c *tuiCoordinator) bulkDetail(ctx context.Context, project tuiProject, pending pendingChange, record workspace.BulkRecord) error {
+	for {
+		latest, err := loadPending(project.state, project.policy)
+		if err != nil || latest.WorkSet.Digest != pending.WorkSet.Digest {
+			return fmt.Errorf("the pending Work Set changed while reviewing Bulk details")
+		}
+		pending = latest
+		disposition := workspace.DispositionUnresolved
+		for _, choice := range pending.Resolution.Bulk {
+			if choice.BulkID == record.BulkID {
+				disposition = choice.Disposition
+			}
+		}
+		fields := []hosttui.TextField{
+			{ID: "classification", Label: "Classification", Text: record.Discovery.Reason + "; this does not mean the data is disposable."},
+			{ID: "captured", Label: "Captured result", Text: fmt.Sprintf("%d files · %d directories · %d symlinks · %d bytes · %s", record.Summary.Files, record.Summary.Directories, record.Summary.Symlinks, record.Summary.LogicalBytes, record.Capture.State)},
+			{ID: "baseline", Label: "Host baseline", Text: record.Baseline.State},
+			{ID: "disposition", Label: "Disposition", Text: disposition},
+			{ID: "safety", Label: "Data safety", Text: bulkRetentionLabel(record)},
+		}
+		actions := []hosttui.Action{}
+		allowed := workspace.AllowedBulkDispositions(record)
+		for _, candidate := range allowed {
+			label := map[string]string{workspace.DispositionKeepHost: "Keep host unchanged", workspace.DispositionRetainArtifact: "Retain as artifact", workspace.DispositionApplyDirectory: "Apply entire directory...", workspace.DispositionDiscard: "Discard VM-only data..."}[candidate]
+			actions = append(actions, noInputAction(candidate, label))
+		}
+		if workspace.CanReviewBulkNormally(record) {
+			actions = append(actions, noInputAction("review-normally", "Review normally..."))
+		}
+		actions = append(actions, noInputAction("back", "Back without deciding"))
+		view := c.view("changes", boundedTUIPath(record.Root), fields, actions)
+		event, err := c.exchange(ctx, project.policy.ProjectID, view)
+		if err != nil {
+			return err
+		}
+		if event.Kind != hosttui.EventAction || event.ActionID == "back" {
+			return nil
+		}
+		allowedAction := false
+		for _, candidate := range allowed {
+			allowedAction = allowedAction || event.ActionID == candidate
+		}
+		if !allowedAction && event.ActionID != "review-normally" {
+			return fmt.Errorf("unrecognized Bulk disposition action")
+		}
+		lock, err := c.app.store.AcquireProjectLock(project.policy.ProjectRoot)
+		if err != nil {
+			return err
+		}
+		if lock.ProjectID != project.policy.ProjectID {
+			_ = lock.Close()
+			return fmt.Errorf("Project identity mismatch")
+		}
+		defer lock.Close()
+		if !allowedAction {
+			if event.ActionID == "review-normally" && workspace.CanReviewBulkNormally(record) {
+				_, err := reviewPendingBulkNormally(ctx, project.state, project.policy, pending.WorkSet.Digest, record.BulkID, workspace.BulkIdentity(record))
+				return err
+			}
+			return fmt.Errorf("unrecognized Bulk disposition action")
+		}
+		if _, err := updatePendingResolution(project.state, project.policy, pending.WorkSet.Digest, record.BulkID, workspace.BulkIdentity(record), event.ActionID); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+func (c *tuiCoordinator) confirmAndApplyWorkSet(ctx context.Context, project tuiProject, pending pendingChange, review workspace.Review, screen workspace.ReviewScreen) error {
+	if countUnresolvedBulk(pending.Resolution) != 0 {
+		return fmt.Errorf("resolve all Bulk paths before applying")
+	}
+	bulkSummary := "No Bulk paths"
+	if len(pending.WorkSet.Bulk) > 0 {
+		parts := make([]string, 0, len(pending.Resolution.Bulk))
+		byID := make(map[string]string, len(pending.WorkSet.Bulk))
+		for _, record := range pending.WorkSet.Bulk {
+			byID[record.BulkID] = record.Root
+		}
+		for _, choice := range pending.Resolution.Bulk {
+			parts = append(parts, boundedTUIPath(byID[choice.BulkID])+" — "+choice.Disposition)
+		}
+		bulkSummary = strings.Join(parts, "; ")
+	}
+	normalSummary := "0 files"
+	if len(screen.Files) > 0 {
+		normalSummary = reviewSummary(screen.Files)
+	}
+	confirm := c.view("changes", "Apply the reviewed Work Set?", []hosttui.TextField{
+		{ID: "normal", Label: "Normal changes", Text: normalSummary + "; all included"},
+		{ID: "bulk", Label: "Bulk paths", Text: bulkSummary},
+		{ID: "limitations", Label: "Review limitations", Text: "Bulk contents were not reviewed line by line."},
+		{ID: "safety", Label: "Safety checks", Text: "Project baseline, policy, Work Set, object digests, directory guards, and this Apply Plan are revalidated."},
+		{ID: "approval", Label: "Approval", Text: "This is one approval for the complete plan. Normal files are not applied individually."},
+	}, []hosttui.Action{noInputAction("confirm-apply", "Confirm Apply Plan"), noInputAction("back", "Back to review")})
+	confirmation, err := c.exchange(ctx, project.policy.ProjectID, confirm)
+	if err != nil {
+		return err
+	}
+	if confirmation.Kind != hosttui.EventAction || confirmation.ActionID != "confirm-apply" {
+		return nil
+	}
+	latest, err := loadPending(project.state, project.policy)
+	if err != nil || pendingIdentity(latest) != pendingIdentity(pending) {
+		return fmt.Errorf("the pending Work Set changed after confirmation; review it again")
+	}
+	return c.app.applyPendingApproved(project.policy, project.state, latest, review)
+}
+
+func countUnresolvedBulk(resolution workspace.Resolution) int {
+	count := 0
+	for _, item := range resolution.Bulk {
+		if item.Disposition == workspace.DispositionUnresolved {
+			count++
+		}
+	}
+	return count
+}
+
+func pendingPlanResolvable(pending pendingChange) bool {
+	if countUnresolvedBulk(pending.Resolution) != 0 {
+		return false
+	}
+	_, err := workspace.BuildApplyPlan(pending.WorkSet, pending.Resolution, pending.SnapshotPolicy, pending.WorkSet.Baseline.Core.Digest)
+	return err == nil
+}
+
+func bulkRetentionLabel(record workspace.BulkRecord) string {
+	switch record.Capture.State {
+	case "exact_managed":
+		return "exact content retained in a private sunaba object"
+	case "opaque_recovery_artifact":
+		return "complete opaque recovery artifact retained"
+	case "exact_absence":
+		return "exact absence; no VM-only bytes"
+	default:
+		return "stopped VM recovery required"
 	}
 }
 
@@ -1136,7 +1362,7 @@ func fileCountLabel(count int) string {
 }
 
 func pendingIdentity(pending pendingChange) string {
-	return pending.ProjectID + "\x00" + pending.Baseline.Digest + "\x00" + pending.Merged.Digest + "\x00" + pending.ChangeSet.Digest
+	return pending.ProjectID + "\x00" + pending.WorkSet.Digest + "\x00" + pending.Resolution.Digest
 }
 
 func (c *tuiCoordinator) recovery(ctx context.Context, project tuiProject) error {

@@ -41,12 +41,15 @@ type journalEntry struct {
 }
 
 type journal struct {
-	Version         int            `json:"version"`
-	ProjectID       string         `json:"project_id"`
-	BaselineDigest  string         `json:"baseline_digest"`
-	MergedDigest    string         `json:"merged_digest"`
-	ChangeSetDigest string         `json:"change_set_digest"`
-	Entries         []journalEntry `json:"entries"`
+	Version          int            `json:"version"`
+	ProjectID        string         `json:"project_id"`
+	BaselineDigest   string         `json:"baseline_digest"`
+	MergedDigest     string         `json:"merged_digest"`
+	ChangeSetDigest  string         `json:"change_set_digest"`
+	WorkSetDigest    string         `json:"work_set_digest,omitempty"`
+	ApplyPlanDigest  string         `json:"apply_plan_digest,omitempty"`
+	ProjectCommitted bool           `json:"project_committed,omitempty"`
+	Entries          []journalEntry `json:"entries"`
 }
 
 func Apply(cfg Config) (result workspace.SnapshotManifest, err error) {
@@ -231,8 +234,17 @@ func RecoverLocked(projectRoot, projectID string, snapshotPolicy workspace.Snaps
 			return fmt.Errorf("read recovery journal: %w", err)
 		}
 		var j journal
-		if securefs.DecodeStrictJSON(encoded, &j) != nil || j.Version != 1 || j.ProjectID != projectID || len(j.Entries) > snapshotPolicy.MaxEntries {
+		if securefs.DecodeStrictJSON(encoded, &j) != nil || (j.Version != 1 && j.Version != 2) || j.ProjectID != projectID || len(j.Entries) > snapshotPolicy.MaxEntries || (j.Version == 2 && (len(j.WorkSetDigest) != 64 || len(j.ApplyPlanDigest) != 64)) {
 			return fmt.Errorf("invalid recovery journal")
+		}
+		if j.ProjectCommitted {
+			if j.Version != 2 {
+				return fmt.Errorf("invalid committed recovery journal")
+			}
+			if err := removeTransactionRoot(transactionRoot, projectRoot); err != nil {
+				return err
+			}
+			continue
 		}
 		backupFD, err := openDirectory(filepath.Join(transactionRoot, "backup"))
 		if err != nil {

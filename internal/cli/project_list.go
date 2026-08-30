@@ -193,8 +193,10 @@ func pendingInventoryState(projectState, projectID string) string {
 		return "invalid"
 	}
 	var identity struct {
-		Version   int    `json:"version"`
-		ProjectID string `json:"project_id"`
+		Version int `json:"version"`
+		WorkSet struct {
+			ProjectID string `json:"project_id"`
+		} `json:"work_set"`
 	}
 	file := os.NewFile(uintptr(fd), path)
 	if file == nil {
@@ -203,7 +205,7 @@ func pendingInventoryState(projectState, projectID string) string {
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(io.LimitReader(file, 16<<20))
-	if decoder.Decode(&identity) != nil || (identity.Version != pendingChangeVersion && identity.Version != selfContainedPendingChangeVersion && identity.Version != legacyPendingChangeVersion) || identity.ProjectID != projectID {
+	if decoder.Decode(&identity) != nil || identity.Version != pendingChangeVersion || identity.WorkSet.ProjectID != projectID {
 		return "invalid"
 	}
 	return "yes"

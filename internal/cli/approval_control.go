@@ -338,7 +338,7 @@ func (s *controlledSession) exportAndDestroyWithOptions(ctx context.Context, dis
 		s.notifyDeadlineChangedLocked()
 		return err
 	}
-	if len(result.ChangeSet.Changes) > 0 {
+	if len(result.ChangeSet.Changes) > 0 || len(result.WorkSet.Bulk) > 0 {
 		if s.persistent == nil {
 			return fmt.Errorf("supervisor cannot persist an unbound Change Set")
 		}

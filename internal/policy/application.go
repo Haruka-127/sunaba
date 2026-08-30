@@ -77,6 +77,7 @@ func ClassifyApplication(current, desired ProjectPolicy) (ApplicationPlan, error
 	appendChange(current.Resources != desired.Resources, "resources", ApplyAfterRecreate)
 	appendChange(current.Export != desired.Export, "export", ApplyAfterRecreate)
 	appendChange(!slices.Equal(current.Snapshot.Exclude, desired.Snapshot.Exclude), "snapshot", ApplyAfterRecreate)
+	appendChange(!reflect.DeepEqual(current.Bulk, desired.Bulk), "bulk", ApplyAfterRecreate)
 	appendChange(!slices.Equal(current.ProtectedPaths, desired.ProtectedPaths), "protected_paths", ApplyAfterRecreate)
 
 	return plan, nil

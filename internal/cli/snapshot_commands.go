@@ -29,32 +29,40 @@ var (
 )
 
 type snapshotApproval struct {
-	Version            int       `json:"version"`
-	InitialDigest      string    `json:"initial_digest"`
-	ExportPolicyDigest string    `json:"export_policy_digest"`
-	ApprovedAt         time.Time `json:"approved_at"`
+	Version               int       `json:"version"`
+	InitialDigest         string    `json:"initial_digest"`
+	WorkspacePolicyDigest string    `json:"workspace_policy_digest"`
+	ApprovedAt            time.Time `json:"approved_at"`
 }
 
-func (a *app) snapshotManifest(dir string) (policy.ProjectPolicy, string, policy.CompiledExportPolicy, workspace.SnapshotManifest, error) {
+func (a *app) snapshotManifest(dir string) (policy.ProjectPolicy, string, policy.CompiledWorkspacePolicy, workspace.PartitionedManifest, []workspace.BulkRecord, error) {
 	projectPolicy, _, projectState, err := a.loadEffectivePolicy(dir)
 	if err != nil {
-		return policy.ProjectPolicy{}, "", policy.CompiledExportPolicy{}, workspace.SnapshotManifest{}, err
+		return policy.ProjectPolicy{}, "", policy.CompiledWorkspacePolicy{}, workspace.PartitionedManifest{}, nil, err
 	}
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+	compiled, err := policy.CompileWorkspacePolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude, projectPolicy.Bulk)
 	if err != nil {
-		return policy.ProjectPolicy{}, "", policy.CompiledExportPolicy{}, workspace.SnapshotManifest{}, err
+		return policy.ProjectPolicy{}, "", policy.CompiledWorkspacePolicy{}, workspace.PartitionedManifest{}, nil, err
 	}
-	manifest, err := workspace.BuildSnapshotManifest(projectPolicy.ProjectRoot, compiled.Snapshot)
-	return projectPolicy, projectState, compiled, manifest, err
+	manifest, bulk, err := workspace.BuildPartitionedSnapshotManifest(projectPolicy.ProjectRoot, compiled.Core.Snapshot, compiled.Bulk, compiled.Digest)
+	return projectPolicy, projectState, compiled, manifest, bulk, err
 }
 
 func (a *app) snapshotPreview(dir string) error {
-	projectPolicy, _, compiled, manifest, err := a.snapshotManifest(dir)
+	projectPolicy, _, compiled, manifest, bulk, err := a.snapshotManifest(dir)
 	if err != nil {
 		return err
 	}
-	preview := workspace.BuildSnapshotPreview(manifest)
-	fmt.Fprintf(a.output, "Project: %s\nSnapshot digest: %s\nEntries: %d (files: %d)\nTotal bytes: %d\nExcluded paths: %d\n", projectPolicy.ProjectID, preview.Digest, preview.EntryCount, preview.FileCount, preview.TotalSize, len(compiled.Snapshot.ExcludedPaths))
+	preview := workspace.BuildSnapshotPreview(manifest.Core)
+	fmt.Fprintf(a.output, "Project: %s\nSnapshot digest: %s\n\nCore input\n  %d entries (%d files) · %d bytes\n\nBulk input\n  %d directories\n", projectPolicy.ProjectID, manifest.Digest, preview.EntryCount, preview.FileCount, preview.TotalSize, len(bulk))
+	for _, record := range bulk {
+		state := "existing contents are not copied into the VM"
+		if record.Baseline.State == "exact" {
+			state = fmt.Sprintf("%d entries · %d bytes", record.Summary.Files+record.Summary.Directories+record.Summary.Symlinks, record.Summary.LogicalBytes)
+		}
+		fmt.Fprintf(a.output, "  %s — %s (%s)\n", trustedui.SanitizeTerminal(record.Root), trustedui.SanitizeTerminal(record.Discovery.Reason), state)
+	}
+	fmt.Fprintf(a.output, "  Existing host directories remain unchanged. Bulk does not mean disposable.\n\nExcluded\n  %d paths\n  Excluded data is not retained by sunaba.\n", len(compiled.Core.Snapshot.ExcludedPaths))
 	for _, file := range preview.LargeFiles {
 		fmt.Fprintf(a.output, "Large file: %s (%d bytes)\n", trustedui.SanitizeTerminal(file.Path), file.Size)
 	}
@@ -64,19 +72,19 @@ func (a *app) snapshotPreview(dir string) error {
 	if len(preview.SensitivePaths) > 0 {
 		fmt.Fprintln(a.errors, "WARNING: files with secret-like names may be sent to the configured model provider if included.")
 	}
-	fmt.Fprintf(a.output, "Approve exactly this preview with: sunaba snapshot approve --digest %s\n", preview.Digest)
+	fmt.Fprintf(a.output, "Approve exactly this preview with: sunaba snapshot approve --digest %s\n", manifest.Digest)
 	return nil
 }
 
 func (a *app) snapshotApprove(dir, digest string) error {
-	projectPolicy, projectState, compiled, manifest, err := a.snapshotManifest(dir)
+	projectPolicy, projectState, compiled, manifest, _, err := a.snapshotManifest(dir)
 	if err != nil {
 		return err
 	}
 	if digest != manifest.Digest {
 		return fmt.Errorf("snapshot digest changed or does not match the current preview")
 	}
-	approval := snapshotApproval{Version: 1, InitialDigest: digest, ExportPolicyDigest: compiled.Digest, ApprovedAt: time.Now().UTC()}
+	approval := snapshotApproval{Version: 2, InitialDigest: digest, WorkspacePolicyDigest: compiled.Digest, ApprovedAt: time.Now().UTC()}
 	if err := writePrivateJSON(filepath.Join(projectState, snapshotApprovalFile), approval); err != nil {
 		return err
 	}
@@ -84,7 +92,7 @@ func (a *app) snapshotApprove(dir, digest string) error {
 	return nil
 }
 
-func verifySnapshotApproval(projectState string, compiled policy.CompiledExportPolicy, manifest workspace.SnapshotManifest) (snapshotApproval, error) {
+func verifySnapshotApproval(projectState string, compiled policy.CompiledWorkspacePolicy, manifest workspace.PartitionedManifest) (snapshotApproval, error) {
 	data, err := readOwnedPrivateFile(filepath.Join(projectState, snapshotApprovalFile), 16<<10)
 	if err != nil {
 		return snapshotApproval{}, fmt.Errorf("%w; run 'sunaba snapshot preview' and approve its exact digest", errSnapshotApprovalMissing)
@@ -92,7 +100,7 @@ func verifySnapshotApproval(projectState string, compiled policy.CompiledExportP
 	var approval snapshotApproval
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&approval); err != nil || decoder.Decode(&struct{}{}) != io.EOF || approval.Version != 1 || approval.ExportPolicyDigest != compiled.Digest || approval.ApprovedAt.IsZero() {
+	if err := decoder.Decode(&approval); err != nil || decoder.Decode(&struct{}{}) != io.EOF || approval.Version != 2 || approval.WorkspacePolicyDigest != compiled.Digest || approval.ApprovedAt.IsZero() {
 		return snapshotApproval{}, fmt.Errorf("%w; preview and approve again", errSnapshotApprovalInvalid)
 	}
 	if approval.InitialDigest != manifest.Digest {

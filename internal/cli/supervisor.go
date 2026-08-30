@@ -139,15 +139,15 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 			return nil, statErr
 		}
 	}
-	exportPolicy, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+	workspacePolicy, err := policy.CompileWorkspacePolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude, projectPolicy.Bulk)
 	if err != nil {
 		return nil, err
 	}
-	approvedManifest, err := workspace.BuildSnapshotManifest(projectPolicy.ProjectRoot, exportPolicy.Snapshot)
+	approvedManifest, approvedBulk, err := workspace.BuildPartitionedSnapshotManifest(projectPolicy.ProjectRoot, workspacePolicy.Core.Snapshot, workspacePolicy.Bulk, workspacePolicy.Digest)
 	if err != nil {
 		return nil, err
 	}
-	_, err = verifySnapshotApproval(projectState, exportPolicy, approvedManifest)
+	_, err = verifySnapshotApproval(projectState, workspacePolicy, approvedManifest)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +241,10 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		GitGateway: activation.activation.GitGateway, GitRemotes: activation.activation.GitRemotes, GitGatewayClose: activation.activation.GitGatewayClose,
 		WebGateway: activation.activation.WebGateway, WebToken: activation.activation.WebToken, WebGatewayClose: activation.activation.WebGatewayClose,
 		ServerPassword: activation.activation.ServerPassword, LeaseTTL: activation.activation.LeaseTTL, Audit: recorder,
-		SnapshotPolicy: exportPolicy.Snapshot, ApprovedSnapshot: approvedManifest, ExportPolicy: exportPolicy.Export, ExportPolicyDigest: exportPolicy.Digest,
+		SnapshotPolicy: workspacePolicy.Core.Snapshot, ApprovedSnapshot: approvedManifest.Core, ApprovedPartitioned: approvedManifest,
+		ApprovedBulk: approvedBulk,
+		ExportPolicy: workspacePolicy.Core.Export, ExportPolicyDigest: workspacePolicy.Core.Digest,
+		BulkPolicy: workspacePolicy.Bulk, WorkspacePolicyDigest: workspacePolicy.Digest,
 	}
 	var devBoundary *devnetwork.Boundary
 	if projectPolicy.Mode == "dev" {

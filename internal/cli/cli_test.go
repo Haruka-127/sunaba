@@ -410,8 +410,8 @@ func TestDestroyProjectSelectorsRequireExactUnambiguousID(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(pendingDirectory, "change.json"), []byte("pending"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.run(context.Background(), []string{"destroy", "--project-id", projectID, "--yes"}); err == nil || !strings.Contains(err.Error(), "pending Change Set") {
-		t.Fatalf("pending Change Set was not protected: %v", err)
+	if err := a.run(context.Background(), []string{"destroy", "--project-id", projectID, "--yes"}); err == nil || !strings.Contains(err.Error(), "pending Work Set") {
+		t.Fatalf("pending Work Set was not protected: %v", err)
 	}
 	if _, err := store.LookupProjectState(projectID); err != nil {
 		t.Fatalf("pending protection changed Project state: %v", err)
@@ -1197,12 +1197,19 @@ func TestExplicitDevRecoveryDiscardRequiresExactStoppedVMOwnership(t *testing.T)
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "snapshot"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	baseline, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy())
+	export := policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}
+	compiled, err := policy.CompileWorkspacePolicy(export, []string{".git", ".sunaba"}, nil, workspace.DefaultBulkPolicyV1())
 	if err != nil {
 		t.Fatal(err)
 	}
+	partitioned, baselineBulk, err := workspace.BuildPartitionedSnapshotManifest(projectRoot, compiled.Core.Snapshot, compiled.Bulk, compiled.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := partitioned.Core
+	baseline.Root = filepath.Join(runtimeRoot, "snapshot")
 	container := "sunaba-" + projectID + "-" + vmID
-	record := recovery.State{Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: container, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, ExportPolicyDigest: strings.Repeat("a", 64), Reason: "guard refused", CreatedAt: time.Now().UTC()}
+	record := recovery.State{Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: container, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: baselineBulk, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled, Reason: "guard refused", CreatedAt: time.Now().UTC()}
 	if err := recovery.Save(projectState, record); err != nil {
 		t.Fatal(err)
 	}
@@ -1316,29 +1323,33 @@ func TestFrozenSecureExportRecoveryRetriesTheSameChangeSet(t *testing.T) {
 		ProjectID: projectID, ProjectRoot: projectRoot,
 		Export:         policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30},
 		ProtectedPaths: []string{".git", ".sunaba"},
+		Bulk:           workspace.DefaultBulkPolicyV1(),
 	}
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths)
+	compiled, err := policy.CompileWorkspacePolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, nil, projectPolicy.Bulk)
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline, err := workspace.BuildSnapshotManifest(projectRoot, compiled.Snapshot)
+	partitioned, baselineBulk, err := workspace.BuildPartitionedSnapshotManifest(projectRoot, compiled.Core.Snapshot, compiled.Bulk, compiled.Digest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	merged, err := workspace.BuildSnapshotManifest(mergedRoot, compiled.Snapshot)
+	baseline := partitioned.Core
+	baseline.Root = snapshotRoot
+	merged, err := workspace.BuildSnapshotManifest(mergedRoot, compiled.Core.Snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, err := workspace.BuildChangeSet(baseline, merged, compiled.Snapshot)
+	workSet, err := workspace.BuildPendingWorkSet(projectID, projectRoot, vmID, sessionID, compiled.Digest, partitioned.Core, merged, compiled.Core.Snapshot, compiled.Bulk, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
+	changes := workSet.CoreChangeSet
 	container := "sunaba-" + projectID + "-" + vmID
 	record := recovery.State{
 		Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID,
 		Container: container, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID,
-		Mode: "secure", Baseline: baseline, ExportPolicyDigest: compiled.Digest,
-		PendingExport: &recovery.PendingExport{MergedRoot: mergedRoot, MergedDigest: merged.Digest, ChangeSetDigest: changes.Digest},
+		Mode: "secure", Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: baselineBulk, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled,
+		PendingExport: &recovery.PendingExport{MergedRoot: mergedRoot, WorkSet: workSet},
 		Reason:        "pending write failed", CreatedAt: time.Now().UTC(),
 	}
 	if err := recovery.Save(projectState, record); err != nil {
@@ -1346,10 +1357,10 @@ func TestFrozenSecureExportRecoveryRetriesTheSameChangeSet(t *testing.T) {
 	}
 	active := &session.Session{
 		ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: container,
-		Baseline: baseline, SnapshotRoot: snapshotRoot, SnapshotPolicy: compiled.Snapshot,
-		ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest,
+		Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: baselineBulk, SnapshotRoot: snapshotRoot, SnapshotPolicy: compiled.Core.Snapshot,
+		ExportPolicy: compiled.Core.Export, ExportPolicyDigest: compiled.Core.Digest, BulkPolicy: compiled.Bulk, WorkspacePolicyDigest: compiled.Digest,
 	}
-	if _, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedRoot, Merged: merged, ChangeSet: changes}); err != nil {
+	if _, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedRoot, Merged: merged, ChangeSet: changes, WorkSet: workSet}); err != nil {
 		t.Fatal(err)
 	}
 	fake := &discardRecoveryRuntime{info: runtime.Info{Name: container, State: runtime.StateStopped, Labels: map[string]string{
@@ -1388,6 +1399,11 @@ func TestFrozenSecureExportRecoveryRetriesTheSameChangeSet(t *testing.T) {
 	}
 	record.RuntimeBase, record.RuntimeRoot = runtimeBase, runtimeRoot
 	record.PendingExport.MergedRoot = mergedRoot
+	rebound, err := workspace.RebindPendingWorkSetRoots(record.PendingExport.WorkSet, filepath.Join(runtimeRoot, "snapshot"), mergedRoot, compiled.Core.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.PendingExport.WorkSet = rebound
 	if err := recovery.Save(projectState, record); err != nil {
 		t.Fatal(err)
 	}
@@ -1804,12 +1820,13 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	testPolicy := policy.ProjectPolicy{ProjectID: "project", ProjectRoot: project, Export: policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30}, ProtectedPaths: []string{".git"}}
-	compiled, err := policy.CompileExportPolicy(testPolicy.Export, testPolicy.ProtectedPaths)
+	testPolicy := policy.ProjectPolicy{ProjectID: "project", ProjectRoot: project, Export: policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30}, Bulk: workspace.DisabledBulkPolicy(), ProtectedPaths: []string{".git"}}
+	compiledWorkspace, err := policy.CompileWorkspacePolicy(testPolicy.Export, testPolicy.ProtectedPaths, nil, testPolicy.Bulk)
 	if err != nil {
 		t.Fatal(err)
 	}
-	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest}
+	compiled := compiledWorkspace.Core
+	active := &session.Session{ProjectID: "project", ProjectRoot: project, VMID: "vm", SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest, BulkPolicy: compiledWorkspace.Bulk, WorkspacePolicyDigest: compiledWorkspace.Digest}
 	persisted, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedSource, Merged: merged, ChangeSet: changes})
 	if err != nil {
 		t.Fatal(err)
@@ -1834,22 +1851,13 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	if err != nil || loaded.ChangeSet.Digest != persisted.ChangeSet.Digest {
 		t.Fatalf("loaded=%+v error=%v", loaded, err)
 	}
-	legacyV3 := persisted
-	legacyV3.Version = selfContainedPendingChangeVersion
-	legacyV3.SnapshotPolicy = workspace.SnapshotPolicy{}
-	legacyV3.ExportPolicy = workspace.ExportPolicy{}
-	legacyV3.ExportPolicyDigest = "0675d7a2514d6c6031a7b40f0d4d0a1a095433549503c921a48bdf9370fe054f"
-	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), legacyV3); err != nil {
+	unsupported := persisted
+	unsupported.Version = 4
+	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), unsupported); err != nil {
 		t.Fatal(err)
 	}
-	legacyCurrentPolicy := testPolicy
-	legacyCurrentPolicy.Snapshot.Exclude = []string{"excluded"}
-	migrated, err := loadPending(projectState, legacyCurrentPolicy)
-	if err != nil || migrated.ChangeSet.Digest != persisted.ChangeSet.Digest {
-		t.Fatalf("pending v3 compatibility failed: loaded=%+v error=%v", migrated, err)
-	}
-	if _, err := buildPendingReview(migrated, legacyCurrentPolicy, workspace.ReviewOptions{StatOnly: true}, false); err != nil {
-		t.Fatalf("pending v3 review incorrectly applied current Snapshot exclusions: %v", err)
+	if _, err := loadPending(projectState, testPolicy); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported pending schema was accepted: %v", err)
 	}
 	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), persisted); err != nil {
 		t.Fatal(err)
@@ -1860,8 +1868,8 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	}
 	changedPolicy := testPolicy
 	changedPolicy.Export.MaxFileBytes--
-	if loadedAfterChange, err := loadPending(projectState, changedPolicy); err != nil || loadedAfterChange.ChangeSet.Digest != persisted.ChangeSet.Digest {
-		t.Fatalf("self-contained pending Change Set did not survive an unrelated current policy change: loaded=%+v error=%v", loadedAfterChange, err)
+	if _, err := loadPending(projectState, changedPolicy); err == nil || !strings.Contains(err.Error(), "policy") {
+		t.Fatalf("stale-policy pending Work Set was accepted: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(loaded.BaselineRoot, "file.txt"), []byte("tampered baseline\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -1880,80 +1888,6 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	}
 	if err := removePending(projectState); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestLegacyPendingChangeRemainsReviewableWhenHostMatchesBaseline(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	project := filepath.Join(root, "project")
-	mergedSource := filepath.Join(root, "merged-source")
-	projectState := filepath.Join(root, "state", "projects", "project")
-	for _, directory := range []string{project, mergedSource, projectState} {
-		if err := os.MkdirAll(directory, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(project, "file.txt"), []byte("before\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(mergedSource, "file.txt"), []byte("after\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	policyValue := policy.ProjectPolicy{ProjectID: "project", ProjectRoot: project, Export: policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30}, ProtectedPaths: []string{".git"}}
-	compiled, err := policy.CompileExportPolicy(policyValue.Export, policyValue.ProtectedPaths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseline, err := workspace.BuildSnapshotManifest(project, compiled.Snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	merged, err := workspace.BuildSnapshotManifest(mergedSource, compiled.Snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changes, err := workspace.BuildChangeSet(baseline, merged, compiled.Snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	active := &session.Session{ProjectID: "project", ProjectRoot: project, SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest}
-	persisted, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedSource, Merged: merged, ChangeSet: changes})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(persisted.BaselineRoot); err != nil {
-		t.Fatal(err)
-	}
-	persisted.Version = legacyPendingChangeVersion
-	persisted.BaselineRoot = ""
-	persisted.Baseline = baseline
-	persisted.ExportPolicyDigest = "0675d7a2514d6c6031a7b40f0d4d0a1a095433549503c921a48bdf9370fe054f"
-	if err := writePrivateJSON(filepath.Join(projectState, "pending", "change.json"), persisted); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := loadPending(projectState, policyValue)
-	if err != nil {
-		t.Fatal(err)
-	}
-	review, err := buildPendingReview(loaded, policyValue, workspace.ReviewOptions{Context: 1}, true)
-	if err != nil || len(review.Items) != 1 || len(review.Items[0].Hunks) == 0 {
-		t.Fatalf("legacy review=%+v error=%v", review, err)
-	}
-	if err := os.WriteFile(filepath.Join(project, "file.txt"), []byte("host changed\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	metadata, err := buildPendingReview(loaded, policyValue, workspace.ReviewOptions{Context: 1}, true)
-	if err != nil || !metadata.BaselineMissing || metadata.Opaque != 1 || metadata.Items[0].OpaqueReason == "" {
-		t.Fatalf("legacy metadata review=%+v error=%v", metadata, err)
-	}
-	if _, err := buildPendingReview(loaded, policyValue, workspace.ReviewOptions{Context: 1}, false); err == nil {
-		t.Fatal("legacy apply review accepted a changed host baseline")
-	}
-	if state := pendingInventoryState(projectState, "project"); state != "yes" {
-		t.Fatalf("legacy pending inventory=%q", state)
 	}
 }
 

@@ -23,10 +23,11 @@ import (
 	"sunaba/internal/securefs"
 	"sunaba/internal/state"
 	"sunaba/internal/webgateway"
+	"sunaba/internal/workspace"
 )
 
 const (
-	CurrentSchemaVersion = 4
+	CurrentSchemaVersion = 5
 	ProjectFileName      = "project.json"
 	WebOriginsFileName   = "web-origins.txt"
 	maxConfigBytes       = 1 << 20
@@ -51,6 +52,7 @@ type Config struct {
 	Web           WebConfig             `json:"web"`
 	Export        policy.ExportPolicy   `json:"export"`
 	Snapshot      policy.SnapshotPolicy `json:"snapshot"`
+	Bulk          workspace.BulkPolicy  `json:"bulk"`
 	Audit         policy.AuditPolicy    `json:"audit"`
 }
 
@@ -357,7 +359,7 @@ func decodeConfig(data []byte) (Config, bool, error) {
 		}
 		return current, false, nil
 	}
-	if envelope.SchemaVersion < 1 || envelope.SchemaVersion > 3 {
+	if envelope.SchemaVersion < 1 || envelope.SchemaVersion > 4 {
 		return Config{}, false, fmt.Errorf("unsupported Project configuration schema %d", envelope.SchemaVersion)
 	}
 	var legacy legacyConfig
@@ -375,7 +377,7 @@ func decodeConfig(data []byte) (Config, bool, error) {
 			MaxConcurrent: legacy.Model.MaxConcurrent, MaxRequestBytes: legacy.Model.MaxRequestBytes,
 			MaxResponseBytes: legacy.Model.MaxResponseBytes,
 		},
-		Git: legacy.Git, Web: legacy.Web, Export: legacy.Export, Snapshot: legacy.Snapshot, Audit: legacy.Audit,
+		Git: legacy.Git, Web: legacy.Web, Export: legacy.Export, Snapshot: legacy.Snapshot, Bulk: workspace.DefaultBulkPolicyV1(), Audit: legacy.Audit,
 	}
 	return current, true, nil
 }
@@ -401,6 +403,7 @@ func FromPolicy(effective policy.ProjectPolicy) (Config, []webgateway.OriginRule
 		},
 		Export:   effective.Export,
 		Snapshot: effective.Snapshot,
+		Bulk:     effective.Bulk,
 		Audit:    effective.Audit,
 	}
 	return normalizeConfig(config), normalizeRules(effective.Web.CustomRules)
@@ -438,7 +441,7 @@ func Validate(config Config, rules []webgateway.OriginRule) error {
 			MaxRequests: config.Web.MaxRequests, MaxConcurrent: config.Web.MaxConcurrent, MaxConnectSeconds: config.Web.MaxConnectSeconds,
 			MaxUploadBytes: config.Web.MaxUploadBytes, MaxDownloadBytes: config.Web.MaxDownloadBytes, MaxTotalBytes: config.Web.MaxTotalBytes,
 		},
-		Export: config.Export, Snapshot: normalizeConfig(config).Snapshot, Audit: config.Audit, ProtectedPaths: []string{".git"}, CreatedAt: created, UpdatedAt: created,
+		Export: config.Export, Snapshot: normalizeConfig(config).Snapshot, Bulk: normalizeConfig(config).Bulk, Audit: config.Audit, ProtectedPaths: []string{".git"}, CreatedAt: created, UpdatedAt: created,
 	}
 	if candidate.Web.Enabled {
 		candidate.Web.BlocklistManifest = filepath.Join(config.ProjectRoot, ".sunaba-validation-blocklist.json")
@@ -489,6 +492,7 @@ func Compile(config Config, rules []webgateway.OriginRule, base policy.ProjectPo
 	}
 	result.Export = config.Export
 	result.Snapshot = normalizeConfig(config).Snapshot
+	result.Bulk = normalizeConfig(config).Bulk
 	result.Audit = config.Audit
 	result.ProtectedPaths = []string{".git"}
 	result.UpdatedAt = now.UTC()
@@ -621,6 +625,9 @@ func normalizeConfig(config Config) Config {
 		return strings.ToLower(config.Snapshot.Exclude[i]) < strings.ToLower(config.Snapshot.Exclude[j])
 	})
 	config.Snapshot.Exclude = slices.CompactFunc(config.Snapshot.Exclude, strings.EqualFold)
+	if bulk, err := workspace.CanonicalBulkPolicy(config.Bulk); err == nil {
+		config.Bulk = bulk
+	}
 	return config
 }
 

@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 3
+export const PROTOCOL_VERSION = 4
 export const MAX_FRAME_BYTES = 256 << 10
 export const MAX_TEXT_BYTES = 64 << 10
 export const MAX_INPUT_BYTES = 4 << 10
@@ -29,6 +29,8 @@ export type ChangesView = {
   files: ChangeFile[]
   rows: DiffRow[]
 }
+export type BulkItem = { action_id: string; bulk_id: string; root: string; reason: string; capture_state: string; disposition: string; retention: string; summary: string; digest_prefix: string }
+export type BulkView = { page: number; pages: number; selected_action_id: string; items: BulkItem[] }
 export type View = {
   version: number
   type: "view"
@@ -39,6 +41,7 @@ export type View = {
   fields: TextField[]
   actions: Action[]
   changes: ChangesView | null
+  bulk: BulkView | null
 }
 export type EventKind = "action" | "cancel" | "exit" | "terminal_error"
 export type UIEvent = {
@@ -115,6 +118,16 @@ function validateChanges(value: unknown, actions: Set<string>): value is Changes
   return true
 }
 
+function validateBulk(value: unknown, actions: Set<string>): value is BulkView {
+	if (!record(value) || !exactKeys(value, ["page", "pages", "selected_action_id", "items"]) || !Number.isSafeInteger(value.page) || !Number.isSafeInteger(value.pages) || Number(value.page) <= 0 || Number(value.pages) < Number(value.page) || !idPattern.test(String(value.selected_action_id)) || !Array.isArray(value.items) || value.items.length === 0 || value.items.length > 20) return false
+	const seen = new Set<string>()
+	for (const item of value.items) {
+		if (!record(item) || !exactKeys(item, ["action_id", "bulk_id", "root", "reason", "capture_state", "disposition", "retention", "summary", "digest_prefix"]) || !idPattern.test(String(item.action_id)) || !actions.has(String(item.action_id)) || seen.has(String(item.action_id)) || !safeText(item.bulk_id, 128) || item.bulk_id === "" || !safeText(item.root, MAX_TEXT_BYTES) || item.root === "" || !safeText(item.reason, MAX_TEXT_BYTES) || item.reason === "" || !safeText(item.capture_state, 64) || item.capture_state === "" || !safeText(item.disposition, 64) || item.disposition === "" || !safeText(item.retention, MAX_TEXT_BYTES) || !safeText(item.summary, MAX_TEXT_BYTES) || item.summary === "" || !safeText(item.digest_prefix, 64)) return false
+		seen.add(String(item.action_id))
+	}
+	return seen.has(String(value.selected_action_id))
+}
+
 export function parseView(payload: Uint8Array, expected: { projectID: string; nonce: string }): View {
   if (payload.byteLength === 0 || payload.byteLength > MAX_FRAME_BYTES) throw new Error("view exceeds its size bound")
   let value: unknown
@@ -123,7 +136,7 @@ export function parseView(payload: Uint8Array, expected: { projectID: string; no
   } catch {
     throw new Error("view is not valid UTF-8 JSON")
   }
-  if (!record(value) || !exactKeys(value, ["version", "type", "screen_id", "revision", "binding", "title", "fields", "actions", "changes"])) throw new Error("view has unknown or missing fields")
+  if (!record(value) || !exactKeys(value, ["version", "type", "screen_id", "revision", "binding", "title", "fields", "actions", "changes", "bulk"])) throw new Error("view has unknown or missing fields")
   if (value.version !== PROTOCOL_VERSION || value.type !== "view" || !screenIDs.has(String(value.screen_id)) || !Number.isSafeInteger(value.revision) || Number(value.revision) <= 0 || !validateBinding(value.binding)) throw new Error("invalid view envelope")
   if (value.binding.project_id !== expected.projectID || value.binding.nonce !== expected.nonce || !safeText(value.title, MAX_TEXT_BYTES) || !Array.isArray(value.fields) || value.fields.length > 256 || !Array.isArray(value.actions) || value.actions.length > 32) throw new Error("unbound or oversized view")
   const fieldIDs = new Set<string>()
@@ -137,6 +150,7 @@ export function parseView(payload: Uint8Array, expected: { projectID: string; no
     actionIDs.add(String(action.id))
   }
   if (value.changes !== null && (value.screen_id !== "changes" || !validateChanges(value.changes, actionIDs))) throw new Error("invalid structured Changes view")
+  if (value.bulk !== null && (value.screen_id !== "changes" || value.changes !== null || !validateBulk(value.bulk, actionIDs))) throw new Error("invalid structured Bulk view")
   return value as View
 }
 

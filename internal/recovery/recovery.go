@@ -12,13 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"sunaba/internal/policy"
 	"sunaba/internal/securefs"
 	"sunaba/internal/unixsocket"
 	"sunaba/internal/workspace"
 )
 
 const (
-	Version  = 1
+	Version  = 2
 	FileName = "dev-export-recovery.json"
 )
 
@@ -27,23 +28,26 @@ var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{5,63}$`)
 // State is host-owned metadata for a stopped VM whose export did not
 // complete. It contains no capability or credential.
 type State struct {
-	Version            int                        `json:"version"`
-	ProjectID          string                     `json:"project_id"`
-	ProjectRoot        string                     `json:"project_root"`
-	VMID               string                     `json:"vm_id"`
-	SessionID          string                     `json:"session_id"`
-	Container          string                     `json:"container"`
-	RuntimeBase        string                     `json:"runtime_base"`
-	RuntimeRoot        string                     `json:"runtime_root"`
-	WorkspacePath      string                     `json:"workspace_path"`
-	Mode               string                     `json:"mode,omitempty"`
-	Baseline           workspace.SnapshotManifest `json:"baseline"`
-	ExportPolicyDigest string                     `json:"export_policy_digest"`
-	GitGateway         bool                       `json:"git_gateway"`
-	WebGateway         bool                       `json:"web_gateway"`
-	PendingExport      *PendingExport             `json:"pending_export,omitempty"`
-	Reason             string                     `json:"reason"`
-	CreatedAt          time.Time                  `json:"created_at"`
+	Version             int                            `json:"version"`
+	ProjectID           string                         `json:"project_id"`
+	ProjectRoot         string                         `json:"project_root"`
+	VMID                string                         `json:"vm_id"`
+	SessionID           string                         `json:"session_id"`
+	Container           string                         `json:"container"`
+	RuntimeBase         string                         `json:"runtime_base"`
+	RuntimeRoot         string                         `json:"runtime_root"`
+	WorkspacePath       string                         `json:"workspace_path"`
+	Mode                string                         `json:"mode,omitempty"`
+	Baseline            workspace.SnapshotManifest     `json:"baseline"`
+	BaselinePartitioned workspace.PartitionedManifest  `json:"baseline_partitioned"`
+	BaselineBulk        []workspace.BulkRecord         `json:"baseline_bulk"`
+	ExportPolicyDigest  string                         `json:"export_policy_digest"`
+	WorkspacePolicy     policy.CompiledWorkspacePolicy `json:"workspace_policy"`
+	GitGateway          bool                           `json:"git_gateway"`
+	WebGateway          bool                           `json:"web_gateway"`
+	PendingExport       *PendingExport                 `json:"pending_export,omitempty"`
+	Reason              string                         `json:"reason"`
+	CreatedAt           time.Time                      `json:"created_at"`
 }
 
 // RuntimeMode returns the bound VM mode. Records created before secure frozen
@@ -58,9 +62,8 @@ func (s State) RuntimeMode() string {
 // PendingExport is a frozen, already verified export whose host pending
 // transaction did not commit. It allows retry without restarting the VM.
 type PendingExport struct {
-	MergedRoot      string `json:"merged_root"`
-	MergedDigest    string `json:"merged_digest"`
-	ChangeSetDigest string `json:"change_set_digest"`
+	MergedRoot string                   `json:"merged_root"`
+	WorkSet    workspace.PendingWorkSet `json:"work_set"`
 }
 
 func RuntimeBase(_ string, vmID string) string {
@@ -204,11 +207,20 @@ func validate(projectState string, state State) error {
 	for _, expected := range expectedRuntimeBases {
 		matchesRuntimeBase = matchesRuntimeBase || state.RuntimeBase == expected
 	}
-	if state.Container != "sunaba-"+state.ProjectID+"-"+state.VMID || !matchesRuntimeBase || state.RuntimeRoot != filepath.Join(state.RuntimeBase, "sunaba-vm-"+state.VMID) || state.WorkspacePath != "/workspace/sunaba-"+state.VMID || state.Baseline.Root != state.ProjectRoot {
+	if state.Container != "sunaba-"+state.ProjectID+"-"+state.VMID || !matchesRuntimeBase || state.RuntimeRoot != filepath.Join(state.RuntimeBase, "sunaba-vm-"+state.VMID) || state.WorkspacePath != "/workspace/sunaba-"+state.VMID || state.Baseline.Root != filepath.Join(state.RuntimeRoot, "snapshot") {
 		return fmt.Errorf("dev recovery paths do not match its Project and VM identity")
 	}
-	if len(state.ExportPolicyDigest) != 64 || len(state.Baseline.Digest) != 64 {
+	if len(state.ExportPolicyDigest) != 64 || len(state.Baseline.Digest) != 64 || policy.ValidateCompiledWorkspacePolicy(state.WorkspacePolicy) != nil || state.WorkspacePolicy.Core.Digest != state.ExportPolicyDigest || state.BaselinePartitioned.Root != state.ProjectRoot || state.BaselinePartitioned.Core.Root != state.ProjectRoot || state.BaselinePartitioned.Core.Digest != state.Baseline.Digest || state.BaselinePartitioned.PolicyDigest != state.WorkspacePolicy.Digest || len(state.BaselinePartitioned.Digest) != 64 || len(state.BaselineBulk) != len(state.BaselinePartitioned.BulkRoots) {
 		return fmt.Errorf("dev recovery policy or baseline digest is invalid")
+	}
+	rebuiltPartition, err := workspace.RebuildPartitionedManifestDigest(state.BaselinePartitioned)
+	if err != nil || rebuiltPartition.Digest != state.BaselinePartitioned.Digest {
+		return fmt.Errorf("dev recovery partitioned baseline is invalid")
+	}
+	for index, record := range state.BaselineBulk {
+		if record.Root != state.BaselinePartitioned.BulkRoots[index].Root || record.Baseline != state.BaselinePartitioned.BulkRoots[index] {
+			return fmt.Errorf("dev recovery Bulk baseline is invalid")
+		}
 	}
 	if securefs.CheckCanonicalOwnedDir(state.RuntimeBase) != nil || securefs.CheckCanonicalOwnedDir(state.RuntimeRoot) != nil || securefs.CheckCanonicalOwnedDir(filepath.Join(state.RuntimeRoot, "snapshot")) != nil {
 		return fmt.Errorf("dev recovery runtime is not a private current-user directory")
@@ -216,7 +228,7 @@ func validate(projectState string, state State) error {
 	if state.PendingExport != nil {
 		expectedMergedRoot := filepath.Join(state.RuntimeRoot, "sunaba-quarantine-"+state.SessionID, "sunaba-merged-"+state.SessionID)
 		pending := state.PendingExport
-		if pending.MergedRoot != expectedMergedRoot || len(pending.MergedDigest) != 64 || len(pending.ChangeSetDigest) != 64 || securefs.CheckCanonicalOwnedDir(expectedMergedRoot) != nil {
+		if pending.MergedRoot != expectedMergedRoot || pending.WorkSet.ProjectID != state.ProjectID || pending.WorkSet.ProjectRoot != state.ProjectRoot || pending.WorkSet.VMID != state.VMID || pending.WorkSet.SessionID != state.SessionID || pending.WorkSet.WorkspacePolicyDigest != state.WorkspacePolicy.Digest || pending.WorkSet.Result.Core.Root != pending.MergedRoot || workspace.ValidatePendingWorkSet(pending.WorkSet, state.WorkspacePolicy.Core.Snapshot) != nil || securefs.CheckCanonicalOwnedDir(expectedMergedRoot) != nil {
 			return fmt.Errorf("dev recovery pending export is invalid")
 		}
 	}

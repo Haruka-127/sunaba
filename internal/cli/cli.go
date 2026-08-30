@@ -29,6 +29,7 @@ import (
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
 	"sunaba/internal/recovery"
+	"sunaba/internal/retention"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/trustedui"
@@ -751,6 +752,14 @@ func (a *app) applyPendingApproved(projectPolicy policy.ProjectPolicy, projectSt
 }
 
 func (a *app) applyPending(projectPolicy policy.ProjectPolicy, projectState string, pending pendingChange, review workspace.Review, confirm func(approval.Request) error) error {
+	latest, err := loadPending(projectState, projectPolicy)
+	if err != nil {
+		return err
+	}
+	if latest.WorkSet.Digest != pending.WorkSet.Digest || latest.Resolution.Digest != pending.Resolution.Digest {
+		return fmt.Errorf("pending Work Set or Resolution changed; review the current plan again")
+	}
+	pending = latest
 	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
 	if err != nil {
 		return err
@@ -759,8 +768,29 @@ func (a *app) applyPending(projectPolicy policy.ProjectPolicy, projectState stri
 	if err != nil {
 		return err
 	}
-	binding := approval.Binding{ProjectID: pending.ProjectID, BaselineDigest: pending.Baseline.Digest, MergedDigest: pending.Merged.Digest, ChangeSetDigest: pending.ChangeSet.Digest}
-	request, err := approvals.NewRequest(binding, fmt.Sprintf("%d paths; executable=%d symlink=%d opaque=%d omitted=%d", len(pending.ChangeSet.Changes), review.Executable, review.Symlink, review.Opaque, review.Omitted), 5*time.Minute)
+	applyConfig := hostapply.WorkSetConfig{
+		Store: a.store, ProjectRoot: pending.ProjectRoot, ProjectID: pending.ProjectID, BaselineRoot: pending.BaselineRoot,
+		ResultRoot: pending.MergedRoot, RetainedRoot: filepath.Join(projectState, "retained"), WorkSet: pending.WorkSet,
+		Resolution: pending.Resolution, BulkPolicy: pending.WorkspacePolicy.Bulk, Approvals: approvals, Audit: recorder,
+		SnapshotPolicy: pending.SnapshotPolicy,
+	}
+	if resumed, err := a.resumeRetentionFinalization(projectState, pending, applyConfig); err != nil {
+		return err
+	} else if resumed {
+		return nil
+	}
+	planContext, cancelPlan := context.WithTimeout(context.Background(), 10*time.Minute)
+	plan, err := hostapply.PrepareWorkSetPlan(planContext, applyConfig)
+	cancelPlan()
+	if err != nil {
+		return err
+	}
+	binding := approval.WorkSetApprovalBinding{
+		ProjectID: plan.ProjectID, WorkSetDigest: plan.WorkSetDigest, ResolutionDigest: plan.ResolutionDigest,
+		ApplyPlanDigest: plan.Digest, CoreBaselineDigest: plan.CurrentCoreBaselineDigest,
+		CoreChangeSetDigest: plan.CoreChangeSetDigest, BulkSelectionDigest: plan.BulkSelectionDigest,
+	}
+	request, err := approvals.NewWorkSetRequest(binding, fmt.Sprintf("Normal=%d paths; Bulk=%d paths; executable=%d symlink=%d opaque=%d omitted=%d", len(pending.ChangeSet.Changes), len(pending.WorkSet.Bulk), review.Executable, review.Symlink, review.Opaque, review.Omitted), 5*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -769,59 +799,130 @@ func (a *app) applyPending(projectPolicy policy.ProjectPolicy, projectState stri
 			return err
 		}
 	}
-	grant, err := approvals.Confirm(request.Nonce, binding)
+	grant, err := approvals.ConfirmWorkSet(request.Nonce, binding)
 	if err != nil {
 		return err
 	}
-	snapshotPolicy, err := pendingSnapshotPolicy(pending, projectPolicy)
+	latest, err = loadPending(projectState, projectPolicy)
 	if err != nil {
 		return err
 	}
-	applied, err := hostapply.Apply(hostapply.Config{Store: a.store, ProjectRoot: pending.ProjectRoot, ProjectID: pending.ProjectID, MergedRoot: pending.MergedRoot, Baseline: pending.Baseline, Merged: pending.Merged, ChangeSet: pending.ChangeSet, Approvals: approvals, Grant: grant, Audit: recorder, SnapshotPolicy: snapshotPolicy})
-	if err != nil {
-		return err
+	if latest.WorkSet.Digest != pending.WorkSet.Digest || latest.Resolution.Digest != pending.Resolution.Digest {
+		return fmt.Errorf("pending Work Set or Resolution changed after confirmation")
 	}
-	if applied.Digest != pending.Merged.Digest {
-		return fmt.Errorf("applied Project digest does not match approved Merged View")
+	applyConfig.WorkSet, applyConfig.Resolution, applyConfig.Plan, applyConfig.Grant = latest.WorkSet, latest.Resolution, plan, grant
+	retentionJournal, err := retention.Prepare(projectState, latest.WorkSet, plan)
+	if err != nil {
+		return fmt.Errorf("prepare retention finalization: %w", err)
+	}
+	applyConfig.ProjectCommit = func() error {
+		return retention.MarkProjectCommitted(projectState, retentionJournal)
+	}
+	applyContext, cancelApply := context.WithTimeout(context.Background(), 10*time.Minute)
+	applied, err := hostapply.ApplyWorkSet(applyContext, applyConfig)
+	cancelApply()
+	if err != nil {
+		currentJournal, journalErr := retention.Load(projectState)
+		if journalErr == nil && currentJournal.Phase == "prepared" {
+			resumeContext, cancelResume := context.WithTimeout(context.Background(), 10*time.Minute)
+			committed, resumeErr := hostapply.ResumeWorkSetTransaction(resumeContext, applyConfig)
+			cancelResume()
+			if resumeErr == nil && !committed {
+				_ = retention.RemovePrepared(projectState, currentJournal)
+			}
+		}
+		return fmt.Errorf("Work Set apply did not complete; Project and retained data remain recoverable: %w", err)
+	}
+	if applied.Digest != pending.WorkSet.Result.Core.Digest {
+		return fmt.Errorf("applied Project Core digest does not match approved projection")
+	}
+	if err := retention.Finalize(a.store.Root, projectState, latest.WorkSet, plan); err != nil {
+		return fmt.Errorf("Project apply committed; retention cleanup is pending and data was preserved: %w", err)
+	}
+	finalJournal, err := retention.Load(projectState)
+	if err != nil {
+		return fmt.Errorf("Project apply committed; retention completion marker is unavailable: %w", err)
 	}
 	if err := removePending(projectState); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Applied Change Set %s.\n", pending.ChangeSet.Digest)
+	if err := retention.RemoveFinalized(projectState, finalJournal); err != nil {
+		return fmt.Errorf("Project apply and retention committed, but final journal cleanup remains pending: %w", err)
+	}
+	fmt.Fprintf(a.output, "Applied Work Set %s with Apply Plan %s.\n", pending.WorkSet.Digest, plan.Digest)
 	return nil
 }
 
-func buildPendingReview(pending pendingChange, projectPolicy policy.ProjectPolicy, options workspace.ReviewOptions, allowLegacyMetadata bool) (workspace.Review, error) {
+func (a *app) resumeRetentionFinalization(projectState string, pending pendingChange, cfg hostapply.WorkSetConfig) (bool, error) {
+	journal, err := retention.Load(projectState)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("retention recovery metadata is unsafe: %w", err)
+	}
+	if journal.ProjectID != pending.ProjectID || journal.WorkSetDigest != pending.WorkSet.Digest {
+		return false, fmt.Errorf("retention recovery belongs to a different Work Set")
+	}
+	if err := workspace.ValidateApplyPlan(pending.WorkSet, pending.Resolution, pending.SnapshotPolicy, journal.Plan); err != nil {
+		return false, fmt.Errorf("retention recovery Apply Plan is stale: %w", err)
+	}
+	cfg.Plan = journal.Plan
+	if journal.Phase != "retention_finalized" {
+		resumeContext, cancelResume := context.WithTimeout(context.Background(), 10*time.Minute)
+		committed, resumeErr := hostapply.ResumeWorkSetTransaction(resumeContext, cfg)
+		cancelResume()
+		if resumeErr != nil {
+			return false, fmt.Errorf("recover Project transaction: %w", resumeErr)
+		}
+		if !committed {
+			if journal.Phase != "prepared" {
+				return false, fmt.Errorf("retention journal says Project committed, but approved Project projection is absent")
+			}
+			if err := retention.RemovePrepared(projectState, journal); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		if journal.Phase == "prepared" {
+			if err := retention.MarkProjectCommitted(projectState, journal); err != nil {
+				return false, err
+			}
+		}
+		if err := retention.Finalize(a.store.Root, projectState, pending.WorkSet, journal.Plan); err != nil {
+			return false, fmt.Errorf("Project is committed; retention cleanup remains pending with data preserved: %w", err)
+		}
+		journal, err = retention.Load(projectState)
+		if err != nil {
+			return false, err
+		}
+	}
+	if err := removePending(projectState); err != nil {
+		return false, fmt.Errorf("Project and retention are committed; pending metadata cleanup failed: %w", err)
+	}
+	if err := retention.RemoveFinalized(projectState, journal); err != nil {
+		return false, fmt.Errorf("Project and retention are committed; final journal cleanup failed: %w", err)
+	}
+	fmt.Fprintf(a.output, "Recovered and finalized Work Set %s with Apply Plan %s.\n", pending.WorkSet.Digest, journal.ApplyPlanDigest)
+	return true, nil
+}
+
+func buildPendingReview(pending pendingChange, projectPolicy policy.ProjectPolicy, options workspace.ReviewOptions, _ bool) (workspace.Review, error) {
 	snapshotPolicy, err := pendingSnapshotPolicy(pending, projectPolicy)
 	if err != nil {
 		return workspace.Review{}, err
 	}
-	baselineRoot := pending.BaselineRoot
-	if pending.Version == legacyPendingChangeVersion {
-		baselineRoot = pending.ProjectRoot
-		if allowLegacyMetadata {
-			current, currentErr := workspace.BuildSnapshotManifest(baselineRoot, snapshotPolicy)
-			if currentErr != nil || current.Digest != pending.Baseline.Digest {
-				return workspace.BuildMetadataOnlyReview(pending.Baseline, pending.Merged, pending.ChangeSet, snapshotPolicy, options)
-			}
-		}
-	}
-	return workspace.BuildReview(baselineRoot, pending.MergedRoot, pending.Baseline, pending.Merged, pending.ChangeSet, snapshotPolicy, options)
+	return workspace.BuildReview(pending.BaselineRoot, pending.MergedRoot, pending.Baseline, pending.Merged, pending.ChangeSet, snapshotPolicy, options)
 }
 
-func pendingSnapshotPolicy(pending pendingChange, projectPolicy policy.ProjectPolicy) (workspace.SnapshotPolicy, error) {
-	if pending.Version == pendingChangeVersion {
-		compiled, err := policy.ValidateCompiledExportPolicy(pending.SnapshotPolicy, pending.ExportPolicy)
-		if err != nil || compiled.Digest != pending.ExportPolicyDigest {
-			return workspace.SnapshotPolicy{}, fmt.Errorf("pending Change Set saved export policy is invalid")
-		}
-		return compiled.Snapshot, nil
+func pendingSnapshotPolicy(pending pendingChange, _ policy.ProjectPolicy) (workspace.SnapshotPolicy, error) {
+	if pending.Version != pendingChangeVersion {
+		return workspace.SnapshotPolicy{}, fmt.Errorf("pending Work Set schema is unsupported")
 	}
-	compiled, err := policy.CompileLegacyExportPolicyV1(projectPolicy.Export, projectPolicy.ProtectedPaths)
-	if err != nil {
-		return workspace.SnapshotPolicy{}, err
+	if err := policy.ValidateCompiledWorkspacePolicy(pending.WorkspacePolicy); err != nil || pending.WorkspacePolicy.Digest != pending.WorkSet.WorkspacePolicyDigest {
+		return workspace.SnapshotPolicy{}, fmt.Errorf("pending Work Set saved workspace policy is invalid")
 	}
-	return compiled.Snapshot, nil
+	return pending.WorkspacePolicy.Core.Snapshot, nil
 }
 
 func (a *app) approvals(ctx context.Context, dir string) error {
@@ -853,9 +954,12 @@ func (a *app) recreate(ctx context.Context, dir string, discard bool) error {
 		return err
 	}
 	if _, err := os.Lstat(filepath.Join(projectState, "pending", "change.json")); err == nil && !discard {
-		return fmt.Errorf("pending Change Set exists; export/apply it or pass --discard-pending explicitly")
+		return fmt.Errorf("pending Work Set exists; export/apply it or pass --discard-pending explicitly")
 	}
 	if discard {
+		if pending, pendingErr := loadPending(projectState, projectPolicy); pendingErr == nil && len(pending.WorkSet.Bulk) > 0 {
+			return fmt.Errorf("refusing to discard a Work Set containing retained Bulk data without exact per-path dispositions")
+		}
 		if err := removePending(projectState); err != nil {
 			return err
 		}
@@ -969,8 +1073,9 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 	}
 	if _, err := os.Lstat(filepath.Join(target.ProjectState, "pending", "change.json")); err == nil {
 		if !discard {
-			return fmt.Errorf("pending Change Set exists; pass --discard-pending explicitly to destroy it")
+			return fmt.Errorf("pending Work Set exists; resolve/apply it before destroying the Project")
 		}
+		return fmt.Errorf("refusing to discard a schema-v5 Work Set without exact Work Set, Bulk, and retained-byte acknowledgements")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect pending Change Set: %w", err)
 	}
@@ -1037,6 +1142,13 @@ func (a *app) destroy(ctx context.Context, selector projectSelector, yes, discar
 		if item.Labels["dev.sunaba.owner"] == "sunaba-supervisor" && item.Labels["dev.sunaba.project"] == target.ProjectID {
 			return fmt.Errorf("refusing to delete Project state while owned VM %s still exists", item.Name)
 		}
+	}
+	retained, err := retention.Inspect(target.ProjectState)
+	if err != nil {
+		return err
+	}
+	if retained.BlocksProjectRemoval() {
+		return fmt.Errorf("refusing to destroy Project state with retained Bulk data or unfinished retention finalization")
 	}
 	if discard {
 		if err := removePending(target.ProjectState); err != nil {

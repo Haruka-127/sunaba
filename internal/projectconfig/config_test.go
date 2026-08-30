@@ -324,6 +324,7 @@ func TestStoreLoadsSchemaV1WithoutAutomaticallySelectingPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy["schema_version"] = float64(1)
+	delete(legacy, "bulk")
 	delete(legacy["web"].(map[string]any), "origin_presets")
 	data, _ = json.MarshalIndent(legacy, "", "  ")
 	if err := os.WriteFile(paths.Project, append(data, '\n'), 0600); err != nil {
@@ -357,6 +358,7 @@ func TestStoreMigratesSchemaV3AuthOnlyWithoutTouchingProjectState(t *testing.T) 
 		t.Fatal(err)
 	}
 	legacy["schema_version"] = float64(3)
+	delete(legacy, "bulk")
 	legacy["model"].(map[string]any)["auth"] = "api_key"
 	data, _ = json.MarshalIndent(legacy, "", "  ")
 	if err := os.WriteFile(paths.Project, append(data, '\n'), 0600); err != nil {
@@ -380,7 +382,7 @@ func TestStoreMigratesSchemaV3AuthOnlyWithoutTouchingProjectState(t *testing.T) 
 		t.Fatalf("loaded=%+v rules=%+v error=%v", loaded, loadedRules, err)
 	}
 	migrated, _ := os.ReadFile(paths.Project)
-	if strings.Contains(string(migrated), `"auth"`) || !strings.Contains(string(migrated), `"schema_version": 4`) {
+	if strings.Contains(string(migrated), `"auth"`) || !strings.Contains(string(migrated), `"schema_version": 5`) {
 		t.Fatalf("Project auth was not removed by migration: %s", migrated)
 	}
 	for path, content := range map[string]string{vmState: "vm-identity-sentinel", pending: "pending-change-set-sentinel"} {

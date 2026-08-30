@@ -58,6 +58,7 @@ func (a *app) command() *urfavecli.Command {
 		a.execCommand(),
 		a.simpleProjectCommand("status", "Show Project status", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.status(ctx, dir) })),
 		a.changesCommand(),
+		a.retainedCommand(),
 		a.simpleProjectCommand("approvals", "Process pending host approvals", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.approvals(ctx, dir) })),
 		a.simpleProjectCommand("recreate", "Recreate the Project VM from a clean state", projectSelectorFlags(&urfavecli.BoolFlag{Name: "discard-pending", Usage: "Discard the pending Change Set"}), a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
 			return a.recreate(ctx, dir, cmd.Bool("discard-pending"))
@@ -269,7 +270,7 @@ func (a *app) webCommand() *urfavecli.Command {
 }
 
 func (a *app) changesCommand() *urfavecli.Command {
-	commands := make([]*urfavecli.Command, 0, 3)
+	commands := make([]*urfavecli.Command, 0, 5)
 	for _, action := range []string{"export", "review", "apply"} {
 		action := action
 		flags := projectSelectorFlags()
@@ -287,7 +288,85 @@ func (a *app) changesCommand() *urfavecli.Command {
 			return a.changes(ctx, action, dir, workspace.ReviewOptions{Context: cmd.Int("context"), StatOnly: cmd.Bool("stat"), Path: cmd.String("path")}, cmd.Bool("discard-external-git"))
 		}))})
 	}
+	commands = append(commands,
+		&urfavecli.Command{Name: "status", Usage: "Show the current Work Set and Apply Plan readiness", Flags: projectSelectorFlags(&urfavecli.BoolFlag{Name: "json", Usage: "Output bounded JSON", OnlyOnce: true}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.changesStatus(dir, cmd.Bool("json"))
+		}))},
+		a.changesBulkCommand(),
+	)
 	return &urfavecli.Command{Name: "changes", Usage: "Export, review, and apply Project changes", Commands: commands}
+}
+
+func (a *app) changesBulkCommand() *urfavecli.Command {
+	return &urfavecli.Command{Name: "bulk", Usage: "Review and resolve bounded Bulk paths", Commands: []*urfavecli.Command{
+		{Name: "list", Usage: "List Bulk roots without descendant filenames", Flags: projectSelectorFlags(&urfavecli.BoolFlag{Name: "json", Usage: "Output bounded JSON", OnlyOnce: true}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.changesBulkList(dir, cmd.Bool("json"))
+		}))},
+		{Name: "show", Usage: "Show one Bulk root by opaque ID", ArgsUsage: "<bulk-id>", Flags: projectSelectorFlags(), Action: a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			if cmd.NArg() != 1 {
+				return fmt.Errorf("changes bulk show requires one Bulk ID")
+			}
+			return a.changesBulkShow(dir, cmd.Args().First())
+		})},
+		{Name: "resolve", Usage: "Set one reversible Bulk disposition", ArgsUsage: "<bulk-id>", Flags: projectSelectorFlags(
+			&urfavecli.BoolFlag{Name: "keep-host", Usage: "Keep the host path unchanged", OnlyOnce: true},
+			&urfavecli.BoolFlag{Name: "retain-artifact", Usage: "Pin the retained object as an artifact", OnlyOnce: true},
+			&urfavecli.BoolFlag{Name: "discard", Usage: "Discard exact VM-only data after final approval", OnlyOnce: true},
+			&urfavecli.StringFlag{Name: "expect-workset", Usage: "Exact current Work Set digest", Required: true, OnlyOnce: true},
+			&urfavecli.StringFlag{Name: "expect-bulk", Usage: "Exact current Bulk object digest", Required: true, OnlyOnce: true},
+		), Action: a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			if cmd.NArg() != 1 {
+				return fmt.Errorf("changes bulk resolve requires one Bulk ID")
+			}
+			dispositions := map[string]string{"keep-host": workspace.DispositionKeepHost, "retain-artifact": workspace.DispositionRetainArtifact, "discard": workspace.DispositionDiscard}
+			selected := ""
+			for flag, disposition := range dispositions {
+				if cmd.Bool(flag) {
+					if selected != "" {
+						return fmt.Errorf("choose exactly one Bulk disposition")
+					}
+					selected = disposition
+				}
+			}
+			if selected == "" {
+				return fmt.Errorf("choose exactly one Bulk disposition")
+			}
+			return a.changesBulkResolve(dir, cmd.Args().First(), cmd.String("expect-workset"), cmd.String("expect-bulk"), selected)
+		})},
+		{Name: "review-normally", Usage: "Create a derived Work Set with one exact Bulk path in Normal review", ArgsUsage: "<bulk-id>", Flags: projectSelectorFlags(
+			&urfavecli.StringFlag{Name: "expect-workset", Usage: "Exact current Work Set digest", Required: true, OnlyOnce: true},
+			&urfavecli.StringFlag{Name: "expect-bulk", Usage: "Exact current Bulk object digest", Required: true, OnlyOnce: true},
+		), Action: a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			if cmd.NArg() != 1 {
+				return fmt.Errorf("changes bulk review-normally requires one Bulk ID")
+			}
+			return a.changesBulkReviewNormally(ctx, dir, cmd.Args().First(), cmd.String("expect-workset"), cmd.String("expect-bulk"))
+		})},
+	}}
+}
+
+func (a *app) retainedCommand() *urfavecli.Command {
+	return &urfavecli.Command{Name: "retained", Usage: "Manage Project-bound retained Bulk data", Commands: []*urfavecli.Command{
+		{Name: "list", Usage: "List retained items without descendant filenames", Flags: projectSelectorFlags(&urfavecli.BoolFlag{Name: "json", Usage: "Output bounded JSON", OnlyOnce: true}), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			return a.retainedList(dir, cmd.Bool("json"))
+		}))},
+		{Name: "show", Usage: "Show one retained item by opaque ID", ArgsUsage: "<retained-id>", Flags: projectSelectorFlags(), Action: a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			if cmd.NArg() != 1 {
+				return fmt.Errorf("retained show requires one retained ID")
+			}
+			return a.retainedShow(dir, cmd.Args().First())
+		})},
+		{Name: "discard", Usage: "Permanently discard one exact retained item", ArgsUsage: "<retained-id>", Flags: projectSelectorFlags(
+			&urfavecli.StringFlag{Name: "expect-object", Usage: "Exact retained object digest", Required: true, OnlyOnce: true},
+			&urfavecli.Int64Flag{Name: "expect-bytes", Usage: "Exact retained logical byte count", Required: true, OnlyOnce: true},
+			&urfavecli.BoolFlag{Name: "yes", Usage: "Confirm permanent deletion", Required: true, OnlyOnce: true},
+		), Action: a.withProjectSelector(func(ctx context.Context, cmd *urfavecli.Command, dir string) error {
+			if cmd.NArg() != 1 {
+				return fmt.Errorf("retained discard requires one retained ID")
+			}
+			return a.retainedDiscard(dir, cmd.Args().First(), cmd.String("expect-object"), cmd.Int64("expect-bytes"), cmd.Bool("yes"))
+		})},
+	}}
 }
 
 func (a *app) firewallCommand() *urfavecli.Command {

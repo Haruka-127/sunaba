@@ -123,6 +123,30 @@ function renderText(view: View, selected: number, inputMode: boolean, input: str
     }
     return new StyledText(chunks)
   }
+  if (view.bulk) {
+    const itemActions = new Set(view.bulk.items.map((item) => item.action_id))
+    const otherActions = view.actions.filter((action) => !itemActions.has(action.id))
+    const selectedAction = view.actions[selected]?.id
+    const selectedItem = Math.max(0, view.bulk.items.findIndex((item) => item.action_id === selectedAction))
+    const capacity = Math.max(1, Math.floor((Math.max(12, height) - 7 - otherActions.length) / 5))
+    const start = Math.min(Math.max(0, selectedItem - capacity + 1), Math.max(0, view.bulk.items.length - capacity))
+    const visible = view.bulk.items.slice(start, start + capacity)
+    plain(`sunaba · Changes\n${view.title}\nBulk paths ${view.bulk.page}/${view.bulk.pages} · items ${start + 1}-${start + visible.length}/${view.bulk.items.length}\n\n`)
+    for (const item of visible) {
+      const actionIndex = view.actions.findIndex((action) => action.id === item.action_id)
+      plain(`${actionIndex === selected ? ">" : " "} ${item.root}\n`)
+      plain(`  ${item.summary} · ${item.capture_state}\n`)
+      plain(`  Why: ${item.reason}\n`)
+      plain(`  Host: ${item.disposition} · Data: ${item.retention}\n`)
+      plain(`  Digest: ${item.digest_prefix}\n`)
+    }
+    for (let index = 0; index < view.actions.length; index++) {
+      if (itemActions.has(view.actions[index].id)) continue
+      plain(`${index === selected ? ">" : " "} ${view.actions[index].label}\n`)
+    }
+    plain(`\nArrow/Tab select · Enter details · Escape keep pending`)
+    return new StyledText(chunks)
+  }
   plain(`sunaba · ${screenName(view.screen_id)}\n${view.title}\n\n`)
   for (const field of view.fields) {
     plain(`${field.label}: `)

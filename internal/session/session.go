@@ -26,6 +26,7 @@ import (
 	"sunaba/internal/externalgit"
 	"sunaba/internal/lease"
 	"sunaba/internal/opencode"
+	"sunaba/internal/policy"
 	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
@@ -56,44 +57,48 @@ type Event struct {
 }
 
 type Config struct {
-	Store              *state.Store
-	Runtime            runtime.Runtime
-	ProjectRoot        string
-	RuntimeBase        string
-	VMID               string
-	SessionID          string
-	Mode               string
-	DevNetworkName     string
-	DevNetworkVerify   func(context.Context) error
-	DevNetworkQuiesce  func(context.Context) error
-	DevNetworkClose    func(context.Context) error
-	Image              string
-	CPUs               int
-	Memory             string
-	DiskBytes          int64
-	ProcessMax         int64
-	FileSizeMax        int64
-	OpenFileMax        int64
-	GuestRelayBinary   string
-	ProviderConfig     []byte
-	ModelGateway       http.Handler
-	ModelGatewayClose  func() error
-	ModelToken         string
-	ModelAuth          ModelAuthSnapshot
-	GitGateway         http.Handler
-	GitRemotes         []GitRemote
-	GitGatewayClose    func() error
-	WebGateway         http.Handler
-	WebToken           string
-	WebGatewayClose    func() error
-	ServerPassword     string
-	LeaseTTL           time.Duration
-	Audit              *audit.Recorder
-	OnEvent            func(Event)
-	SnapshotPolicy     workspace.SnapshotPolicy
-	ApprovedSnapshot   workspace.SnapshotManifest
-	ExportPolicy       workspace.ExportPolicy
-	ExportPolicyDigest string
+	Store                 *state.Store
+	Runtime               runtime.Runtime
+	ProjectRoot           string
+	RuntimeBase           string
+	VMID                  string
+	SessionID             string
+	Mode                  string
+	DevNetworkName        string
+	DevNetworkVerify      func(context.Context) error
+	DevNetworkQuiesce     func(context.Context) error
+	DevNetworkClose       func(context.Context) error
+	Image                 string
+	CPUs                  int
+	Memory                string
+	DiskBytes             int64
+	ProcessMax            int64
+	FileSizeMax           int64
+	OpenFileMax           int64
+	GuestRelayBinary      string
+	ProviderConfig        []byte
+	ModelGateway          http.Handler
+	ModelGatewayClose     func() error
+	ModelToken            string
+	ModelAuth             ModelAuthSnapshot
+	GitGateway            http.Handler
+	GitRemotes            []GitRemote
+	GitGatewayClose       func() error
+	WebGateway            http.Handler
+	WebToken              string
+	WebGatewayClose       func() error
+	ServerPassword        string
+	LeaseTTL              time.Duration
+	Audit                 *audit.Recorder
+	OnEvent               func(Event)
+	SnapshotPolicy        workspace.SnapshotPolicy
+	ApprovedSnapshot      workspace.SnapshotManifest
+	ApprovedPartitioned   workspace.PartitionedManifest
+	ApprovedBulk          []workspace.BulkRecord
+	ExportPolicy          workspace.ExportPolicy
+	ExportPolicyDigest    string
+	BulkPolicy            workspace.BulkPolicy
+	WorkspacePolicyDigest string
 }
 
 type RecoveryConfig struct {
@@ -104,6 +109,7 @@ type RecoveryConfig struct {
 	SnapshotPolicy     workspace.SnapshotPolicy
 	ExportPolicy       workspace.ExportPolicy
 	ExportPolicyDigest string
+	WorkspacePolicy    policy.CompiledWorkspacePolicy
 	DevNetworkName     string
 	DevNetworkQuiesce  func(context.Context) error
 	DevNetworkClose    func(context.Context) error
@@ -133,20 +139,24 @@ type Activation struct {
 }
 
 type Session struct {
-	ProjectID          string
-	ProjectRoot        string
-	VMID               string
-	SessionID          string
-	Root               string
-	Container          string
-	WorkspacePath      string
-	AttachURL          string
-	Baseline           workspace.SnapshotManifest
-	SnapshotRoot       string
-	SnapshotPolicy     workspace.SnapshotPolicy
-	ExportPolicy       workspace.ExportPolicy
-	ExportPolicyDigest string
-	modelAuth          ModelAuthSnapshot
+	ProjectID             string
+	ProjectRoot           string
+	VMID                  string
+	SessionID             string
+	Root                  string
+	Container             string
+	WorkspacePath         string
+	AttachURL             string
+	Baseline              workspace.SnapshotManifest
+	BaselinePartitioned   workspace.PartitionedManifest
+	BaselineBulk          []workspace.BulkRecord
+	SnapshotRoot          string
+	SnapshotPolicy        workspace.SnapshotPolicy
+	ExportPolicy          workspace.ExportPolicy
+	ExportPolicyDigest    string
+	BulkPolicy            workspace.BulkPolicy
+	WorkspacePolicyDigest string
+	modelAuth             ModelAuthSnapshot
 
 	cfg                Config
 	lifecycleContext   context.Context
@@ -179,6 +189,7 @@ type ExportResult struct {
 	MergedRoot string
 	Merged     workspace.SnapshotManifest
 	ChangeSet  workspace.ChangeSet
+	WorkSet    workspace.PendingWorkSet
 }
 
 // RecoveryRequiredError reports that export was refused and the dev VM has
@@ -207,6 +218,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		ProjectID: projectLock.ProjectID, ProjectRoot: projectLock.ProjectRoot,
 		VMID: cfg.VMID, SessionID: cfg.SessionID, cfg: cfg, lifecycleContext: ctx, projectLock: projectLock,
 		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicy: cfg.ExportPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
+		BulkPolicy: cfg.BulkPolicy, WorkspacePolicyDigest: cfg.WorkspacePolicyDigest,
 		modelAuth: cloneModelAuthSnapshot(cfg.ModelAuth),
 	}
 	defer func() {
@@ -250,6 +262,10 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 	}
 	if err := s.emit("snapshot.created", s.Baseline.Digest); err != nil {
 		return nil, err
+	}
+	if cfg.ApprovedPartitioned.Digest != "" {
+		s.BaselinePartitioned = cfg.ApprovedPartitioned
+		s.BaselineBulk = append([]workspace.BulkRecord(nil), cfg.ApprovedBulk...)
 	}
 	if err := s.startGateway(); err != nil {
 		return nil, err
@@ -343,7 +359,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 // not create or resume an Agent Session and therefore issues no capability.
 func AdoptRecovery(ctx context.Context, cfg RecoveryConfig) (_ *Session, err error) {
 	record := cfg.Record
-	if cfg.Store == nil || cfg.Runtime == nil || cfg.Audit == nil || record.Version != recovery.Version || record.ProjectRoot == "" || record.ExportPolicyDigest != cfg.ExportPolicyDigest || !filepath.IsAbs(record.RuntimeBase) || record.RuntimeRoot != filepath.Join(record.RuntimeBase, "sunaba-vm-"+record.VMID) {
+	if cfg.Store == nil || cfg.Runtime == nil || cfg.Audit == nil || record.Version != recovery.Version || record.ProjectRoot == "" || record.ExportPolicyDigest != cfg.ExportPolicyDigest || record.WorkspacePolicy.Digest != cfg.WorkspacePolicy.Digest || !filepath.IsAbs(record.RuntimeBase) || record.RuntimeRoot != filepath.Join(record.RuntimeBase, "sunaba-vm-"+record.VMID) {
 		return nil, fmt.Errorf("dev recovery configuration is incomplete")
 	}
 	projectLock, err := cfg.Store.AcquireProjectLock(record.ProjectRoot)
@@ -358,6 +374,7 @@ func AdoptRecovery(ctx context.Context, cfg RecoveryConfig) (_ *Session, err err
 		Store: cfg.Store, Runtime: cfg.Runtime, ProjectRoot: record.ProjectRoot, RuntimeBase: record.RuntimeBase,
 		VMID: record.VMID, SessionID: record.SessionID, Mode: record.RuntimeMode(), Audit: cfg.Audit,
 		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicy: cfg.ExportPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
+		BulkPolicy: cfg.WorkspacePolicy.Bulk, WorkspacePolicyDigest: cfg.WorkspacePolicy.Digest,
 		DevNetworkName: cfg.DevNetworkName, DevNetworkQuiesce: cfg.DevNetworkQuiesce, DevNetworkClose: cfg.DevNetworkClose,
 	}
 	s.discardExternalGit = cfg.DiscardExternalGit
@@ -402,6 +419,8 @@ func newRecoverySession(ctx context.Context, cfg RecoveryConfig, projectLock *st
 		Root: record.RuntimeRoot, Container: record.Container, WorkspacePath: record.WorkspacePath,
 		Baseline: record.Baseline, SnapshotRoot: filepath.Join(record.RuntimeRoot, "snapshot"), SnapshotPolicy: cfg.SnapshotPolicy,
 		ExportPolicy: cfg.ExportPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
+		BaselinePartitioned: record.BaselinePartitioned, BaselineBulk: append([]workspace.BulkRecord(nil), record.BaselineBulk...),
+		BulkPolicy: cfg.WorkspacePolicy.Bulk, WorkspacePolicyDigest: cfg.WorkspacePolicy.Digest,
 		projectLock: projectLock, lifecycleContext: ctx, vmCreated: true, paused: true,
 	}
 }
@@ -1102,7 +1121,17 @@ func (s *Session) startAttachRelay(ctx context.Context) error {
 	return nil
 }
 
-func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
+func (s *Session) StopAndExport(ctx context.Context) (result ExportResult, returnErr error) {
+	frozenOwnership := false
+	defer func() {
+		if returnErr == nil || !frozenOwnership {
+			return
+		}
+		var recoveryRequired *RecoveryRequiredError
+		if !errors.As(returnErr, &recoveryRequired) {
+			returnErr = &RecoveryRequiredError{Cause: returnErr}
+		}
+	}()
 	if s.cfg.Mode == "dev" {
 		if err := s.cfg.DevNetworkQuiesce(ctx); err != nil {
 			s.gatewayActive.Store(false)
@@ -1167,6 +1196,7 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	if stopped, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || stopped != runtime.StateStopped {
 		return ExportResult{}, fmt.Errorf("VM is not frozen: state=%s error=%v", stopped, err)
 	}
+	frozenOwnership = true
 	quarantine := filepath.Join(s.Root, "sunaba-quarantine-"+s.SessionID)
 	if err := makeNewPrivateDirectory(quarantine); err != nil {
 		return ExportResult{}, err
@@ -1175,28 +1205,71 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 	if err := s.cfg.Runtime.Export(ctx, s.Container, archive); err != nil {
 		return ExportResult{}, fmt.Errorf("export frozen session root filesystem: %w", err)
 	}
-	frozen, err := workspace.ParseFrozenRootFS(archive, quarantine, s.Baseline, s.cfg.ExportPolicy)
+	capturePolicy := workspace.BulkCaptureSnapshotPolicy(s.cfg.SnapshotPolicy)
+	exportPolicy := s.cfg.ExportPolicy
+	exportPolicy.Workspace = capturePolicy
+	frozen, err := workspace.ParseFrozenRootFS(archive, quarantine, s.Baseline, exportPolicy)
 	if err != nil {
 		return ExportResult{}, err
 	}
 	defer frozen.Close()
 	mergedRoot := filepath.Join(quarantine, "sunaba-merged-"+s.SessionID)
-	merged, err := workspace.MaterializeMergedView(s.SnapshotRoot, mergedRoot, s.Baseline, frozen, s.cfg.SnapshotPolicy)
+	merged, err := workspace.MaterializeMergedView(s.SnapshotRoot, mergedRoot, s.Baseline, frozen, capturePolicy)
 	if err != nil {
 		return ExportResult{}, err
 	}
-	current, err := workspace.BuildSnapshotManifest(s.ProjectRoot, s.cfg.SnapshotPolicy)
-	if err != nil || current.Digest != s.Baseline.Digest {
+	current, _, err := workspace.BuildPartitionedSnapshotManifest(s.ProjectRoot, s.cfg.SnapshotPolicy, s.BulkPolicy, s.WorkspacePolicyDigest)
+	if err != nil || current.Digest != s.BaselinePartitioned.Digest {
 		return ExportResult{}, fmt.Errorf("host Project baseline changed during session")
 	}
-	changeSet, err := workspace.BuildChangeSet(s.Baseline, merged.Manifest, s.cfg.SnapshotPolicy)
+	partitionedBaseline, partitionedResult, bulkRecords, err := workspace.PartitionResultManifest(s.BaselinePartitioned, s.BaselineBulk, merged.Manifest, s.cfg.SnapshotPolicy, s.BulkPolicy, s.WorkspacePolicyDigest)
 	if err != nil {
 		return ExportResult{}, err
 	}
-	if err := s.emit("changeset.created", changeSet.Digest); err != nil {
+	projectState, err := s.cfg.Store.LookupProjectState(s.ProjectID)
+	if err != nil {
+		return ExportResult{}, fmt.Errorf("resolve Project state for Bulk retention: %w", err)
+	}
+	retainedRoot := filepath.Join(projectState.Path, "retained")
+	for index := range bulkRecords {
+		record := &bulkRecords[index]
+		if err := s.emit("bulk.detected", record.BulkID); err != nil {
+			return ExportResult{}, err
+		}
+		switch record.Result.State {
+		case "exact":
+			object, err := workspace.CaptureBulkObject(ctx, retainedRoot, merged.Root, merged.Manifest, record.Root, capturePolicy)
+			if err != nil {
+				return ExportResult{}, fmt.Errorf("capture Bulk path %q: %w", record.Root, err)
+			}
+			record.Result = object.Result
+			record.Capture = object.Capture
+			record.Summary = object.Result.Summary
+			partitionedResult.BulkRoots[index] = object.Result
+		case "absent":
+			record.Capture = workspace.ExactAbsentBulkCapture(record.Root)
+		case "unsupported", "present_untracked":
+			return ExportResult{}, fmt.Errorf("Bulk path %q could not be captured exactly", record.Root)
+		default:
+			return ExportResult{}, fmt.Errorf("Bulk path %q has invalid result state", record.Root)
+		}
+		record.BulkID = workspace.BulkRecordID(s.WorkspacePolicyDigest, record.Root, record.Baseline, record.Result)
+		if err := s.emit("bulk.capture.committed", record.Capture.ObjectDigest); err != nil {
+			return ExportResult{}, err
+		}
+	}
+	partitionedResult, err = workspace.RebuildPartitionedManifestDigest(partitionedResult)
+	if err != nil {
 		return ExportResult{}, err
 	}
-	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: merged.Manifest, ChangeSet: changeSet}, nil
+	workSet, err := workspace.BuildPendingWorkSetFromPartitions(s.ProjectID, s.ProjectRoot, s.VMID, s.SessionID, s.WorkspacePolicyDigest, partitionedBaseline, partitionedResult, bulkRecords, s.cfg.SnapshotPolicy, time.Now().UTC())
+	if err != nil {
+		return ExportResult{}, err
+	}
+	if err := s.emit("workset.created", workSet.Digest); err != nil {
+		return ExportResult{}, err
+	}
+	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: partitionedResult.Core, ChangeSet: workSet.CoreChangeSet, WorkSet: workSet}, nil
 }
 
 func (s *Session) stopDevForRecovery(ctx context.Context) error {
@@ -1232,10 +1305,15 @@ func (s *Session) stopDevForRecovery(ctx context.Context) error {
 }
 
 func (s *Session) RecoveryState(reason string) recovery.State {
+	workspacePolicy := policy.CompiledWorkspacePolicy{
+		Core: policy.CompiledExportPolicy{Snapshot: s.SnapshotPolicy, Export: s.ExportPolicy, Digest: s.ExportPolicyDigest},
+		Bulk: s.BulkPolicy, Digest: s.WorkspacePolicyDigest,
+	}
 	return recovery.State{
 		Version: recovery.Version, ProjectID: s.ProjectID, ProjectRoot: s.ProjectRoot, VMID: s.VMID,
 		SessionID: s.SessionID, Container: s.Container, RuntimeBase: s.cfg.RuntimeBase, RuntimeRoot: s.Root,
-		WorkspacePath: s.WorkspacePath, Baseline: s.Baseline, ExportPolicyDigest: s.ExportPolicyDigest,
+		WorkspacePath: s.WorkspacePath, Baseline: s.Baseline, BaselinePartitioned: s.BaselinePartitioned,
+		BaselineBulk: append([]workspace.BulkRecord(nil), s.BaselineBulk...), ExportPolicyDigest: s.ExportPolicyDigest, WorkspacePolicy: workspacePolicy,
 		Mode:       s.cfg.Mode,
 		GitGateway: s.cfg.GitGateway != nil, WebGateway: s.cfg.WebGateway != nil,
 		Reason: reason, CreatedAt: time.Now().UTC(),
@@ -1257,9 +1335,8 @@ func (s *Session) SetDiscardExternalGitForExport(discard bool) error {
 func (s *Session) RecoveryStateWithPendingExport(reason string, result ExportResult) recovery.State {
 	state := s.RecoveryState(reason)
 	state.PendingExport = &recovery.PendingExport{
-		MergedRoot:      result.MergedRoot,
-		MergedDigest:    result.Merged.Digest,
-		ChangeSetDigest: result.ChangeSet.Digest,
+		MergedRoot: result.MergedRoot,
+		WorkSet:    result.WorkSet,
 	}
 	return state
 }

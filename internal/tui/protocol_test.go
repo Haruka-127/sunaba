@@ -56,6 +56,32 @@ func TestPrepareViewNormalizesStructuredChangesArrays(t *testing.T) {
 	}
 }
 
+func TestBulkViewBindsOpaqueActionsAndRejectsUntrustedLayout(t *testing.T) {
+	view := View{
+		Version: ProtocolVersion, Type: "view", ScreenID: "changes", Revision: 1,
+		Binding: Binding{ProcessID: 123, ProjectID: "project-1", Nonce: strings.Repeat("a", 64)}, Title: "Bulk paths",
+		Fields: []TextField{}, Actions: []Action{{ID: "bulk.0", Label: "Review dependency tree"}, {ID: "back", Label: "Back"}},
+		Bulk: &BulkView{Page: 1, Pages: 1, SelectedActionID: "bulk.0", Items: []BulkItem{{
+			ActionID: "bulk.0", BulkID: strings.Repeat("b", 64), Root: "packages/app/node_modules", Reason: "builtin-component-rule",
+			CaptureState: "exact_managed", Disposition: "unresolved", Retention: "retained by sunaba", Summary: "18432 entries · 782237696 bytes", DigestPrefix: "8f2c1a90",
+		}}},
+	}
+	if err := view.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	unsafe := view
+	unsafe.Bulk = &BulkView{Page: 1, Pages: 1, SelectedActionID: "bulk.0", Items: append([]BulkItem(nil), view.Bulk.Items...)}
+	unsafe.Bulk.Items[0].Root = "node_modules\nConfirm Apply Plan"
+	if err := unsafe.Validate(); err == nil {
+		t.Fatal("Bulk root containing layout control was accepted")
+	}
+	tooMany := view
+	tooMany.Bulk = &BulkView{Page: 1, Pages: 1, SelectedActionID: "bulk.0", Items: make([]BulkItem, MaxBulkItems+1)}
+	if err := tooMany.Validate(); err == nil {
+		t.Fatal("oversize Bulk frame was accepted")
+	}
+}
+
 func testView(t *testing.T) View {
 	t.Helper()
 	binding := Binding{ProcessID: 123, ProjectID: "project-1", Nonce: strings.Repeat("a", 64)}

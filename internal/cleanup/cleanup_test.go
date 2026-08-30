@@ -5,12 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"sunaba/internal/audit"
 	"sunaba/internal/lease"
+	"sunaba/internal/policy"
 	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
@@ -107,12 +107,19 @@ func TestCleanupKeepsExactStoppedDevRecoveryWithoutProcessGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	projectRoot, _ := filepath.EvalSymlinks(t.TempDir())
-	baseline, err := workspace.BuildSnapshotManifest(projectRoot, workspace.DefaultSnapshotPolicy())
+	export := policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}
+	compiled, err := policy.CompileWorkspacePolicy(export, []string{".git", ".sunaba"}, nil, workspace.DefaultBulkPolicyV1())
 	if err != nil {
 		t.Fatal(err)
 	}
+	partitioned, baselineBulk, err := workspace.BuildPartitionedSnapshotManifest(projectRoot, compiled.Core.Snapshot, compiled.Bulk, compiled.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := partitioned.Core
+	baseline.Root = filepath.Join(runtimeRoot, "snapshot")
 	name := "sunaba-" + projectID + "-" + vmID
-	record := recovery.State{Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: name, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, ExportPolicyDigest: strings.Repeat("a", 64), Reason: "guard refused", CreatedAt: time.Now().UTC()}
+	record := recovery.State{Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: name, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: baselineBulk, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled, Reason: "guard refused", CreatedAt: time.Now().UTC()}
 	if err := recovery.Save(projectState, record); err != nil {
 		t.Fatal(err)
 	}

@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion          = 8
+	CurrentSchemaVersion          = 9
 	MaximumExportEntries          = 1_000_000
 	MaximumExportFileBytes  int64 = 8 << 30
 	MaximumExportTotalBytes int64 = 8 << 30
@@ -35,22 +35,23 @@ var memoryPattern = regexp.MustCompile(`^[1-9][0-9]*[KMGTP]$`)
 var gitRemoteNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 type ProjectPolicy struct {
-	SchemaVersion  int              `json:"schema_version"`
-	ProjectID      string           `json:"project_id"`
-	ProjectRoot    string           `json:"project_root"`
-	Mode           string           `json:"mode"`
-	Dependency     DependencyPolicy `json:"dependency"`
-	Resources      ResourcePolicy   `json:"resources"`
-	Session        SessionPolicy    `json:"session"`
-	Model          ModelPolicy      `json:"model"`
-	Git            GitPolicy        `json:"git"`
-	Web            WebPolicy        `json:"web"`
-	Export         ExportPolicy     `json:"export"`
-	Snapshot       SnapshotPolicy   `json:"snapshot"`
-	Audit          AuditPolicy      `json:"audit"`
-	ProtectedPaths []string         `json:"protected_paths"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
+	SchemaVersion  int                  `json:"schema_version"`
+	ProjectID      string               `json:"project_id"`
+	ProjectRoot    string               `json:"project_root"`
+	Mode           string               `json:"mode"`
+	Dependency     DependencyPolicy     `json:"dependency"`
+	Resources      ResourcePolicy       `json:"resources"`
+	Session        SessionPolicy        `json:"session"`
+	Model          ModelPolicy          `json:"model"`
+	Git            GitPolicy            `json:"git"`
+	Web            WebPolicy            `json:"web"`
+	Export         ExportPolicy         `json:"export"`
+	Snapshot       SnapshotPolicy       `json:"snapshot"`
+	Bulk           workspace.BulkPolicy `json:"bulk"`
+	Audit          AuditPolicy          `json:"audit"`
+	ProtectedPaths []string             `json:"protected_paths"`
+	CreatedAt      time.Time            `json:"created_at"`
+	UpdatedAt      time.Time            `json:"updated_at"`
 }
 
 type DependencyPolicy struct {
@@ -126,6 +127,43 @@ type CompiledExportPolicy struct {
 	Snapshot workspace.SnapshotPolicy
 	Export   workspace.ExportPolicy
 	Digest   string
+}
+
+type CompiledWorkspacePolicy struct {
+	Core   CompiledExportPolicy `json:"core"`
+	Bulk   workspace.BulkPolicy `json:"bulk"`
+	Digest string               `json:"digest"`
+}
+
+func CompileWorkspacePolicy(config ExportPolicy, protectedPaths, excludedPaths []string, bulk workspace.BulkPolicy) (CompiledWorkspacePolicy, error) {
+	core, err := CompileExportPolicy(config, protectedPaths, excludedPaths)
+	if err != nil {
+		return CompiledWorkspacePolicy{}, err
+	}
+	bulk, err = workspace.CanonicalBulkPolicy(bulk)
+	if err != nil {
+		return CompiledWorkspacePolicy{}, fmt.Errorf("Project bulk policy is invalid: %w", err)
+	}
+	encoded, err := json.Marshal(struct {
+		Version int                  `json:"version"`
+		Core    string               `json:"core_digest"`
+		Bulk    workspace.BulkPolicy `json:"bulk"`
+	}{3, core.Digest, bulk})
+	if err != nil {
+		return CompiledWorkspacePolicy{}, err
+	}
+	digest := sha256.Sum256(encoded)
+	return CompiledWorkspacePolicy{Core: core, Bulk: bulk, Digest: hex.EncodeToString(digest[:])}, nil
+}
+
+func ValidateCompiledWorkspacePolicy(compiled CompiledWorkspacePolicy) error {
+	rebuilt, err := CompileWorkspacePolicy(ExportPolicy{
+		MaxEntries: compiled.Core.Snapshot.MaxEntries, MaxFileBytes: compiled.Core.Snapshot.MaxFileSize, MaxTotalBytes: compiled.Core.Snapshot.MaxTotalSize,
+	}, compiled.Core.Snapshot.ProtectedPaths, compiled.Core.Snapshot.ExcludedPaths, compiled.Bulk)
+	if err != nil || !reflect.DeepEqual(rebuilt, compiled) {
+		return fmt.Errorf("compiled workspace policy is not canonical")
+	}
+	return nil
 }
 
 func CompileExportPolicy(config ExportPolicy, protectedPaths []string, excludedPaths ...[]string) (CompiledExportPolicy, error) {
@@ -243,7 +281,7 @@ func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentIm
 			MaxRequests: webgateway.DefaultMaxRequests, MaxConcurrent: webgateway.DefaultMaxConcurrent, MaxConnectSeconds: int64(webgateway.DefaultMaxConnectTime / time.Second), MaxUploadBytes: webgateway.DefaultMaxUploadBytes,
 			MaxDownloadBytes: webgateway.DefaultMaxDownloadBytes, MaxTotalBytes: webgateway.DefaultMaxTotalBytes,
 		},
-		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}, Snapshot: SnapshotPolicy{},
+		Export: ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}, Snapshot: SnapshotPolicy{}, Bulk: workspace.DefaultBulkPolicyV1(),
 		Audit: AuditPolicy{RetentionDays: 30}, ProtectedPaths: []string{".git"}, CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
 	}
 	return policy, policy.Validate()
@@ -310,7 +348,8 @@ func (p ProjectPolicy) Validate() error {
 		return fmt.Errorf("disabled Web Gateway must not retain active rules")
 	}
 	compiledExport, exportErr := CompileExportPolicy(p.Export, p.ProtectedPaths, p.Snapshot.Exclude)
-	if exportErr != nil || !slices.Equal(p.Snapshot.Exclude, compiledExport.Snapshot.ExcludedPaths) || p.Audit.RetentionDays < 1 || p.Audit.RetentionDays > 365 {
+	_, workspaceErr := CompileWorkspacePolicy(p.Export, p.ProtectedPaths, p.Snapshot.Exclude, p.Bulk)
+	if exportErr != nil || workspaceErr != nil || !slices.Equal(p.Snapshot.Exclude, compiledExport.Snapshot.ExcludedPaths) || p.Audit.RetentionDays < 1 || p.Audit.RetentionDays > 365 {
 		return fmt.Errorf("Project export or audit policy is invalid")
 	}
 	if !uniqueRelativePaths(p.ProtectedPaths) || p.CreatedAt.IsZero() || p.UpdatedAt.Before(p.CreatedAt) {

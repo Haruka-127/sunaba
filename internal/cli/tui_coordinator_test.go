@@ -250,7 +250,7 @@ func TestTUIHomeActionsFollowPendingChangeSetState(t *testing.T) {
 	if err := os.Mkdir(pendingRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
-	pending := `{"version":4,"project_id":"` + project.policy.ProjectID + `"}`
+	pending := `{"version":5,"work_set":{"project_id":"` + project.policy.ProjectID + `"}}`
 	if err := os.WriteFile(filepath.Join(pendingRoot, "change.json"), []byte(pending), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +509,7 @@ func TestTUIHelperExitPrecedesOpenCodeAndReturnsToFreshHome(t *testing.T) {
 	if len(revisions) != 2 || revisions[0] == revisions[1] || revisions[1] <= revisions[0] {
 		t.Fatalf("Home was not rebuilt with a fresh revision: %v", revisions)
 	}
-	_, projectState, compiled, manifest, err := a.snapshotManifest(project.policy.ProjectRoot)
+	_, projectState, compiled, manifest, _, err := a.snapshotManifest(project.policy.ProjectRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

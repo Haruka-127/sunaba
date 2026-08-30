@@ -35,6 +35,7 @@ function changesView(rows = 1): View {
       files: [{ action_id: "file.0", status: "A", path: "test.txt", detail: "" }],
       rows: diffRows,
     },
+	bulk: null,
   }
 }
 

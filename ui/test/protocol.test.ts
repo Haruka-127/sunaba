@@ -12,6 +12,7 @@ const view: View = {
   fields: [{ id: "status", label: "Status", text: "Ready" }],
   actions: [{ id: "start", label: "Start", input: { allowed: false, masked: false, max_bytes: 0 } }],
   changes: null,
+	bulk: null,
 }
 
 describe("bounded protocol", () => {
@@ -81,5 +82,27 @@ describe("bounded protocol", () => {
     expect(parseView(new TextEncoder().encode(JSON.stringify(structured)), { projectID: "project-1", nonce }).changes?.files[0].path).toBe("test.txt")
     const injected = structured.changes!
     expect(() => parseView(new TextEncoder().encode(JSON.stringify({ ...structured, changes: { ...injected, rows: [{ ...injected.rows[0], after: { ...injected.rows[0].after, text: "test\nfake action" } }] } })), { projectID: "project-1", nonce })).toThrow()
+  })
+
+  test("accepts a bounded Bulk section and rejects descendant layout injection", () => {
+    const bulk: View = {
+      ...view,
+      screen_id: "changes",
+      fields: [],
+      actions: [
+        { id: "bulk.0", label: "Review dependency tree", input: { allowed: false, masked: false, max_bytes: 0 } },
+        { id: "back", label: "Back", input: { allowed: false, masked: false, max_bytes: 0 } },
+      ],
+      changes: null,
+      bulk: {
+        page: 1,
+        pages: 1,
+        selected_action_id: "bulk.0",
+        items: [{ action_id: "bulk.0", bulk_id: "b".repeat(64), root: "packages/app/node_modules", reason: "builtin-component-rule", capture_state: "exact_managed", disposition: "unresolved", retention: "retained by sunaba", summary: "18432 entries", digest_prefix: "8f2c1a90" }],
+      },
+    }
+    expect(parseView(new TextEncoder().encode(JSON.stringify(bulk)), { projectID: "project-1", nonce }).bulk?.items[0].root).toBe("packages/app/node_modules")
+    const injected = { ...bulk, bulk: { ...bulk.bulk!, items: [{ ...bulk.bulk!.items[0], root: "node_modules\nConfirm Apply Plan" }] } }
+    expect(() => parseView(new TextEncoder().encode(JSON.stringify(injected)), { projectID: "project-1", nonce })).toThrow()
   })
 })

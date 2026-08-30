@@ -27,12 +27,12 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 	if record.ProjectID != projectPolicy.ProjectID || record.ProjectRoot != projectPolicy.ProjectRoot {
 		return fmt.Errorf("dev recovery record does not match Project policy")
 	}
-	compiled, err := policy.CompileExportPolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude)
+	compiled, err := policy.CompileWorkspacePolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, projectPolicy.Snapshot.Exclude, projectPolicy.Bulk)
 	if err != nil {
 		return err
 	}
-	if compiled.Digest != record.ExportPolicyDigest {
-		return fmt.Errorf("dev recovery export policy no longer matches Project policy")
+	if compiled.Digest != record.WorkspacePolicy.Digest || compiled.Core.Digest != record.ExportPolicyDigest {
+		return fmt.Errorf("dev recovery workspace policy no longer matches Project policy")
 	}
 	recorder, err := audit.NewRecorder(filepath.Join(a.store.Root, "audit"))
 	if err != nil {
@@ -53,7 +53,7 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 	}()
 	active, err := session.AdoptRecovery(ctx, session.RecoveryConfig{
 		Store: a.store, Runtime: a.runtime, Record: record, Audit: recorder,
-		SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest,
+		SnapshotPolicy: compiled.Core.Snapshot, ExportPolicy: compiled.Core.Export, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled,
 		DevNetworkName: boundary.Network.Name, DevNetworkQuiesce: boundary.Quiesce, DevNetworkClose: boundary.Close,
 		DiscardExternalGit: discardExternalGit, GitGateway: record.GitGateway, WebGateway: record.WebGateway,
 	})
@@ -65,7 +65,7 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 	if exportErr != nil {
 		return errors.Join(exportErr, active.RetainForRecovery(ctx))
 	}
-	if len(result.ChangeSet.Changes) > 0 {
+	if len(result.ChangeSet.Changes) > 0 || len(result.WorkSet.Bulk) > 0 {
 		if _, err := persistPending(projectState, active, result); err != nil {
 			return errors.Join(err, active.RetainForRecovery(ctx))
 		}
@@ -79,7 +79,7 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 	return nil
 }
 
-func (a *app) persistFrozenRecovery(ctx context.Context, projectState string, record recovery.State, compiled policy.CompiledExportPolicy, recorder *audit.Recorder) error {
+func (a *app) persistFrozenRecovery(ctx context.Context, projectState string, record recovery.State, compiled policy.CompiledWorkspacePolicy, recorder *audit.Recorder) error {
 	pendingCommitted := false
 	pendingPath := filepath.Join(projectState, "pending", "change.json")
 	if _, statErr := os.Lstat(pendingPath); statErr == nil {
@@ -87,7 +87,7 @@ func (a *app) persistFrozenRecovery(ctx context.Context, projectState string, re
 		if loadErr != nil {
 			return loadErr
 		}
-		if existing.Version != pendingChangeVersion || existing.VMID != record.Container || existing.SessionID != record.SessionID || existing.Baseline.Digest != record.Baseline.Digest || existing.Merged.Digest != record.PendingExport.MergedDigest || existing.ChangeSet.Digest != record.PendingExport.ChangeSetDigest || existing.ExportPolicyDigest != record.ExportPolicyDigest {
+		if existing.Version != pendingChangeVersion || !workspace.SameWorkSetContent(existing.WorkSet, record.PendingExport.WorkSet) {
 			return fmt.Errorf("existing pending Change Set does not match frozen export recovery")
 		}
 		pendingCommitted = true
@@ -120,7 +120,7 @@ func (a *app) persistFrozenRecovery(ctx context.Context, projectState string, re
 	}
 	active, err := session.AdoptRecovery(ctx, session.RecoveryConfig{
 		Store: a.store, Runtime: a.runtime, Record: record, Audit: recorder,
-		SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest,
+		SnapshotPolicy: compiled.Core.Snapshot, ExportPolicy: compiled.Core.Export, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled,
 		DevNetworkName: devNetworkName, DevNetworkClose: devNetworkClose,
 		GitGateway: record.GitGateway, WebGateway: record.WebGateway,
 	})
@@ -129,8 +129,9 @@ func (a *app) persistFrozenRecovery(ctx context.Context, projectState string, re
 	}
 	result := session.ExportResult{
 		MergedRoot: record.PendingExport.MergedRoot,
-		Merged:     workspace.SnapshotManifest{Digest: record.PendingExport.MergedDigest},
-		ChangeSet:  workspace.ChangeSet{Digest: record.PendingExport.ChangeSetDigest},
+		Merged:     record.PendingExport.WorkSet.Result.Core,
+		ChangeSet:  record.PendingExport.WorkSet.CoreChangeSet,
+		WorkSet:    record.PendingExport.WorkSet,
 	}
 	if !pendingCommitted {
 		if _, err := persistPending(projectState, active, result); err != nil {
