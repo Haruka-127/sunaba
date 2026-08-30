@@ -59,7 +59,7 @@ func OpenOwnedRegularNoFollow(path string, maximum int64) (*os.File, error) {
 	if !isCleanAbsolute(path) || maximum < 0 {
 		return nil, fmt.Errorf("private file path or size bound is invalid")
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +69,7 @@ func OpenOwnedRegularNoFollow(path string, maximum int64) (*os.File, error) {
 		return nil, fmt.Errorf("open private file")
 	}
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0777 != 0600 || stat.Uid != uint32(os.Geteuid()) || stat.Size < 0 || stat.Size > maximum {
+	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0777 != 0600 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || stat.Size < 0 || stat.Size > maximum {
 		_ = file.Close()
 		return nil, fmt.Errorf("private file must be a bounded mode 0600 regular file owned by the current user")
 	}
@@ -114,7 +114,7 @@ func AtomicWriteOwned(path string, data []byte) error {
 	}
 	if info, err := os.Lstat(path); err == nil {
 		var stat unix.Stat_t
-		if statErr := unix.Lstat(path, &stat); statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) {
+		if statErr := unix.Lstat(path, &stat); statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
 			return fmt.Errorf("existing private file is unsafe")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

@@ -40,6 +40,9 @@ func (a *app) command() *urfavecli.Command {
 			}
 			return ctx, nil
 		},
+		Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error {
+			return a.tui(ctx)
+		}),
 	}
 	command.Commands = []*urfavecli.Command{
 		a.setupCommand(), a.versionsCommand(), a.updateCommand(),
@@ -51,7 +54,7 @@ func (a *app) command() *urfavecli.Command {
 		})),
 		a.simpleProjectCommand("agent", "Start the Project Agent", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.agent(ctx, dir) })),
 		a.gitCommand(), a.webCommand(),
-		a.simpleProjectCommand("shell", "Start a sanitized shell in the isolated VM", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.shell(ctx, dir) })),
+		{Name: "console", Aliases: []string{"shell"}, Usage: "Start a sanitized console in the isolated VM", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.shell(ctx, dir) }))},
 		a.execCommand(),
 		a.simpleProjectCommand("status", "Show Project status", projectSelectorFlags(), a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error { return a.status(ctx, dir) })),
 		a.changesCommand(),
@@ -141,7 +144,6 @@ func (a *app) projectCommand() *urfavecli.Command {
 	return &urfavecli.Command{Name: "project", Usage: "Register and list Projects", Commands: []*urfavecli.Command{
 		{Name: "init", Usage: "Register a Project", ArgsUsage: "[path]", Flags: []urfavecli.Flag{
 			&urfavecli.StringFlag{Name: "mode", Value: "secure", Usage: "Execution mode (secure or dev)", OnlyOnce: true, Validator: enum("mode", "secure", "dev"), ValidateDefaults: true},
-			&urfavecli.StringFlag{Name: "model-auth", Value: "oauth", Usage: "Model authentication (oauth or api-key)", OnlyOnce: true, Validator: enum("model-auth", "oauth", "api-key"), ValidateDefaults: true},
 		}, Action: func(ctx context.Context, cmd *urfavecli.Command) error {
 			if cmd.NArg() > 1 {
 				return fmt.Errorf("project init accepts at most one path")
@@ -150,7 +152,7 @@ func (a *app) projectCommand() *urfavecli.Command {
 			if cmd.NArg() == 1 {
 				path = cmd.Args().First()
 			}
-			return a.projectInit(ctx, path, cmd.String("mode"), cmd.String("model-auth"))
+			return a.projectInit(ctx, path, cmd.String("mode"))
 		}},
 		{Name: "list", Usage: "List registered Projects", Flags: []urfavecli.Flag{
 			&urfavecli.BoolFlag{Name: "active", Usage: "Show only Projects with a reachable Supervisor or running VM", OnlyOnce: true},
@@ -182,14 +184,14 @@ func configActionUsage(action string) string {
 
 func (a *app) credentialsCommand() *urfavecli.Command {
 	apiKeyCommands := []*urfavecli.Command{
-		a.credentialAction("set", "Store the OpenAI API key in Keychain", "api-key"),
+		a.credentialAction("set", "Store the OpenAI API key in the host credential file", "api-key"),
 		a.credentialAction("status", "Show OpenAI API key status", "api-key"),
-		a.credentialAction("delete", "Delete the OpenAI API key from Keychain", "api-key"),
+		a.credentialAction("delete", "Delete the OpenAI API key from the host credential file", "api-key"),
 	}
 	oauthCommands := []*urfavecli.Command{
 		a.credentialAction("login", "Log in with Codex OAuth", "oauth"),
 		a.credentialAction("status", "Show Codex OAuth status", "oauth"),
-		a.credentialAction("delete", "Delete Codex OAuth credentials from Keychain", "oauth"),
+		a.credentialAction("delete", "Delete Codex OAuth credentials from the host credential file", "oauth"),
 	}
 	openai := &urfavecli.Command{Name: "openai", Usage: "Manage OpenAI model authentication", Commands: []*urfavecli.Command{
 		{Name: "api-key", Usage: "Manage API key authentication", Commands: apiKeyCommands},
@@ -210,12 +212,12 @@ func (a *app) hiddenCredentialAlias(action string) *urfavecli.Command {
 }
 
 func (a *app) modelCommand() *urfavecli.Command {
-	auth := &urfavecli.Command{Name: "auth", Usage: "Change the Project's model authentication method", Commands: []*urfavecli.Command{}}
+	auth := &urfavecli.Command{Name: "auth", Usage: "Change the global model authentication method", Commands: []*urfavecli.Command{}}
 	for _, mode := range []string{"api-key", "oauth"} {
 		mode := mode
-		auth.Commands = append(auth.Commands, &urfavecli.Command{Name: mode, Usage: "Use " + mode + " authentication", Flags: projectSelectorFlags(), Action: rejectArguments(a.withProjectSelector(func(ctx context.Context, _ *urfavecli.Command, dir string) error {
-			return a.modelPolicy(ctx, "auth", mode, dir, nil)
-		}))})
+		auth.Commands = append(auth.Commands, &urfavecli.Command{Name: mode, Usage: "Use " + mode + " authentication for future Agent Sessions", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error {
+			return a.modelAuth(ctx, mode)
+		})})
 	}
 	return &urfavecli.Command{Name: "model", Usage: "Manage Model Gateway authentication and allowed models", Commands: []*urfavecli.Command{
 		auth,

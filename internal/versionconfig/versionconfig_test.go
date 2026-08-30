@@ -48,7 +48,7 @@ func TestStoreRoundTripAndRejectsUnsafeFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	loadedLock, err := store.LoadLock()
-	if err != nil || loadedLock.Generation != 1 || loadedLock.Manifest.OpenCode.Version != dependency.OpenCodeVersion {
+	if err != nil || loadedLock.Generation != 1 || loadedLock.Manifest.OpenCode.Version != dependency.OpenCodeVersion || loadedLock.Manifest.Bun.Version != dependency.BunVersion || loadedLock.Manifest.OpenTUI.Version != dependency.OpenTUIVersion || loadedLock.Manifest.SunabaUI.SHA256 == "" {
 		t.Fatalf("loaded lock=%+v error=%v", loadedLock, err)
 	}
 	paths, _ := store.Paths()

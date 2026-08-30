@@ -27,6 +27,7 @@ import (
 	"sunaba/internal/session"
 	"sunaba/internal/state"
 	"sunaba/internal/testutil"
+	"sunaba/internal/usersettings"
 	"sunaba/internal/versionconfig"
 	"sunaba/internal/webgateway"
 	"sunaba/internal/workspace"
@@ -81,7 +82,7 @@ func TestHelpDescribesCurrentSecureCLIAndOmitsPrototypeCommands(t *testing.T) {
 		}
 	}
 	text := output.String()
-	for _, expected := range []string{"setup", "--config-only", "doctor", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "--model-auth", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "shell", "exec", "--cwd", "remote", "add", "web", "approvals", "changes", "export", "--discard-external-git", "review", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
+	for _, expected := range []string{"setup", "--config-only", "doctor", "versions", "track", "v1-stable", "update", "check", "credentials", "openai", "[path]", "oauth", "api-key", "project", "init", "list", "config", "validate", "apply", "agent", "console", "exec", "--cwd", "remote", "add", "web", "approvals", "changes", "export", "--discard-external-git", "review", "destroy", "--project-id", "--mode", "secure", "dev", "never bind-mounted"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("help missing %q: %s", expected, text)
 		}
@@ -161,7 +162,7 @@ func TestVerboseIsPersistentButDoesNotComeFromEnvironment(t *testing.T) {
 	}
 }
 
-func TestProjectInitDefaultsToCurrentDirectoryAndOAuth(t *testing.T) {
+func TestProjectInitUsesGlobalAuthenticationDefaults(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -193,15 +194,18 @@ func TestProjectInitDefaultsToCurrentDirectoryAndOAuth(t *testing.T) {
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
 	expectedOAuth, defaultsErr := modelcatalog.DefaultModels(modelcatalog.AuthOAuth)
-	if err != nil || defaultsErr != nil || loaded.ProjectRoot != project || loaded.Model.AuthMode != modelcatalog.AuthOAuth || strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expectedOAuth, ",") {
+	if err != nil || defaultsErr != nil || loaded.ProjectRoot != project || strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expectedOAuth, ",") {
 		t.Fatalf("default Project policy=%+v error=%v defaults_error=%v", loaded, err, defaultsErr)
 	}
-	if err := a.run(context.Background(), []string{"project", "init", apiProject, "--model-auth", "api-key"}); err != nil {
+	if err := a.run(context.Background(), []string{"model", "auth", "api-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.run(context.Background(), []string{"project", "init", apiProject}); err != nil {
 		t.Fatal(err)
 	}
 	apiPolicy, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(apiProject), "policy.json"), time.Now())
 	expectedAPI, defaultsErr := modelcatalog.DefaultModels(modelcatalog.AuthAPIKey)
-	if err != nil || defaultsErr != nil || apiPolicy.Model.AuthMode != modelcatalog.AuthAPIKey || strings.Join(apiPolicy.Model.AllowedModels, ",") != strings.Join(expectedAPI, ",") {
+	if err != nil || defaultsErr != nil || strings.Join(apiPolicy.Model.AllowedModels, ",") != strings.Join(expectedAPI, ",") {
 		t.Fatalf("API key Project policy=%+v error=%v defaults_error=%v", apiPolicy, err, defaultsErr)
 	}
 }
@@ -235,12 +239,12 @@ func TestProjectIDSelectsNormalReadAndMutationCommands(t *testing.T) {
 			t.Fatalf("command %v failed: %v", args, err)
 		}
 	}
-	if err := a.run(context.Background(), []string{"model", "auth", "api-key", "--project-id", projectID}); err != nil {
+	if err := a.run(context.Background(), []string{"model", "auth", "api-key"}); err != nil {
 		t.Fatal(err)
 	}
-	loaded, _, _, err := a.loadPolicy(project)
-	if err != nil || loaded.Model.AuthMode != modelcatalog.AuthAPIKey {
-		t.Fatalf("ID-selected mutation policy=%+v error=%v", loaded.Model, err)
+	settings, err := (&usersettings.Store{Root: configs.Root}).Load()
+	if err != nil || settings.ModelAuth != modelcatalog.AuthAPIKey {
+		t.Fatalf("global model auth=%+v error=%v", settings, err)
 	}
 	if err := a.run(context.Background(), []string{"status", "--dir", project, "--project-id", projectID}); err == nil {
 		t.Fatal("normal command accepted both --dir and --project-id")
@@ -250,7 +254,7 @@ func TestProjectIDSelectsNormalReadAndMutationCommands(t *testing.T) {
 func TestEveryPublicProjectCommandExposesProjectIDSelector(t *testing.T) {
 	commands := [][]string{
 		{"config", "path"}, {"config", "edit"}, {"config", "validate"}, {"config", "diff"}, {"config", "apply"}, {"config", "show"},
-		{"model", "auth", "api-key"}, {"model", "auth", "oauth"}, {"model", "set"}, {"model", "list"},
+		{"model", "set"}, {"model", "list"},
 		{"up"}, {"agent"}, {"git", "remote", "add"}, {"git", "remote", "remove"}, {"git", "remote", "list"}, {"git", "disable"},
 		{"web", "enable"}, {"web", "refresh"}, {"web", "disable"}, {"shell"}, {"exec"}, {"doctor"}, {"status"},
 		{"changes", "export"}, {"changes", "review"}, {"changes", "apply"}, {"approvals"}, {"recreate"}, {"down"}, {"destroy"},
@@ -608,30 +612,6 @@ func TestGuestRelayRequiresLinuxAArch64ELF(t *testing.T) {
 	}
 }
 
-func TestInstallManagedOpenCodeRepairsInvalidManagedCopyFromPinnedSource(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "source-opencode")
-	destination := filepath.Join(root, "opencode")
-	script := []byte("#!/bin/sh\nprintf '1.18.16\\n'\n")
-	if err := os.WriteFile(source, script, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(destination, []byte("tampered"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	digest, err := fileSHA256(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := installManagedOpenCode(source, destination, digest, "1.18.16"); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(destination)
-	if err != nil || string(got) != string(script) {
-		t.Fatalf("managed copy=%q error=%v", got, err)
-	}
-}
-
 func TestHostGitAuthorizationUsesOnlyNonInteractiveCredentialHelper(t *testing.T) {
 	bin := t.TempDir()
 	git := filepath.Join(bin, "git")
@@ -754,15 +734,15 @@ func TestModelAuthenticationPolicySwitchesToOAuthCatalogDefault(t *testing.T) {
 	var output bytes.Buffer
 	a := &app{store: store, output: &output, errors: &output}
 	prepareTestSetup(t, a)
-	if err := a.run(context.Background(), []string{"project", "init", project, "--model-auth", "api-key"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.run(context.Background(), []string{"model", "auth", "oauth", "--dir", project}); err != nil {
+	if err := a.run(context.Background(), []string{"model", "auth", "oauth"}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())
 	expectedDefaults, defaultsErr := modelcatalog.DefaultModels(modelcatalog.AuthOAuth)
-	if err != nil || defaultsErr != nil || loaded.Model.AuthMode != modelcatalog.AuthOAuth || strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expectedDefaults, ",") {
+	if err != nil || defaultsErr != nil || strings.Join(loaded.Model.AllowedModels, ",") != strings.Join(expectedDefaults, ",") {
 		t.Fatalf("model policy=%+v error=%v", loaded.Model, err)
 	}
 	if err := a.run(context.Background(), []string{"model", "set", "--dir", project, "--model", "gpt-5.5", "--model", "gpt-5.6-sol"}); err != nil {
@@ -783,7 +763,7 @@ func TestProjectInitWithOAuthAllowsEntireCatalogByDefault(t *testing.T) {
 	store := &state.Store{Root: filepath.Join(base, "state")}
 	a := &app{store: store, output: io.Discard, errors: io.Discard}
 	prepareTestSetup(t, a)
-	if err := a.run(context.Background(), []string{"project", "init", project, "--model-auth", "oauth"}); err != nil {
+	if err := a.run(context.Background(), []string{"project", "init", project}); err != nil {
 		t.Fatal(err)
 	}
 	loaded, _, err := policy.LoadAndMigrate(filepath.Join(store.Root, "projects", state.ProjectID(project), "policy.json"), time.Now())

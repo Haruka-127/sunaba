@@ -21,7 +21,7 @@ func TestConfirmApplyRendersStructuredSanitizedHostUI(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	if err := ConfirmApply(strings.NewReader(request.Nonce+"\n"), &output, request); err != nil {
+	if err := ConfirmApply(strings.NewReader("apply all changes\n"), &output, request); err != nil {
 		t.Fatal(err)
 	}
 	text := output.String()
@@ -30,10 +30,13 @@ func TestConfirmApplyRendersStructuredSanitizedHostUI(t *testing.T) {
 			t.Fatalf("Trusted UI retained unsafe content %q: %q", unsafe, text)
 		}
 	}
-	for _, required := range []string{"SUNABA HOST TRUSTED APPROVAL", binding.ProjectID, binding.BaselineDigest, binding.MergedDigest, binding.ChangeSetDigest, request.Nonce, "<U+001B>", "Approved by host input"} {
+	for _, required := range []string{"SUNABA HOST TRUSTED APPROVAL", binding.ProjectID, binding.BaselineDigest, binding.MergedDigest, binding.ChangeSetDigest, "<U+001B>", "Approved the entire displayed Change Set"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Trusted UI missing %q: %q", required, text)
 		}
+	}
+	if strings.Contains(text, request.Nonce) {
+		t.Fatalf("Trusted UI exposed internal nonce: %q", text)
 	}
 }
 
@@ -85,14 +88,14 @@ func pushRequestDigest(t *testing.T, request gitgateway.PushRequest) string {
 	return generated.Digest
 }
 
-func TestConfirmApplyRejectsAnythingExceptExactBoundedNonce(t *testing.T) {
+func TestConfirmApplyRejectsAnythingExceptExactBoundedAction(t *testing.T) {
 	manager := approval.NewManager(nil)
 	binding := approval.Binding{ProjectID: "project", BaselineDigest: strings.Repeat("a", 64), MergedDigest: strings.Repeat("b", 64), ChangeSetDigest: strings.Repeat("c", 64)}
 	request, err := manager.NewRequest(binding, "safe", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, input := range []string{"yes\n", " " + request.Nonce + "\n", request.Nonce + " extra\n", request.Nonce + "\x1b\n", strings.Repeat("x", 600)} {
+	for _, input := range []string{"yes\n", " apply all changes\n", "apply all changes extra\n", "apply all changes\x1b\n", request.Nonce + "\n", strings.Repeat("x", 600)} {
 		if err := ConfirmApply(strings.NewReader(input), ioDiscard{}, request); !errors.Is(err, ErrRejected) {
 			t.Fatalf("input %q error=%v", input, err)
 		}

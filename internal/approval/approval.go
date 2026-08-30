@@ -90,9 +90,9 @@ func (m *Manager) NewRequest(binding Binding, summary string, lifetime time.Dura
 		m.mu.Unlock()
 		return Request{}, err
 	}
-	display := fmt.Sprintf("Project: %s\nBaseline: %s\nMerged: %s\nChange Set: %s\nSummary: %s\nNonce: %s",
+	display := fmt.Sprintf("Project: %s\nBaseline: %s\nMerged: %s\nChange Set: %s\nSummary: %s",
 		SanitizeText(binding.ProjectID), binding.BaselineDigest, binding.MergedDigest, binding.ChangeSetDigest,
-		SanitizeText(summary), nonce)
+		SanitizeText(summary))
 	return Request{Nonce: nonce, Binding: binding, ExpiresAt: expires, Summary: SanitizeText(summary), Display: display}, nil
 }
 

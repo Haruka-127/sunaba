@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -334,6 +335,68 @@ func TestStoreLoadsSchemaV1WithoutAutomaticallySelectingPreset(t *testing.T) {
 	}
 	if loaded.SchemaVersion != CurrentSchemaVersion || len(loaded.Web.OriginPresets) != 0 || len(loadedRules) != 0 {
 		t.Fatalf("legacy configuration expanded access: config=%+v rules=%+v", loaded.Web, loadedRules)
+	}
+}
+
+func TestStoreMigratesSchemaV3AuthOnlyWithoutTouchingProjectState(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	project := filepath.Join(base, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		t.Fatal(err)
+	}
+	effective := testPolicy(t, project)
+	config, rules := FromPolicy(effective)
+	store := &Store{Root: filepath.Join(base, "config", "sunaba")}
+	if err := store.Save(effective.ProjectID, config, rules); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := store.ProjectPaths(effective.ProjectID)
+	data, _ := os.ReadFile(paths.Project)
+	var legacy map[string]any
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy["schema_version"] = float64(3)
+	legacy["model"].(map[string]any)["auth"] = "api_key"
+	data, _ = json.MarshalIndent(legacy, "", "  ")
+	if err := os.WriteFile(paths.Project, append(data, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// VM identity and pending Change Set live outside Project configuration.
+	// Migration must not enumerate, replace, or remove either state.
+	vmState := filepath.Join(base, "data", "sunaba", "projects", effective.ProjectID, "vm.json")
+	pending := filepath.Join(base, "data", "sunaba", "projects", effective.ProjectID, "pending-change-set.json")
+	if err := os.MkdirAll(filepath.Dir(vmState), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{vmState: "vm-identity-sentinel", pending: "pending-change-set-sentinel"} {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	loaded, loadedRules, err := store.Load(effective.ProjectID)
+	if err != nil || loaded.SchemaVersion != CurrentSchemaVersion || loaded.ProjectRoot != project || !reflect.DeepEqual(loadedRules, rules) {
+		t.Fatalf("loaded=%+v rules=%+v error=%v", loaded, loadedRules, err)
+	}
+	migrated, _ := os.ReadFile(paths.Project)
+	if strings.Contains(string(migrated), `"auth"`) || !strings.Contains(string(migrated), `"schema_version": 4`) {
+		t.Fatalf("Project auth was not removed by migration: %s", migrated)
+	}
+	for path, content := range map[string]string{vmState: "vm-identity-sentinel", pending: "pending-change-set-sentinel"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != content {
+			t.Fatalf("migration changed state %s: content=%q error=%v", path, got, err)
+		}
+	}
+
+	legacy["schema_version"] = float64(CurrentSchemaVersion)
+	invalid, _ := json.Marshal(legacy)
+	if err := os.WriteFile(paths.Project, invalid, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.LoadReadOnly(effective.ProjectID); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("current Project schema accepted removed auth field: %v", err)
 	}
 }
 

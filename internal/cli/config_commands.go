@@ -49,11 +49,19 @@ func (a *app) config(ctx context.Context, action, dir string, effectiveOutput bo
 	}
 	switch action {
 	case "edit":
+		settingsStore, err := a.userSettingsStore()
+		if err != nil {
+			return err
+		}
+		settings, err := settingsStore.Load()
+		if err != nil {
+			return err
+		}
 		snapshotBefore, err := captureConfigMutationSnapshot(config, rules, effective)
 		if err != nil {
 			return err
 		}
-		result, err := configwizard.RunWithOptions(a.input, a.output, config, rules, configwizard.Options{SuggestedGitRemotes: detectProjectGitRemotes(ctx, effective.ProjectRoot)})
+		result, err := configwizard.RunWithOptions(a.input, a.output, config, rules, configwizard.Options{ModelAuth: settings.ModelAuth, SuggestedGitRemotes: detectProjectGitRemotes(ctx, effective.ProjectRoot)})
 		if errors.Is(err, configwizard.ErrCanceled) {
 			fmt.Fprintln(a.output, "Project configuration was not changed.")
 			return nil

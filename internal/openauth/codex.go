@@ -34,16 +34,21 @@ const (
 type credentialStore interface {
 	Load(context.Context) (secretstore.CodexOAuthCredential, error)
 	Save(context.Context, secretstore.CodexOAuthCredential) error
+	Update(context.Context, func(secretstore.CodexOAuthCredential) (secretstore.CodexOAuthCredential, error)) (secretstore.CodexOAuthCredential, error)
 }
 
-type keychainStore struct{}
+type fileStore struct{}
 
-func (keychainStore) Load(ctx context.Context) (secretstore.CodexOAuthCredential, error) {
+func (fileStore) Load(ctx context.Context) (secretstore.CodexOAuthCredential, error) {
 	return secretstore.LoadCodexOAuth(ctx)
 }
 
-func (keychainStore) Save(ctx context.Context, credential secretstore.CodexOAuthCredential) error {
+func (fileStore) Save(ctx context.Context, credential secretstore.CodexOAuthCredential) error {
 	return secretstore.StoreCodexOAuth(ctx, credential)
+}
+
+func (fileStore) Update(ctx context.Context, update func(secretstore.CodexOAuthCredential) (secretstore.CodexOAuthCredential, error)) (secretstore.CodexOAuthCredential, error) {
+	return secretstore.UpdateCodexOAuth(ctx, update)
 }
 
 type Client struct {
@@ -76,7 +81,7 @@ type Manager struct {
 }
 
 func NewManager() *Manager {
-	return &Manager{client: NewClient(), store: keychainStore{}}
+	return &Manager{client: NewClient(), store: fileStore{}}
 }
 
 func (m *Manager) Login(ctx context.Context, output io.Writer) error {
@@ -107,16 +112,16 @@ func (m *Manager) AccessToken(ctx context.Context) (modelgateway.OAuthAccess, er
 		credential = *m.cached
 	}
 	if m.client.now().Add(time.Minute).Unix() >= credential.ExpiresAt {
-		refreshed, err := m.client.refresh(ctx, credential)
+		refreshed, err := m.store.Update(ctx, func(current secretstore.CodexOAuthCredential) (secretstore.CodexOAuthCredential, error) {
+			if m.client.now().Add(time.Minute).Unix() < current.ExpiresAt {
+				return current, nil
+			}
+			return m.client.refresh(ctx, current)
+		})
 		if err != nil {
 			return modelgateway.OAuthAccess{}, err
 		}
 		credential = refreshed
-		storeContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		if err := m.store.Save(storeContext, credential); err != nil {
-			return modelgateway.OAuthAccess{}, err
-		}
 	}
 	m.cached = &credential
 	return modelgateway.OAuthAccess{Token: credential.AccessToken, AccountID: credential.AccountID}, nil

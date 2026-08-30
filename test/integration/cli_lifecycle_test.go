@@ -16,7 +16,7 @@ import (
 	"sunaba/internal/state"
 )
 
-func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
+func TestPublicCLIPersistentSupervisorAndSanitizedConsole(t *testing.T) {
 	if os.Getenv("SUNABA_CLI_INTEGRATION") != "1" {
 		t.Skip("set SUNABA_CLI_INTEGRATION=1 on the pinned macOS/Apple Container host")
 	}
@@ -35,12 +35,8 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIntegrationFile(t, filepath.Join(project, "baseline.txt"), "baseline\n")
-	fakeSecurity := filepath.Join(runtimeBase, "security")
-	writeIntegrationFile(t, fakeSecurity, "#!/bin/sh\ncase \"$1\" in\n  login-keychain) printf '\"%s\"\\n' '"+filepath.Join(runtimeBase, "login.keychain-db")+"' ;;\n  find-generic-password) printf '%s\\n' 'host-only-integration-placeholder-key' ;;\n  *) exit 2 ;;\nesac\n")
-	if err := os.Chmod(fakeSecurity, 0700); err != nil {
-		t.Fatal(err)
-	}
-	sunaba := buildHostBinaryWithLDFlags(t, ctx, runtimeBase, "sunaba", "./cmd/sunaba", "-X sunaba/internal/secretstore.commandPath="+fakeSecurity)
+	sunaba := buildHostBinary(t, ctx, runtimeBase, "sunaba", "./cmd/sunaba")
+	copyBundledSunabaUI(t, runtimeBase)
 	_ = buildHostBinary(t, ctx, runtimeBase, "sunaba-git-hook", "./cmd/sunaba-git-hook")
 	_ = buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
 	xdg := filepath.Join(runtimeBase, "data")
@@ -54,6 +50,12 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	}
 	if output, err := runSunaba("", "setup"); err != nil {
 		t.Fatalf("setup: %v: %s", err, output)
+	}
+	if output, err := runSunaba("host-only-integration-placeholder-key\n", "credentials", "openai", "api-key", "set"); err != nil {
+		t.Fatalf("credential setup: %v: %s", err, output)
+	}
+	if output, err := runSunaba("", "model", "auth", "api-key"); err != nil {
+		t.Fatalf("global model auth setup: %v: %s", err, output)
 	}
 	if output, err := runSunaba("", "project", "init", project, "--mode", "secure"); err != nil {
 		t.Fatalf("project init: %v: %s", err, output)
@@ -76,7 +78,7 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 		t.Fatalf("paused status after up error=%v output=%s", err, status)
 	}
 	firstShell := "printf persistent > persistent.txt\nprintf '\\033]52;c;evil\\a\\n'\n"
-	first, err := runSunaba(firstShell, "shell", "--project-id", projectID)
+	first, err := runSunaba(firstShell, "console", "--project-id", projectID)
 	if err != nil {
 		t.Fatalf("first shell: %v: %s", err, first)
 	}
@@ -100,7 +102,7 @@ func TestPublicCLIPersistentSupervisorAndSanitizedShell(t *testing.T) {
 	if err != nil || !strings.Contains(configApplied, "Application (next-session): session") || !strings.Contains(configApplied, "active Session is unchanged") {
 		t.Fatalf("paused next-Session config apply error=%v output=%s", err, configApplied)
 	}
-	second, err := runSunaba("cat persistent.txt\n", "shell", "--dir", project)
+	second, err := runSunaba("cat persistent.txt\n", "console", "--dir", project)
 	if err != nil || !strings.Contains(second, "persistent") {
 		t.Fatalf("persistent shell state error=%v output=%s", err, second)
 	}

@@ -34,43 +34,72 @@ type legacyPolicyV1 struct {
 }
 
 type legacyPolicyV2 struct {
-	SchemaVersion  int              `json:"schema_version"`
-	ProjectID      string           `json:"project_id"`
-	ProjectRoot    string           `json:"project_root"`
-	Mode           string           `json:"mode"`
-	Dependency     DependencyPolicy `json:"dependency"`
-	Resources      ResourcePolicy   `json:"resources"`
-	Session        SessionPolicy    `json:"session"`
-	Model          ModelPolicy      `json:"model"`
-	Git            legacyGitV2      `json:"git"`
-	Web            WebPolicy        `json:"web"`
-	Export         ExportPolicy     `json:"export"`
-	Audit          AuditPolicy      `json:"audit"`
-	ProtectedPaths []string         `json:"protected_paths"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
+	SchemaVersion  int               `json:"schema_version"`
+	ProjectID      string            `json:"project_id"`
+	ProjectRoot    string            `json:"project_root"`
+	Mode           string            `json:"mode"`
+	Dependency     DependencyPolicy  `json:"dependency"`
+	Resources      ResourcePolicy    `json:"resources"`
+	Session        SessionPolicy     `json:"session"`
+	Model          legacyModelPolicy `json:"model"`
+	Git            legacyGitV2       `json:"git"`
+	Web            WebPolicy         `json:"web"`
+	Export         ExportPolicy      `json:"export"`
+	Audit          AuditPolicy       `json:"audit"`
+	ProtectedPaths []string          `json:"protected_paths"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
-type legacyPolicyV3 ProjectPolicy
-type legacyPolicyV4 ProjectPolicy
-type legacyPolicyV6 ProjectPolicy
+type legacyPolicyV3 legacyProjectPolicy
+type legacyPolicyV4 legacyProjectPolicy
+type legacyPolicyV6 legacyProjectPolicy
+type legacyPolicyV7 legacyProjectPolicy
+
+type legacyModelPolicy struct {
+	AuthMode         modelcatalog.AuthMode `json:"auth,omitempty"`
+	AllowedModels    []string              `json:"allowed_models"`
+	MaxRequests      int                   `json:"max_requests"`
+	MaxConcurrent    int                   `json:"max_concurrent"`
+	MaxRequestBytes  int64                 `json:"max_request_bytes"`
+	MaxResponseBytes int64                 `json:"max_response_bytes"`
+}
+
+type legacyProjectPolicy struct {
+	SchemaVersion  int               `json:"schema_version"`
+	ProjectID      string            `json:"project_id"`
+	ProjectRoot    string            `json:"project_root"`
+	Mode           string            `json:"mode"`
+	Dependency     DependencyPolicy  `json:"dependency"`
+	Resources      ResourcePolicy    `json:"resources"`
+	Session        SessionPolicy     `json:"session"`
+	Model          legacyModelPolicy `json:"model"`
+	Git            GitPolicy         `json:"git"`
+	Web            WebPolicy         `json:"web"`
+	Export         ExportPolicy      `json:"export"`
+	Snapshot       SnapshotPolicy    `json:"snapshot"`
+	Audit          AuditPolicy       `json:"audit"`
+	ProtectedPaths []string          `json:"protected_paths"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+}
 
 type legacyPolicyV5 struct {
-	SchemaVersion  int              `json:"schema_version"`
-	ProjectID      string           `json:"project_id"`
-	ProjectRoot    string           `json:"project_root"`
-	Mode           string           `json:"mode"`
-	Dependency     DependencyPolicy `json:"dependency"`
-	Resources      ResourcePolicy   `json:"resources"`
-	Session        SessionPolicy    `json:"session"`
-	Model          ModelPolicy      `json:"model"`
-	Git            GitPolicy        `json:"git"`
-	Web            legacyWebPolicy  `json:"web"`
-	Export         ExportPolicy     `json:"export"`
-	Audit          AuditPolicy      `json:"audit"`
-	ProtectedPaths []string         `json:"protected_paths"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
+	SchemaVersion  int               `json:"schema_version"`
+	ProjectID      string            `json:"project_id"`
+	ProjectRoot    string            `json:"project_root"`
+	Mode           string            `json:"mode"`
+	Dependency     DependencyPolicy  `json:"dependency"`
+	Resources      ResourcePolicy    `json:"resources"`
+	Session        SessionPolicy     `json:"session"`
+	Model          legacyModelPolicy `json:"model"`
+	Git            GitPolicy         `json:"git"`
+	Web            legacyWebPolicy   `json:"web"`
+	Export         ExportPolicy      `json:"export"`
+	Audit          AuditPolicy       `json:"audit"`
+	ProtectedPaths []string          `json:"protected_paths"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 type legacyWebPolicy struct {
@@ -125,6 +154,17 @@ func LoadReadOnly(path string, now time.Time) (ProjectPolicy, bool, error) {
 			return ProjectPolicy{}, false, err
 		}
 		return current, false, current.Validate()
+	case 7:
+		var legacy legacyPolicyV7
+		if err := decodeStrict(data, &legacy); err != nil {
+			return ProjectPolicy{}, false, err
+		}
+		if err := modelcatalog.ValidateAuthMode(legacy.Model.AuthMode); err != nil {
+			return ProjectPolicy{}, false, fmt.Errorf("legacy Project policy authentication is invalid: %w", err)
+		}
+		migrated := fromLegacyProject(legacyProjectPolicy(legacy))
+		migrated.SchemaVersion = CurrentSchemaVersion
+		return migrated, true, migrated.Validate()
 	case 5:
 		var legacy legacyPolicyV5
 		if err := decodeStrict(data, &legacy); err != nil {
@@ -191,7 +231,7 @@ func LoadReadOnly(path string, now time.Time) (ProjectPolicy, bool, error) {
 }
 
 func migrateV6(legacy legacyPolicyV6, now time.Time) (ProjectPolicy, error) {
-	result := ProjectPolicy(legacy)
+	result := fromLegacyProject(legacyProjectPolicy(legacy))
 	result.SchemaVersion = CurrentSchemaVersion
 	result.Snapshot = SnapshotPolicy{}
 	result.UpdatedAt = now.UTC()
@@ -201,7 +241,7 @@ func migrateV6(legacy legacyPolicyV6, now time.Time) (ProjectPolicy, error) {
 func migrateV5(legacy legacyPolicyV5, now time.Time) (ProjectPolicy, error) {
 	policy := ProjectPolicy{
 		SchemaVersion: CurrentSchemaVersion, ProjectID: legacy.ProjectID, ProjectRoot: legacy.ProjectRoot, Mode: legacy.Mode,
-		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: legacy.Model, Git: legacy.Git,
+		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: modelWithoutAuth(legacy.Model), Git: legacy.Git,
 		Web: WebPolicy{
 			Enabled: legacy.Web.Enabled, Rules: append([]webgateway.OriginRule(nil), legacy.Web.Rules...),
 			BlocklistManifest: legacy.Web.BlocklistManifest, BlocklistSHA256: legacy.Web.BlocklistSHA256,
@@ -216,9 +256,8 @@ func migrateV5(legacy legacyPolicyV5, now time.Time) (ProjectPolicy, error) {
 }
 
 func migrateV3(legacy legacyPolicyV3, now time.Time) (ProjectPolicy, error) {
-	policy := ProjectPolicy(legacy)
+	policy := fromLegacyProject(legacyProjectPolicy(legacy))
 	policy.SchemaVersion = CurrentSchemaVersion
-	setLegacyAuthenticationDefault(&policy.Model)
 	upgradeLegacyModelDefaults(&policy.Model)
 	migrateLegacyWebSelection(&policy.Web)
 	policy.UpdatedAt = now.UTC()
@@ -226,18 +265,11 @@ func migrateV3(legacy legacyPolicyV3, now time.Time) (ProjectPolicy, error) {
 }
 
 func migrateV4(legacy legacyPolicyV4, now time.Time) (ProjectPolicy, error) {
-	policy := ProjectPolicy(legacy)
+	policy := fromLegacyProject(legacyProjectPolicy(legacy))
 	policy.SchemaVersion = CurrentSchemaVersion
-	setLegacyAuthenticationDefault(&policy.Model)
 	migrateLegacyWebSelection(&policy.Web)
 	policy.UpdatedAt = now.UTC()
 	return policy, policy.Validate()
-}
-
-func setLegacyAuthenticationDefault(model *ModelPolicy) {
-	if model.AuthMode == "" {
-		model.AuthMode = modelcatalog.AuthAPIKey
-	}
 }
 
 func upgradeLegacyModelDefaults(model *ModelPolicy) {
@@ -274,15 +306,31 @@ func migrateV2(legacy legacyPolicyV2, now time.Time) (ProjectPolicy, error) {
 	}
 	policy := ProjectPolicy{
 		SchemaVersion: CurrentSchemaVersion, ProjectID: legacy.ProjectID, ProjectRoot: legacy.ProjectRoot, Mode: legacy.Mode,
-		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: legacy.Model,
+		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: modelWithoutAuth(legacy.Model),
 		Git: GitPolicy{Remotes: remotes, PushApprovalRequired: legacy.Git.PushApprovalRequired},
 		Web: legacy.Web, Export: legacy.Export, Audit: legacy.Audit, ProtectedPaths: legacy.ProtectedPaths,
 		CreatedAt: legacy.CreatedAt.UTC(), UpdatedAt: now.UTC(),
 	}
-	setLegacyAuthenticationDefault(&policy.Model)
 	upgradeLegacyModelDefaults(&policy.Model)
 	migrateLegacyWebSelection(&policy.Web)
 	return policy, policy.Validate()
+}
+
+func modelWithoutAuth(legacy legacyModelPolicy) ModelPolicy {
+	return ModelPolicy{
+		AllowedModels: append([]string(nil), legacy.AllowedModels...), MaxRequests: legacy.MaxRequests,
+		MaxConcurrent: legacy.MaxConcurrent, MaxRequestBytes: legacy.MaxRequestBytes,
+		MaxResponseBytes: legacy.MaxResponseBytes,
+	}
+}
+
+func fromLegacyProject(legacy legacyProjectPolicy) ProjectPolicy {
+	return ProjectPolicy{
+		SchemaVersion: legacy.SchemaVersion, ProjectID: legacy.ProjectID, ProjectRoot: legacy.ProjectRoot, Mode: legacy.Mode,
+		Dependency: legacy.Dependency, Resources: legacy.Resources, Session: legacy.Session, Model: modelWithoutAuth(legacy.Model),
+		Git: legacy.Git, Web: legacy.Web, Export: legacy.Export, Snapshot: legacy.Snapshot, Audit: legacy.Audit,
+		ProtectedPaths: append([]string(nil), legacy.ProtectedPaths...), CreatedAt: legacy.CreatedAt, UpdatedAt: legacy.UpdatedAt,
+	}
 }
 
 func Save(path string, policy ProjectPolicy) error {
@@ -343,7 +391,7 @@ func migrateV1(legacy legacyPolicyV1, now time.Time) (ProjectPolicy, error) {
 		Resources:  ResourcePolicy{CPUs: legacy.CPUs, Memory: legacy.Memory, DiskBytes: legacy.DiskBytes, ProcessMax: 512, FileSizeMax: legacy.DiskBytes, OpenFileMax: 4096},
 		Session:    SessionPolicy{TTLSeconds: legacy.SessionTTLSeconds, IdleSeconds: min(legacy.SessionTTLSeconds, 900)},
 		Model: ModelPolicy{
-			AuthMode: modelcatalog.AuthAPIKey, AllowedModels: legacy.AllowedModels, MaxRequests: modelgateway.DefaultMaxRequests,
+			AllowedModels: legacy.AllowedModels, MaxRequests: modelgateway.DefaultMaxRequests,
 			MaxConcurrent: modelgateway.DefaultMaxConcurrent, MaxRequestBytes: modelgateway.DefaultMaxRequestBytes,
 			MaxResponseBytes: modelgateway.DefaultMaxResponseBytes,
 		},

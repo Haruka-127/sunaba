@@ -25,6 +25,7 @@ import (
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
 	"sunaba/internal/testutil"
+	"sunaba/internal/usersettings"
 	"sunaba/internal/workspace"
 )
 
@@ -778,6 +779,10 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		t.Fatal(err)
 	}
 	runtimeBase := testutil.PrivateTempDir(t, "sunaba-runtime-test-")
+	modelAuth, err := SnapshotModelAuth(usersettings.Default(), []string{"gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return Config{
 		Store: &state.Store{Root: filepath.Join(root, "state")}, Runtime: fake,
 		ProjectRoot: project, RuntimeBase: runtimeBase, VMID: "vmphase1test", SessionID: "phase1test", Image: dependency.MustPinned().AgentImage.Tag,
@@ -786,7 +791,8 @@ func sessionFixture(t *testing.T) (Config, *fakeRuntime) {
 		ModelGateway:      http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) }),
 		ModelGatewayClose: func() error { return nil },
 		ModelToken:        strings.Repeat("m", 43), ServerPassword: strings.Repeat("p", 43),
-		LeaseTTL: time.Minute, Audit: auditRecorder,
+		ModelAuth: modelAuth,
+		LeaseTTL:  time.Minute, Audit: auditRecorder,
 		SnapshotPolicy: workspace.DefaultSnapshotPolicy(), ExportPolicy: workspace.DefaultExportPolicy(), ExportPolicyDigest: strings.Repeat("a", 64),
 		OnEvent: func(Event) {},
 	}, fake

@@ -17,13 +17,39 @@ import (
 	"sunaba/internal/webgateway"
 )
 
-func (a *app) modelPolicy(_ context.Context, action, auth, dir string, models []string) error {
+func (a *app) modelAuth(_ context.Context, auth string) error {
+	mode := modelcatalog.AuthAPIKey
+	if auth == "oauth" {
+		mode = modelcatalog.AuthOAuth
+	} else if auth != "api-key" {
+		return fmt.Errorf("unknown model authentication method %q", auth)
+	}
+	store, err := a.userSettingsStore()
+	if err != nil {
+		return err
+	}
+	if err := store.SetModelAuth(mode); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.output, "Configured global Model Gateway authentication=%s. Active Agent Sessions are unchanged; the new method applies to future Sessions in every Project.\n", mode)
+	return nil
+}
+
+func (a *app) modelPolicy(_ context.Context, action, _ string, dir string, models []string) error {
 	projectPolicy, path, _, err := a.loadPolicy(dir)
 	if err != nil {
 		return err
 	}
+	settingsStore, err := a.userSettingsStore()
+	if err != nil {
+		return err
+	}
+	settings, err := settingsStore.Load()
+	if err != nil {
+		return err
+	}
 	if action == "list" {
-		available, err := modelcatalog.Available(projectPolicy.Model.AuthMode)
+		available, err := modelcatalog.Available(settings.ModelAuth)
 		if err != nil {
 			return err
 		}
@@ -47,24 +73,11 @@ func (a *app) modelPolicy(_ context.Context, action, auth, dir string, models []
 		return err
 	}
 	switch action {
-	case "auth":
-		mode := modelcatalog.AuthAPIKey
-		if auth == "oauth" {
-			mode = modelcatalog.AuthOAuth
-		}
-		defaultModels, err := modelcatalog.DefaultModels(mode)
-		if err != nil {
-			return err
-		}
-		projectPolicy.Model.AuthMode = mode
-		if _, err := modelcatalog.Resolve(mode, projectPolicy.Model.AllowedModels); err != nil {
-			projectPolicy.Model.AllowedModels = defaultModels
-		}
 	case "set":
 		if len(models) == 0 {
 			return fmt.Errorf("model set requires at least one --model")
 		}
-		if _, err := modelcatalog.Resolve(projectPolicy.Model.AuthMode, models); err != nil {
+		if _, err := modelcatalog.Resolve(settings.ModelAuth, models); err != nil {
 			return err
 		}
 		projectPolicy.Model.AllowedModels = append([]string(nil), models...)
@@ -75,7 +88,7 @@ func (a *app) modelPolicy(_ context.Context, action, auth, dir string, models []
 	if err := a.savePolicyAndConfigLocked(path, projectPolicy); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Configured Project Model Gateway authentication=%s with models=%s. The active Agent Session is unchanged; fresh authority will use this policy on the next Session.\n", projectPolicy.Model.AuthMode, strings.Join(projectPolicy.Model.AllowedModels, ","))
+	fmt.Fprintf(a.output, "Configured Project Model Gateway allowlist=%s for global authentication=%s. The active Agent Session is unchanged; fresh authority will use this policy on the next Session.\n", strings.Join(projectPolicy.Model.AllowedModels, ","), settings.ModelAuth)
 	return nil
 }
 

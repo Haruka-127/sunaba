@@ -237,7 +237,7 @@ func (a *app) startManagedSession(ctx context.Context, projectPolicy policy.Proj
 		VMID: vmID, SessionID: activation.activation.SessionID, Mode: projectPolicy.Mode, Image: projectPolicy.Dependency.AgentImage,
 		CPUs: projectPolicy.Resources.CPUs, Memory: projectPolicy.Resources.Memory, DiskBytes: projectPolicy.Resources.DiskBytes,
 		ProcessMax: projectPolicy.Resources.ProcessMax, FileSizeMax: projectPolicy.Resources.FileSizeMax, OpenFileMax: projectPolicy.Resources.OpenFileMax,
-		GuestRelayBinary: guestRelay, ProviderConfig: activation.activation.ProviderConfig, ModelGateway: activation.activation.ModelGateway, ModelGatewayClose: activation.activation.ModelGatewayClose, ModelToken: activation.activation.ModelToken,
+		GuestRelayBinary: guestRelay, ProviderConfig: activation.activation.ProviderConfig, ModelGateway: activation.activation.ModelGateway, ModelGatewayClose: activation.activation.ModelGatewayClose, ModelToken: activation.activation.ModelToken, ModelAuth: activation.activation.ModelAuth,
 		GitGateway: activation.activation.GitGateway, GitRemotes: activation.activation.GitRemotes, GitGatewayClose: activation.activation.GitGatewayClose,
 		WebGateway: activation.activation.WebGateway, WebToken: activation.activation.WebToken, WebGatewayClose: activation.activation.WebGatewayClose,
 		ServerPassword: activation.activation.ServerPassword, LeaseTTL: activation.activation.LeaseTTL, Audit: recorder,
@@ -306,10 +306,22 @@ func (a *app) reloadActivationPolicy(vmPolicy policy.ProjectPolicy, policyPath s
 }
 
 func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState, runtimeBase, vmID string, recorder *audit.Recorder) (managedActivation, error) {
+	settingsStore, err := a.userSettingsStore()
+	if err != nil {
+		return managedActivation{}, err
+	}
+	modelAuth, err := session.LoadModelAuthSnapshot(settingsStore, projectPolicy.Model.AllowedModels)
+	if err != nil {
+		return managedActivation{}, err
+	}
+	allowedModels := make([]string, len(modelAuth.Models))
+	for index := range modelAuth.Models {
+		allowedModels[index] = modelAuth.Models[index].ID
+	}
 	upstreamBaseURL := "https://api.openai.com"
 	upstreamKey := ""
 	var oauthTokens modelgateway.OAuthTokenSource
-	if projectPolicy.Model.AuthMode == modelcatalog.AuthOAuth {
+	if modelAuth.Mode == modelcatalog.AuthOAuth {
 		manager := openauth.NewManager()
 		if _, err := manager.AccessToken(ctx); err != nil {
 			return managedActivation{}, err
@@ -336,7 +348,7 @@ func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.Pro
 		return managedActivation{}, err
 	}
 	expiresAt := time.Now().Add(time.Duration(projectPolicy.Session.TTLSeconds) * time.Second)
-	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, "sunaba-"+projectPolicy.ProjectID+"-"+vmID, sessionID, projectPolicy.Model.AllowedModels, expiresAt)
+	capability, err := modelgateway.NewCapability(modelToken, projectPolicy.ProjectID, "sunaba-"+projectPolicy.ProjectID+"-"+vmID, sessionID, allowedModels, expiresAt)
 	if err != nil {
 		return managedActivation{}, err
 	}
@@ -345,7 +357,7 @@ func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.Pro
 	capability.MaxRequestBytes = projectPolicy.Model.MaxRequestBytes
 	capability.MaxResponseBytes = projectPolicy.Model.MaxResponseBytes
 	gateway, err := modelgateway.New(modelgateway.Config{
-		UpstreamBaseURL: upstreamBaseURL, UpstreamAPIKey: upstreamKey, AuthMode: projectPolicy.Model.AuthMode, OAuthTokens: oauthTokens, Capability: capability,
+		UpstreamBaseURL: upstreamBaseURL, UpstreamAPIKey: upstreamKey, AuthMode: modelAuth.Mode, OAuthTokens: oauthTokens, Capability: capability,
 		Audit: func(event modelgateway.AuditEvent) error {
 			return recorder.Append(audit.BoundaryEvent{Category: "model", Action: "model.request", Outcome: statusOutcome(event.Status), ProjectID: event.ProjectID, VMID: event.VMID, SessionID: event.SessionID, Details: map[string]string{
 				"model": event.Model, "status": fmt.Sprint(event.Status), "request_bytes": fmt.Sprint(event.RequestBytes), "response_bytes": fmt.Sprint(event.ResponseBytes), "reason": event.Reason,
@@ -356,8 +368,8 @@ func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.Pro
 		return managedActivation{}, err
 	}
 	provider, err := opencode.BuildModelGatewayConfig(opencode.ModelGatewayProviderConfig{
-		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: projectPolicy.Model.AllowedModels,
-		DefaultModel: projectPolicy.Model.AllowedModels[0], TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", AuthMode: projectPolicy.Model.AuthMode,
+		BaseURL: "http://127.0.0.1:4141/v1", AllowedModels: allowedModels,
+		DefaultModel: allowedModels[0], TokenEnv: "SUNABA_MODEL_GATEWAY_TOKEN", AuthMode: modelAuth.Mode,
 	})
 	if err != nil {
 		return managedActivation{}, err
@@ -368,7 +380,7 @@ func (a *app) newManagedActivation(ctx context.Context, projectPolicy policy.Pro
 		return managedActivation{}, err
 	}
 	return managedActivation{activation: session.Activation{
-		SessionID: sessionID, ProviderConfig: provider, ModelGateway: gateway, ModelGatewayClose: func() error { gateway.Revoke(); return nil }, ModelToken: modelToken,
+		SessionID: sessionID, ProviderConfig: provider, ModelGateway: gateway, ModelGatewayClose: func() error { gateway.Revoke(); return nil }, ModelToken: modelToken, ModelAuth: modelAuth,
 		GitGateway: gateways.gitHandler, GitRemotes: gateways.gitRemotes, GitGatewayClose: gateways.gitClose,
 		WebGateway: gateways.webHandler, WebToken: gateways.webToken, WebGatewayClose: gateways.webClose,
 		ServerPassword: serverPassword, LeaseTTL: time.Duration(projectPolicy.Session.TTLSeconds) * time.Second,
@@ -557,7 +569,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 }
 
 func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.ProjectPolicy, projectState string) (returnErr error) {
-	fmt.Fprintln(a.errors, "WARNING: dev mode permits direct Internet egress only while this foreground shell session is active; exfiltration prevention is not provided.")
+	fmt.Fprintln(a.errors, "WARNING: dev mode permits direct Internet egress only while this foreground console session is active; exfiltration prevention is not provided.")
 	managed, err := a.startManagedSession(ctx, projectPolicy, projectState)
 	if err != nil {
 		return err

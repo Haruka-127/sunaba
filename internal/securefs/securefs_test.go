@@ -3,6 +3,7 @@ package securefs
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -36,6 +37,32 @@ func TestReadOwnedRegularRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestReadOwnedRegularRejectsHardlink(t *testing.T) {
+	root := privateTempDir(t)
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Link(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadOwnedRegular(target, 64); err == nil {
+		t.Fatal("hard-linked private file was accepted")
+	}
+}
+
+func TestReadOwnedRegularRejectsFIFOWithoutBlocking(t *testing.T) {
+	root := privateTempDir(t)
+	path := filepath.Join(root, "fifo")
+	if err := syscall.Mkfifo(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadOwnedRegular(path, 64); err == nil {
+		t.Fatal("private FIFO was accepted")
+	}
+}
+
 func TestAtomicWriteRejectsUnsafeExistingTarget(t *testing.T) {
 	root := privateTempDir(t)
 	path := filepath.Join(root, "state")
@@ -44,6 +71,20 @@ func TestAtomicWriteRejectsUnsafeExistingTarget(t *testing.T) {
 	}
 	if err := AtomicWriteOwned(path, []byte("value")); err == nil {
 		t.Fatal("unsafe existing target was replaced")
+	}
+}
+
+func TestAtomicWriteRejectsHardlinkedExistingTarget(t *testing.T) {
+	root := privateTempDir(t)
+	path := filepath.Join(root, "state")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := AtomicWriteOwned(path, []byte("new")); err == nil {
+		t.Fatal("hard-linked existing target was replaced")
 	}
 }
 

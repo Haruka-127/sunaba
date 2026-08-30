@@ -30,6 +30,7 @@ type Result struct {
 
 type Options struct {
 	SuggestedGitRemotes []policy.GitRemotePolicy
+	ModelAuth           modelcatalog.AuthMode
 }
 
 type wizard struct {
@@ -39,7 +40,7 @@ type wizard struct {
 
 // Run edits a candidate entirely in memory and returns it only after final confirmation.
 func Run(input io.Reader, output io.Writer, current projectconfig.Config, currentRules []webgateway.OriginRule) (Result, error) {
-	return RunWithOptions(input, output, current, currentRules, Options{})
+	return RunWithOptions(input, output, current, currentRules, Options{ModelAuth: modelcatalog.AuthOAuth})
 }
 
 // RunWithOptions adds validated host-side suggestions without trusting or
@@ -49,6 +50,12 @@ func RunWithOptions(input io.Reader, output io.Writer, current projectconfig.Con
 		return Result{}, fmt.Errorf("configuration wizard input and output are required")
 	}
 	if err := projectconfig.Validate(current, currentRules); err != nil {
+		return Result{}, err
+	}
+	if options.ModelAuth == "" {
+		options.ModelAuth = modelcatalog.AuthOAuth
+	}
+	if err := modelcatalog.ValidateAuthMode(options.ModelAuth); err != nil {
 		return Result{}, err
 	}
 	scanner := bufio.NewScanner(input)
@@ -64,7 +71,7 @@ func RunWithOptions(input io.Reader, output io.Writer, current projectconfig.Con
 	if candidate.Mode, err = w.mode(candidate.Mode); err != nil {
 		return Result{}, err
 	}
-	if candidate.Model, err = w.model(candidate.Model); err != nil {
+	if candidate.Model, err = w.model(candidate.Model, options.ModelAuth); err != nil {
 		return Result{}, err
 	}
 	if candidate.Git.Remotes, err = w.git(candidate.Git.Remotes, options.SuggestedGitRemotes); err != nil {
@@ -122,33 +129,18 @@ func (w *wizard) mode(current string) (string, error) {
 	return "dev", nil
 }
 
-func (w *wizard) model(current policy.ModelPolicy) (policy.ModelPolicy, error) {
+func (w *wizard) model(current projectconfig.ModelConfig, authMode modelcatalog.AuthMode) (projectconfig.ModelConfig, error) {
 	change, err := w.yesNo("\nChange Model Gateway settings?", false)
 	if err != nil || !change {
 		return current, err
 	}
-	fmt.Fprintln(w.output, "Model authentication method:")
-	fmt.Fprintln(w.output, "  1. API key (usage-based billing)")
-	fmt.Fprintln(w.output, "  2. OAuth (ChatGPT Codex subscription)")
-	defaultChoice := 1
-	if current.AuthMode == modelcatalog.AuthOAuth {
-		defaultChoice = 2
-	}
-	choice, err := w.choice("Selection", defaultChoice, 2)
-	if err != nil {
-		return current, err
-	}
-	mode := modelcatalog.AuthAPIKey
-	if choice == 2 {
-		mode = modelcatalog.AuthOAuth
-	}
-	available, err := modelcatalog.Available(mode)
+	available, err := modelcatalog.Available(authMode)
 	if err != nil {
 		return current, err
 	}
 	selected := append([]string(nil), current.AllowedModels...)
-	if _, err := modelcatalog.Resolve(mode, selected); err != nil {
-		selected, err = modelcatalog.DefaultModels(mode)
+	if _, err := modelcatalog.Resolve(authMode, selected); err != nil {
+		selected, err = modelcatalog.DefaultModels(authMode)
 		if err != nil {
 			return current, err
 		}
@@ -173,7 +165,6 @@ func (w *wizard) model(current policy.ModelPolicy) (policy.ModelPolicy, error) {
 		}
 		ids, err := parseModelSelection(line, available)
 		if err == nil {
-			current.AuthMode = mode
 			current.AllowedModels = ids
 			return current, nil
 		}
@@ -441,7 +432,7 @@ func (w *wizard) advanced(config *projectconfig.Config) error {
 func (w *wizard) summary(config projectconfig.Config, rules []webgateway.OriginRule) {
 	fmt.Fprintln(w.output, "\nConfiguration to apply:")
 	fmt.Fprintf(w.output, "  mode: %s\n", safe(config.Mode))
-	fmt.Fprintf(w.output, "  model: auth=%s, default=%s, allowed=%s\n", safe(string(config.Model.AuthMode)), safe(config.Model.AllowedModels[0]), safe(strings.Join(config.Model.AllowedModels, ",")))
+	fmt.Fprintf(w.output, "  model: default=%s, allowed=%s\n", safe(config.Model.AllowedModels[0]), safe(strings.Join(config.Model.AllowedModels, ",")))
 	fmt.Fprintf(w.output, "  Git Gateway: %t (%d remote)\n", len(config.Git.Remotes) > 0, len(config.Git.Remotes))
 	for _, remote := range config.Git.Remotes {
 		fmt.Fprintf(w.output, "    %s -> %s\n", safe(remote.Name), safe(remote.URL))

@@ -17,6 +17,12 @@ const (
 	AppleContainerCommit  = "0190097d06df0b9065f4c2d2c7873c649d81d493"
 	OpenCodeVersion       = "1.18.18"
 	OpenCodeCommit        = "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
+	BunVersion            = "1.3.14"
+	BunArchiveSHA256      = "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620"
+	BunExecutableSHA256   = "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233"
+	OpenTUIVersion        = "0.5.9"
+	OpenTUISHA256         = "d9c9b952ff39a79ed52a7f2cb364977d9859b55cdc346bdbfa55b3d4bff77940"
+	SunabaUISHA256        = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
 	UrfaveCLIVersion      = "v3.10.1"
 )
 
@@ -40,6 +46,26 @@ type Artifact struct {
 	ExecutableSHA256 string `json:"executable_sha256,omitempty"`
 }
 
+type BuildTool struct {
+	Version string   `json:"version"`
+	Host    Artifact `json:"host"`
+}
+
+type NPMDependency struct {
+	Package   string `json:"package"`
+	Version   string `json:"version"`
+	URL       string `json:"url"`
+	SHA256    string `json:"sha256"`
+	Integrity string `json:"integrity"`
+}
+
+type StandaloneArtifact struct {
+	Version string `json:"version"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	SHA256  string `json:"sha256"`
+}
+
 type Manifest struct {
 	SchemaVersion  int `json:"schema_version"`
 	AppleContainer struct {
@@ -59,7 +85,10 @@ type Manifest struct {
 		Host    Artifact `json:"host"`
 		Guest   Artifact `json:"guest"`
 	} `json:"opencode"`
-	Provenance Provenance `json:"provenance"`
+	Bun        BuildTool          `json:"bun"`
+	OpenTUI    NPMDependency      `json:"opentui"`
+	SunabaUI   StandaloneArtifact `json:"sunaba_ui"`
+	Provenance Provenance         `json:"provenance"`
 }
 
 type SourcePin struct {
@@ -156,6 +185,9 @@ func (m Manifest) Validate() error {
 	if m.Provenance.OpenCode.Commit != OpenCodeCommit {
 		return fmt.Errorf("OpenCode source commit does not match compiled bootstrap contract")
 	}
+	if m.Bun.Version != BunVersion || m.Bun.Host.SHA256 != BunArchiveSHA256 || m.Bun.Host.ExecutableSHA256 != BunExecutableSHA256 || m.OpenTUI.Version != OpenTUIVersion || m.OpenTUI.SHA256 != OpenTUISHA256 || m.SunabaUI.SHA256 != SunabaUISHA256 {
+		return fmt.Errorf("sunaba-ui build dependency does not match compiled bootstrap contract")
+	}
 	return nil
 }
 
@@ -183,6 +215,9 @@ func ValidateRuntimeManifest(m Manifest) error {
 	}
 	if m.GoModules["github.com/urfave/cli/v3"] != UrfaveCLIVersion {
 		return fmt.Errorf("github.com/urfave/cli/v3 must be pinned to %s", UrfaveCLIVersion)
+	}
+	if err := validateUIArtifacts(m); err != nil {
+		return err
 	}
 	if strings.Contains(strings.ToLower(m.OpenCode.Host.URL), "latest") || strings.Contains(strings.ToLower(m.OpenCode.Guest.URL), "latest") {
 		return fmt.Errorf("dependency URLs must not use latest")
@@ -228,6 +263,9 @@ func ValidateUpdateCandidate(current, candidate Manifest, evidence UpdateEvidenc
 	if strings.Contains(strings.ToLower(candidate.OpenCode.Version+candidate.AppleContainer.Version+candidate.AgentImage.Tag), "latest") {
 		return fmt.Errorf("dependency update candidate must not use latest")
 	}
+	if candidate.Bun != current.Bun || candidate.OpenTUI != current.OpenTUI || candidate.SunabaUI != current.SunabaUI {
+		return fmt.Errorf("dependency update candidate must not change the sunaba-ui toolchain without its dedicated release gate")
+	}
 	if err := validateCandidateSyntax(candidate); err != nil {
 		return err
 	}
@@ -251,11 +289,29 @@ func ValidateOpenCodeUpdateCandidate(current, candidate Manifest) error {
 		return fmt.Errorf("OpenCode %s is already the active exact version", current.OpenCode.Version)
 	}
 	if candidate.AppleContainer != current.AppleContainer || candidate.BaseImage != current.BaseImage ||
+		candidate.Bun != current.Bun || candidate.OpenTUI != current.OpenTUI || candidate.SunabaUI != current.SunabaUI ||
 		!reflect.DeepEqual(candidate.GoModules, current.GoModules) ||
 		candidate.Provenance.AppleContainer != current.Provenance.AppleContainer ||
 		candidate.Provenance.BaseImage != current.Provenance.BaseImage ||
 		!reflect.DeepEqual(candidate.Provenance.BuildInputs, current.Provenance.BuildInputs) {
 		return fmt.Errorf("runtime OpenCode update must not change Apple Container, base image, Go modules, or Agent image build inputs")
+	}
+	return nil
+}
+
+func validateUIArtifacts(m Manifest) error {
+	if !exactVersionPattern.MatchString(m.Bun.Version) || m.Bun.Host.OS != "darwin" || m.Bun.Host.Arch != "arm64" || m.Bun.Host.Artifact != "bun-darwin-aarch64.zip" {
+		return fmt.Errorf("Bun build tool must be an exact darwin/arm64 archive")
+	}
+	wantBunURL := "https://github.com/oven-sh/bun/releases/download/bun-v" + m.Bun.Version + "/" + m.Bun.Host.Artifact
+	if m.Bun.Host.URL != wantBunURL || !sha256Pattern.MatchString(m.Bun.Host.SHA256) || !sha256Pattern.MatchString(m.Bun.Host.ExecutableSHA256) {
+		return fmt.Errorf("Bun build tool is not version and digest pinned")
+	}
+	if m.OpenTUI.Package != "@opentui/core" || !exactVersionPattern.MatchString(m.OpenTUI.Version) || m.OpenTUI.URL != "https://registry.npmjs.org/@opentui/core/-/core-"+m.OpenTUI.Version+".tgz" || !sha256Pattern.MatchString(m.OpenTUI.SHA256) || !strings.HasPrefix(m.OpenTUI.Integrity, "sha512-") {
+		return fmt.Errorf("OpenTUI package is not version and digest pinned")
+	}
+	if m.SunabaUI.Version != "1" || m.SunabaUI.OS != "darwin" || m.SunabaUI.Arch != "arm64" || !sha256Pattern.MatchString(m.SunabaUI.SHA256) {
+		return fmt.Errorf("sunaba-ui standalone artifact is not platform and digest pinned")
 	}
 	return nil
 }
@@ -278,6 +334,9 @@ func validateCandidateSyntax(m Manifest) error {
 	}
 	if !sha256Pattern.MatchString(m.OpenCode.Host.ExecutableSHA256) || !commitPattern.MatchString(m.AppleContainer.Commit) {
 		return fmt.Errorf("candidate executable or source commit is not pinned")
+	}
+	if err := validateUIArtifacts(m); err != nil {
+		return err
 	}
 	return validateProvenance(m)
 }

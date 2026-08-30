@@ -35,20 +35,13 @@ func CheckPrerequisitesFor(ctx context.Context, manifest dependency.Manifest) er
 	if _, err := exec.LookPath("container"); err != nil {
 		return fmt.Errorf("container CLI not found. Install apple/container, then run 'container system start'")
 	}
-	if _, err := exec.LookPath("opencode"); err != nil {
-		return fmt.Errorf("opencode CLI %s not found", manifest.OpenCode.Version)
-	}
-	var macVersion, hostVersion, containerVersionOutput, systemStatus string
-	var macErr, hostErr, containerErr, statusErr error
+	var macVersion, containerVersionOutput, systemStatus string
+	var macErr, containerErr, statusErr error
 	var checks sync.WaitGroup
-	checks.Add(4)
+	checks.Add(3)
 	go func() {
 		defer checks.Done()
 		macVersion, macErr = commandOutput(ctx, 10*time.Second, "sw_vers", "-productVersion")
-	}()
-	go func() {
-		defer checks.Done()
-		hostVersion, hostErr = HostVersion(ctx)
 	}()
 	go func() {
 		defer checks.Done()
@@ -68,12 +61,6 @@ func CheckPrerequisitesFor(ctx context.Context, manifest dependency.Manifest) er
 	}
 	if comparison < 0 {
 		return fmt.Errorf("sunaba requires macOS 26 or later; current version is %s", macVersion)
-	}
-	if hostErr != nil {
-		return fmt.Errorf("cannot determine host OpenCode version: %w", hostErr)
-	}
-	if err := validateOpenCodeVersionFor(hostVersion, manifest.OpenCode.Version); err != nil {
-		return err
 	}
 	if containerErr != nil {
 		return fmt.Errorf("cannot determine apple/container version: %w", containerErr)
@@ -120,16 +107,6 @@ func commandOutput(ctx context.Context, timeout time.Duration, name string, args
 	out, err := exec.CommandContext(c, name, args...).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s failed: %w: %s", name, err, strings.TrimSpace(string(out)))
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func HostVersion(ctx context.Context) (string, error) {
-	c, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(c, "opencode", "--version").Output()
-	if err != nil {
-		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }

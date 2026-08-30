@@ -3,13 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"sunaba/internal/image"
 	"sunaba/internal/opencode"
 	"sunaba/internal/policy"
+	"sunaba/internal/securefs"
 	"sunaba/internal/state"
 	"sunaba/internal/updater"
 	"sunaba/internal/versionconfig"
@@ -149,7 +152,7 @@ func (a *app) updateCheck(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.output, "Update candidate %s is ready: OpenCode %s -> %s (expires %s).\nInstall exact OpenCode %s on macOS, then run 'sunaba update apply'.\n", candidate.ID, current.Manifest.OpenCode.Version, candidate.Target.OpenCode.Version, candidate.ExpiresAt.Format(time.RFC3339), candidate.Target.OpenCode.Version)
+	fmt.Fprintf(a.output, "Update candidate %s is ready: OpenCode %s -> %s (expires %s).\nRun 'sunaba update apply' to install the verified managed artifact.\n", candidate.ID, current.Manifest.OpenCode.Version, candidate.Target.OpenCode.Version, candidate.ExpiresAt.Format(time.RFC3339))
 	return nil
 }
 
@@ -192,7 +195,8 @@ func (a *app) updateApply(ctx context.Context) error {
 	} else if current, err = a.activeVersionLock(); err != nil {
 		return err
 	}
-	candidate, err := (&updater.Store{State: a.store}).Load()
+	candidateStore := &updater.Store{State: a.store}
+	candidate, err := candidateStore.Load()
 	if err != nil {
 		return fmt.Errorf("load checked update candidate: %w", err)
 	}
@@ -210,7 +214,8 @@ func (a *app) updateApply(ctx context.Context) error {
 	if err := opencode.CheckPrerequisitesFor(ctx, candidate.Target); err != nil {
 		return err
 	}
-	if err := verifyInstalledOpenCode(ctx, candidate.Target); err != nil {
+	hostArchive := filepath.Join(a.store.Root, "updates", candidate.HostArtifact.RelativePath)
+	if err := (dependencyArtifactInstaller{}).ensure(ctx, a.store.Root, candidate.Target, hostArchive); err != nil {
 		return err
 	}
 	projects, err := a.inventoryProjectsForUpdate(ctx, current.Manifest)
@@ -285,15 +290,29 @@ func (a *app) inventoryProjectsForUpdate(ctx context.Context, current dependency
 }
 
 type updateJournal struct {
-	SchemaVersion int                `json:"schema_version"`
-	Phase         string             `json:"phase"`
-	SourceActive  bool               `json:"source_active"`
-	SourceLock    versionconfig.Lock `json:"source_lock"`
-	TargetLock    versionconfig.Lock `json:"target_lock"`
-	Projects      []string           `json:"project_policy_paths"`
+	SchemaVersion int                     `json:"schema_version"`
+	Phase         string                  `json:"phase"`
+	SourceActive  bool                    `json:"source_active"`
+	SourceLock    versionconfig.Lock      `json:"source_lock"`
+	TargetLock    versionconfig.Lock      `json:"target_lock"`
+	Projects      []string                `json:"project_policy_paths"`
+	LegacySource  *legacyDependencySource `json:"legacy_source,omitempty"`
 }
 
-func (a *app) commitDependencyUpdate(current, target versionconfig.Lock, sourceActive bool, projects []updateProject) (returnErr error) {
+type legacyDependencySource struct {
+	Lock    []byte                  `json:"lock"`
+	Binding state.DependencyBinding `json:"binding"`
+}
+
+func (a *app) commitDependencyUpdate(current, target versionconfig.Lock, sourceActive bool, projects []updateProject) error {
+	return a.commitDependencyUpdateInternal(current, target, sourceActive, projects, nil, nil)
+}
+
+func (a *app) commitLegacyDependencyMigration(target versionconfig.Lock, projects []updateProject, source legacyDependencySource) error {
+	return a.commitDependencyUpdateInternal(target, target, true, projects, &source, nil)
+}
+
+func (a *app) commitDependencyUpdateInternal(current, target versionconfig.Lock, sourceActive bool, projects []updateProject, legacySource *legacyDependencySource, beforeProjectSave func(int, string) error) (returnErr error) {
 	updatesDirectory := filepath.Join(a.store.Root, "updates")
 	if err := os.Mkdir(updatesDirectory, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
@@ -311,12 +330,17 @@ func (a *app) commitDependencyUpdate(current, target versionconfig.Lock, sourceA
 	for _, project := range projects {
 		paths = append(paths, project.Path)
 	}
-	journal := updateJournal{SchemaVersion: 1, Phase: "prepared", SourceActive: sourceActive, SourceLock: current, TargetLock: target, Projects: paths}
+	journal := updateJournal{SchemaVersion: 1, Phase: "prepared", SourceActive: sourceActive, SourceLock: current, TargetLock: target, Projects: paths, LegacySource: legacySource}
 	if err := writePrivateJSON(journalPath, journal); err != nil {
 		return err
 	}
 	defer func() {
 		if returnErr != nil && journal.Phase == "prepared" {
+			if legacySource != nil {
+				_, recoveryErr := a.recoverDependencyUpdate()
+				returnErr = errors.Join(returnErr, recoveryErr)
+				return
+			}
 			for _, project := range projects {
 				_ = policy.Save(project.Path, project.Policy)
 			}
@@ -336,7 +360,12 @@ func (a *app) commitDependencyUpdate(current, target versionconfig.Lock, sourceA
 	if err != nil {
 		return err
 	}
-	for _, project := range projects {
+	for index, project := range projects {
+		if beforeProjectSave != nil {
+			if err := beforeProjectSave(index, project.Path); err != nil {
+				return err
+			}
+		}
 		updated := project.Policy
 		updated.Dependency = policy.DependencyPolicy{ManifestSHA256: targetManifestDigest, OpenCode: target.Manifest.OpenCode.Version, AppleContainer: target.Manifest.AppleContainer.Version, AgentImage: target.Manifest.AgentImage.Tag}
 		updated.UpdatedAt = time.Now().UTC()
@@ -382,6 +411,14 @@ func (a *app) recoverDependencyUpdate() (bool, error) {
 	if err := decoder.Decode(&journal); err != nil || decoder.Decode(&struct{}{}) != io.EOF || journal.SchemaVersion != 1 || (journal.Phase != "prepared" && journal.Phase != "commit-decided") || journal.SourceLock.Validate() != nil || journal.TargetLock.Validate() != nil || len(journal.Projects) > 256 {
 		return false, fmt.Errorf("update apply journal is invalid; refusing automatic recovery")
 	}
+	var legacyDigest string
+	if journal.LegacySource != nil {
+		migrated, digest, err := decodeLegacyBootstrapLock(journal.LegacySource.Lock, journal.TargetLock.Manifest)
+		if err != nil || !journal.SourceActive || migrated.Generation != journal.TargetLock.Generation || migrated.SchemaVersion != journal.TargetLock.SchemaVersion || !reflect.DeepEqual(migrated.Manifest, journal.TargetLock.Manifest) || journal.LegacySource.Binding.Validate() != nil || journal.LegacySource.Binding.Generation != migrated.Generation || journal.LegacySource.Binding.ManifestSHA256 != digest || journal.LegacySource.Binding.OpenCodeVersion != migrated.Manifest.OpenCode.Version || journal.LegacySource.Binding.AppleContainerVersion != migrated.Manifest.AppleContainer.Version || journal.LegacySource.Binding.AgentImage != migrated.Manifest.AgentImage.Tag {
+			return false, fmt.Errorf("legacy dependency migration journal is invalid; refusing automatic recovery")
+		}
+		legacyDigest = digest
+	}
 	chosen := journal.SourceLock
 	activate := journal.SourceActive
 	if journal.Phase == "commit-decided" {
@@ -392,6 +429,13 @@ func (a *app) recoverDependencyUpdate() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	chosenDependency := policy.DependencyPolicy{ManifestSHA256: digest, OpenCode: chosen.Manifest.OpenCode.Version, AppleContainer: chosen.Manifest.AppleContainer.Version, AgentImage: chosen.Manifest.AgentImage.Tag}
+	if journal.LegacySource != nil && journal.Phase == "prepared" {
+		chosenDependency = policy.DependencyPolicy{
+			ManifestSHA256: legacyDigest, OpenCode: journal.LegacySource.Binding.OpenCodeVersion,
+			AppleContainer: journal.LegacySource.Binding.AppleContainerVersion, AgentImage: journal.LegacySource.Binding.AgentImage,
+		}
+	}
 	for _, path := range journal.Projects {
 		if filepath.Base(path) != "policy.json" || !filepath.IsAbs(path) || filepath.Clean(path) != path || !strings.HasPrefix(path, filepath.Join(a.store.Root, "projects")+string(filepath.Separator)) {
 			return false, fmt.Errorf("update apply journal contains an unsafe Project policy path")
@@ -400,13 +444,29 @@ func (a *app) recoverDependencyUpdate() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		loaded.Dependency = policy.DependencyPolicy{ManifestSHA256: digest, OpenCode: chosen.Manifest.OpenCode.Version, AppleContainer: chosen.Manifest.AppleContainer.Version, AgentImage: chosen.Manifest.AgentImage.Tag}
+		loaded.Dependency = chosenDependency
 		loaded.UpdatedAt = time.Now().UTC()
 		if err := policy.Save(path, loaded); err != nil {
 			return false, err
 		}
 	}
-	if activate {
+	if journal.LegacySource != nil && journal.Phase == "prepared" {
+		versions, err := a.versionStore()
+		if err != nil {
+			return false, err
+		}
+		paths, err := versions.Paths()
+		if err != nil {
+			return false, err
+		}
+		if err := securefs.AtomicWriteOwned(paths.Lock, journal.LegacySource.Lock); err != nil {
+			return false, err
+		}
+		binding := journal.LegacySource.Binding
+		if err := a.store.SaveGlobal(state.GlobalConfig{SchemaVersion: 2, Active: &binding}); err != nil {
+			return false, err
+		}
+	} else if activate {
 		versions, err := a.versionStore()
 		if err != nil {
 			return false, err
@@ -483,6 +543,19 @@ func (a *app) setup(ctx context.Context, configOnly bool) error {
 		return fmt.Errorf("initial setup can apply bootstrap OpenCode %s only; run 'sunaba update check' and 'sunaba update apply' for %s", dependency.OpenCodeVersion, config.OpenCode.Value)
 	}
 	manifest := dependency.MustPinned()
+	lock, lockErr := versions.LoadLock()
+	legacyMigration := false
+	legacyManifestDigest := ""
+	var legacyLockRaw []byte
+	if lockErr != nil && !errors.Is(lockErr, os.ErrNotExist) {
+		migrated, digest, raw, migrationErr := loadLegacyBootstrapLock(versions, manifest)
+		if migrationErr != nil {
+			return errors.Join(lockErr, fmt.Errorf("migrate legacy bootstrap lock: %w", migrationErr))
+		}
+		lock, lockErr = migrated, nil
+		legacyMigration, legacyManifestDigest = true, digest
+		legacyLockRaw = raw
+	}
 	globalState, err := a.store.LoadGlobal()
 	if err != nil {
 		return err
@@ -495,29 +568,39 @@ func (a *app) setup(ctx context.Context, configOnly bool) error {
 			return fmt.Errorf("existing global dependency state is incomplete")
 		}
 		want, bindingErr := state.NewDependencyBinding(globalState.Active.Generation, manifest)
-		if bindingErr != nil || *globalState.Active != want {
+		matchesCurrent := bindingErr == nil && *globalState.Active == want
+		matchesLegacy := legacyMigration && globalState.Active.Generation == lock.Generation &&
+			globalState.Active.ManifestSHA256 == legacyManifestDigest &&
+			globalState.Active.OpenCodeVersion == manifest.OpenCode.Version &&
+			globalState.Active.AppleContainerVersion == manifest.AppleContainer.Version &&
+			globalState.Active.AgentImage == manifest.AgentImage.Tag
+		if !matchesCurrent && !matchesLegacy {
 			return fmt.Errorf("existing global dependency does not match the bootstrap contract")
 		}
 	} else if globalState.SchemaVersion != 0 {
 		return fmt.Errorf("existing global dependency state is incomplete")
 	}
+	if legacyMigration && globalState.Active == nil {
+		return fmt.Errorf("legacy version lock requires its matching active dependency binding")
+	}
 	if err := opencode.CheckPrerequisitesFor(ctx, manifest); err != nil {
 		return err
 	}
-	if err := verifyInstalledOpenCode(ctx, manifest); err != nil {
+	if err := (dependencyArtifactInstaller{}).ensure(ctx, a.store.Root, manifest, ""); err != nil {
 		return err
 	}
 	if _, err := image.EnsureManifest(ctx, a.runtime, manifest); err != nil {
 		return err
 	}
-	lock, lockErr := versions.LoadLock()
 	alreadyActive := false
 	if lockErr == nil {
 		if lock.Manifest.OpenCode.Version != manifest.OpenCode.Version {
 			return fmt.Errorf("an active non-bootstrap lock already exists; use 'sunaba update check' and 'sunaba update apply'")
 		}
-		if _, err := a.activeVersionLock(); err == nil {
-			alreadyActive = true
+		if !legacyMigration {
+			if _, err := a.activeVersionLock(); err == nil {
+				alreadyActive = true
+			}
 		}
 	} else if !errors.Is(lockErr, os.ErrNotExist) {
 		return lockErr
@@ -535,11 +618,101 @@ func (a *app) setup(ctx context.Context, configOnly bool) error {
 		fmt.Fprintf(a.output, "Setup is already complete with OpenCode %s.\n", manifest.OpenCode.Version)
 		return nil
 	}
-	if err := a.commitDependencyUpdate(newLock, newLock, alreadyActive, projects); err != nil {
-		return fmt.Errorf("commit setup dependency state: %w", err)
+	var commitErr error
+	if legacyMigration {
+		commitErr = a.commitLegacyDependencyMigration(newLock, projects, legacyDependencySource{Lock: legacyLockRaw, Binding: *globalState.Active})
+	} else {
+		commitErr = a.commitDependencyUpdate(newLock, newLock, alreadyActive, projects)
+	}
+	if commitErr != nil {
+		return fmt.Errorf("commit setup dependency state: %w", commitErr)
 	}
 	fmt.Fprintf(a.output, "Setup complete. OpenCode %s is locked for the host TUI and guest Agent image.\n", manifest.OpenCode.Version)
 	return nil
+}
+
+type legacyDependencyManifest struct {
+	SchemaVersion  int `json:"schema_version"`
+	AppleContainer struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	} `json:"apple_container"`
+	BaseImage struct {
+		Reference   string `json:"reference"`
+		IndexSHA256 string `json:"index_sha256"`
+	} `json:"base_image"`
+	AgentImage struct {
+		Tag string `json:"tag"`
+	} `json:"agent_image"`
+	GoModules map[string]string `json:"go_modules"`
+	OpenCode  struct {
+		Version string              `json:"version"`
+		Host    dependency.Artifact `json:"host"`
+		Guest   dependency.Artifact `json:"guest"`
+	} `json:"opencode"`
+	Provenance dependency.Provenance `json:"provenance"`
+}
+
+type legacyVersionLock struct {
+	SchemaVersion int                      `json:"schema_version"`
+	Generation    uint64                   `json:"generation"`
+	ResolvedAt    time.Time                `json:"resolved_at"`
+	Manifest      legacyDependencyManifest `json:"manifest"`
+}
+
+func loadLegacyBootstrapLock(store *versionconfig.Store, pinned dependency.Manifest) (versionconfig.Lock, string, []byte, error) {
+	paths, err := store.Paths()
+	if err != nil {
+		return versionconfig.Lock{}, "", nil, err
+	}
+	data, err := securefs.ReadOwnedRegular(paths.Lock, 1<<20)
+	if err != nil {
+		return versionconfig.Lock{}, "", nil, err
+	}
+	migrated, digest, err := decodeLegacyBootstrapLock(data, pinned)
+	if err != nil {
+		return versionconfig.Lock{}, "", nil, err
+	}
+	return migrated, digest, append([]byte(nil), data...), nil
+}
+
+func decodeLegacyBootstrapLock(data []byte, pinned dependency.Manifest) (versionconfig.Lock, string, error) {
+	var legacy legacyVersionLock
+	if err := securefs.DecodeStrictJSON(data, &legacy); err != nil || legacy.SchemaVersion != versionconfig.SchemaVersion || legacy.Generation == 0 || legacy.ResolvedAt.IsZero() || legacy.ResolvedAt.Location() != time.UTC {
+		return versionconfig.Lock{}, "", fmt.Errorf("legacy version lock metadata is invalid")
+	}
+	want := legacyManifestFromCurrent(pinned)
+	if !reflect.DeepEqual(legacy.Manifest, want) {
+		return versionconfig.Lock{}, "", fmt.Errorf("legacy version lock does not match the exact bootstrap dependency contract")
+	}
+	legacyDigest, err := legacyBootstrapManifestDigest(pinned)
+	if err != nil {
+		return versionconfig.Lock{}, "", err
+	}
+	return versionconfig.Lock{
+		SchemaVersion: legacy.SchemaVersion, Generation: legacy.Generation,
+		ResolvedAt: legacy.ResolvedAt, Manifest: pinned,
+	}, legacyDigest, nil
+}
+
+func legacyManifestFromCurrent(manifest dependency.Manifest) legacyDependencyManifest {
+	legacy := legacyDependencyManifest{
+		SchemaVersion: manifest.SchemaVersion, GoModules: manifest.GoModules, Provenance: manifest.Provenance,
+	}
+	legacy.AppleContainer = manifest.AppleContainer
+	legacy.BaseImage = manifest.BaseImage
+	legacy.AgentImage = manifest.AgentImage
+	legacy.OpenCode = manifest.OpenCode
+	return legacy
+}
+
+func legacyBootstrapManifestDigest(manifest dependency.Manifest) (string, error) {
+	encoded, err := json.Marshal(legacyManifestFromCurrent(manifest))
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func (a *app) inventoryBootstrapProjectsForSetup(ctx context.Context, manifest dependency.Manifest) ([]updateProject, bool, error) {
@@ -564,6 +737,10 @@ func (a *app) inventoryBootstrapProjectsForSetup(ctx context.Context, manifest d
 	if err != nil {
 		return nil, false, err
 	}
+	legacyCanonicalDigest, err := legacyBootstrapManifestDigest(manifest)
+	if err != nil {
+		return nil, false, err
+	}
 	projects := make([]updateProject, 0, len(states))
 	migrationNeeded := false
 	for _, projectState := range states {
@@ -577,39 +754,13 @@ func (a *app) inventoryBootstrapProjectsForSetup(ctx context.Context, manifest d
 		}
 		path := filepath.Join(projectState.Path, "policy.json")
 		loaded, _, err := policy.LoadReadOnly(path, time.Now())
-		if err != nil || loaded.ProjectID != projectState.ProjectID || loaded.Dependency.OpenCode != manifest.OpenCode.Version || loaded.Dependency.AppleContainer != manifest.AppleContainer.Version || loaded.Dependency.AgentImage != manifest.AgentImage.Tag || (loaded.Dependency.ManifestSHA256 != canonicalDigest && loaded.Dependency.ManifestSHA256 != legacyDigest) {
+		if err != nil || loaded.ProjectID != projectState.ProjectID || loaded.Dependency.OpenCode != manifest.OpenCode.Version || loaded.Dependency.AppleContainer != manifest.AppleContainer.Version || loaded.Dependency.AgentImage != manifest.AgentImage.Tag || (loaded.Dependency.ManifestSHA256 != canonicalDigest && loaded.Dependency.ManifestSHA256 != legacyDigest && loaded.Dependency.ManifestSHA256 != legacyCanonicalDigest) {
 			return nil, false, fmt.Errorf("Project %s does not match the bootstrap dependency contract", projectState.ProjectID)
 		}
 		migrationNeeded = migrationNeeded || loaded.Dependency.ManifestSHA256 != canonicalDigest
 		projects = append(projects, updateProject{Path: path, Policy: loaded})
 	}
 	return projects, migrationNeeded, nil
-}
-
-func verifyInstalledOpenCode(ctx context.Context, manifest dependency.Manifest) error {
-	binary, err := exec.LookPath("opencode")
-	if err != nil {
-		return fmt.Errorf("opencode CLI %s not found", manifest.OpenCode.Version)
-	}
-	binary, err = filepath.EvalSymlinks(binary)
-	if err != nil {
-		return err
-	}
-	digest, err := fileSHA256(binary)
-	if err != nil {
-		return err
-	}
-	if digest != manifest.OpenCode.Host.ExecutableSHA256 {
-		return fmt.Errorf("installed host OpenCode executable digest does not match official v%s artifact", manifest.OpenCode.Version)
-	}
-	version, err := opencode.HostVersion(ctx)
-	if err != nil {
-		return err
-	}
-	if strings.TrimPrefix(strings.TrimSpace(version), "v") != manifest.OpenCode.Version {
-		return fmt.Errorf("installed host OpenCode is %s; expected exact %s", version, manifest.OpenCode.Version)
-	}
-	return nil
 }
 
 func (a *app) showVersions() error {

@@ -26,6 +26,9 @@ func TestApprovalBindsDigestsAndIsOneShot(t *testing.T) {
 	if !strings.Contains(request.Display, "<U+001B>") || !strings.Contains(request.Display, "<U+000A>") || !strings.Contains(request.Display, "<U+202E>") {
 		t.Fatalf("approval display=%q", request.Display)
 	}
+	if strings.Contains(request.Display, request.Nonce) {
+		t.Fatalf("approval display exposed internal nonce: %q", request.Display)
+	}
 	wrong := binding
 	wrong.ChangeSetDigest = strings.Repeat("f", 64)
 	if _, err := manager.Confirm(request.Nonce, wrong); err == nil {

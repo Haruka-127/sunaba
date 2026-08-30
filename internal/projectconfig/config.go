@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"sunaba/internal/modelcatalog"
 	"sunaba/internal/policy"
 	"sunaba/internal/securefs"
 	"sunaba/internal/state"
@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion = 3
+	CurrentSchemaVersion = 4
 	ProjectFileName      = "project.json"
 	WebOriginsFileName   = "web-origins.txt"
 	maxConfigBytes       = 1 << 20
@@ -46,12 +46,46 @@ type Config struct {
 	Mode          string                `json:"mode"`
 	Resources     policy.ResourcePolicy `json:"resources"`
 	Session       policy.SessionPolicy  `json:"session"`
-	Model         policy.ModelPolicy    `json:"model"`
+	Model         ModelConfig           `json:"model"`
 	Git           GitConfig             `json:"git"`
 	Web           WebConfig             `json:"web"`
 	Export        policy.ExportPolicy   `json:"export"`
 	Snapshot      policy.SnapshotPolicy `json:"snapshot"`
 	Audit         policy.AuditPolicy    `json:"audit"`
+}
+
+// ModelConfig is the Project-owned portion of Model Gateway policy. The
+// authentication mode is intentionally absent: it is global and is
+// snapshotted only when a new Agent Session is activated.
+type ModelConfig struct {
+	AllowedModels    []string `json:"allowed_models"`
+	MaxRequests      int      `json:"max_requests"`
+	MaxConcurrent    int      `json:"max_concurrent"`
+	MaxRequestBytes  int64    `json:"max_request_bytes"`
+	MaxResponseBytes int64    `json:"max_response_bytes"`
+}
+
+type legacyConfig struct {
+	SchemaVersion int                   `json:"schema_version"`
+	ProjectRoot   string                `json:"project_root"`
+	Mode          string                `json:"mode"`
+	Resources     policy.ResourcePolicy `json:"resources"`
+	Session       policy.SessionPolicy  `json:"session"`
+	Model         legacyModelConfig     `json:"model"`
+	Git           GitConfig             `json:"git"`
+	Web           WebConfig             `json:"web"`
+	Export        policy.ExportPolicy   `json:"export"`
+	Snapshot      policy.SnapshotPolicy `json:"snapshot"`
+	Audit         policy.AuditPolicy    `json:"audit"`
+}
+
+type legacyModelConfig struct {
+	AuthMode         modelcatalog.AuthMode `json:"auth,omitempty"`
+	AllowedModels    []string              `json:"allowed_models"`
+	MaxRequests      int                   `json:"max_requests"`
+	MaxConcurrent    int                   `json:"max_concurrent"`
+	MaxRequestBytes  int64                 `json:"max_request_bytes"`
+	MaxResponseBytes int64                 `json:"max_response_bytes"`
 }
 
 type GitConfig struct {
@@ -134,7 +168,10 @@ func ensureOwnedBaseDirectory(path string) error {
 	if err != nil || unix.Lstat(parent, &stat) != nil || canonicalErr != nil || canonical != parent || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || stat.Uid != uint32(os.Geteuid()) {
 		return fmt.Errorf("Project configuration base parent must be current-user owned and not a symlink")
 	}
-	return os.Mkdir(path, 0700)
+	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return securefs.CheckCanonicalOwnedDir(path)
 }
 
 func (s *Store) Save(projectID string, config Config, rules []webgateway.OriginRule) error {
@@ -193,17 +230,9 @@ func (s *Store) Load(projectID string) (Config, []webgateway.OriginRule, error) 
 	if err != nil {
 		return Config{}, nil, err
 	}
-	var config Config
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&config); err != nil {
-		return Config{}, nil, fmt.Errorf("decode Project configuration: %w", err)
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return Config{}, nil, fmt.Errorf("Project configuration contains trailing data")
-	}
-	if config.SchemaVersion == 1 || config.SchemaVersion == 2 {
-		config.SchemaVersion = CurrentSchemaVersion
+	config, migrated, err := decodeConfig(data)
+	if err != nil {
+		return Config{}, nil, err
 	}
 	if state.ProjectID(config.ProjectRoot) != projectID {
 		return Config{}, nil, fmt.Errorf("Project configuration identity does not match its directory")
@@ -214,6 +243,15 @@ func (s *Store) Load(projectID string) (Config, []webgateway.OriginRule, error) 
 	}
 	if err := Validate(config, rules); err != nil {
 		return Config{}, nil, err
+	}
+	if migrated {
+		encoded, err := Marshal(config)
+		if err != nil {
+			return Config{}, nil, err
+		}
+		if err := securefs.AtomicWriteOwned(paths.Project, encoded); err != nil {
+			return Config{}, nil, fmt.Errorf("migrate Project configuration: %w", err)
+		}
 	}
 	return config, rules, nil
 }
@@ -234,17 +272,9 @@ func (s *Store) LoadReadOnly(projectID string) (Config, []webgateway.OriginRule,
 	if err != nil {
 		return Config{}, nil, err
 	}
-	var config Config
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&config); err != nil {
-		return Config{}, nil, fmt.Errorf("decode Project configuration: %w", err)
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return Config{}, nil, fmt.Errorf("Project configuration contains trailing data")
-	}
-	if config.SchemaVersion == 1 || config.SchemaVersion == 2 {
-		config.SchemaVersion = CurrentSchemaVersion
+	config, _, err := decodeConfig(data)
+	if err != nil {
+		return Config{}, nil, err
 	}
 	rulesData, err := readPrivateFile(paths.WebOrigins, maxOriginsBytes)
 	if err != nil {
@@ -313,6 +343,43 @@ func Marshal(config Config) ([]byte, error) {
 	return append(encoded, '\n'), nil
 }
 
+func decodeConfig(data []byte) (Config, bool, error) {
+	var envelope struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return Config{}, false, fmt.Errorf("decode Project configuration schema: %w", err)
+	}
+	if envelope.SchemaVersion == CurrentSchemaVersion {
+		var current Config
+		if err := securefs.DecodeStrictJSON(data, &current); err != nil {
+			return Config{}, false, fmt.Errorf("decode Project configuration: %w", err)
+		}
+		return current, false, nil
+	}
+	if envelope.SchemaVersion < 1 || envelope.SchemaVersion > 3 {
+		return Config{}, false, fmt.Errorf("unsupported Project configuration schema %d", envelope.SchemaVersion)
+	}
+	var legacy legacyConfig
+	if err := securefs.DecodeStrictJSON(data, &legacy); err != nil {
+		return Config{}, false, fmt.Errorf("decode legacy Project configuration: %w", err)
+	}
+	current := Config{
+		SchemaVersion: CurrentSchemaVersion,
+		ProjectRoot:   legacy.ProjectRoot,
+		Mode:          legacy.Mode,
+		Resources:     legacy.Resources,
+		Session:       legacy.Session,
+		Model: ModelConfig{
+			AllowedModels: append([]string(nil), legacy.Model.AllowedModels...), MaxRequests: legacy.Model.MaxRequests,
+			MaxConcurrent: legacy.Model.MaxConcurrent, MaxRequestBytes: legacy.Model.MaxRequestBytes,
+			MaxResponseBytes: legacy.Model.MaxResponseBytes,
+		},
+		Git: legacy.Git, Web: legacy.Web, Export: legacy.Export, Snapshot: legacy.Snapshot, Audit: legacy.Audit,
+	}
+	return current, true, nil
+}
+
 func FromPolicy(effective policy.ProjectPolicy) (Config, []webgateway.OriginRule) {
 	config := Config{
 		SchemaVersion: CurrentSchemaVersion,
@@ -320,8 +387,12 @@ func FromPolicy(effective policy.ProjectPolicy) (Config, []webgateway.OriginRule
 		Mode:          effective.Mode,
 		Resources:     effective.Resources,
 		Session:       effective.Session,
-		Model:         effective.Model,
-		Git:           GitConfig{Remotes: append([]policy.GitRemotePolicy(nil), effective.Git.Remotes...)},
+		Model: ModelConfig{
+			AllowedModels: append([]string(nil), effective.Model.AllowedModels...), MaxRequests: effective.Model.MaxRequests,
+			MaxConcurrent: effective.Model.MaxConcurrent, MaxRequestBytes: effective.Model.MaxRequestBytes,
+			MaxResponseBytes: effective.Model.MaxResponseBytes,
+		},
+		Git: GitConfig{Remotes: append([]policy.GitRemotePolicy(nil), effective.Git.Remotes...)},
 		Web: WebConfig{
 			Enabled: effective.Web.Enabled, OriginPresets: append([]string(nil), effective.Web.OriginPresets...), OriginsFile: WebOriginsFileName,
 			MaxRequests: effective.Web.MaxRequests, MaxConcurrent: effective.Web.MaxConcurrent,
@@ -354,7 +425,12 @@ func Validate(config Config, rules []webgateway.OriginRule) error {
 	candidate := policy.ProjectPolicy{
 		SchemaVersion: policy.CurrentSchemaVersion, ProjectID: state.ProjectID(config.ProjectRoot), ProjectRoot: config.ProjectRoot, Mode: config.Mode,
 		Dependency: policy.DependencyPolicy{ManifestSHA256: strings.Repeat("0", 64), OpenCode: "pinned", AppleContainer: "pinned", AgentImage: "sunaba-base:pinned"},
-		Resources:  config.Resources, Session: config.Session, Model: config.Model,
+		Resources:  config.Resources, Session: config.Session,
+		Model: policy.ModelPolicy{
+			AllowedModels: append([]string(nil), config.Model.AllowedModels...), MaxRequests: config.Model.MaxRequests,
+			MaxConcurrent: config.Model.MaxConcurrent, MaxRequestBytes: config.Model.MaxRequestBytes,
+			MaxResponseBytes: config.Model.MaxResponseBytes,
+		},
 		Git: policy.GitPolicy{Remotes: append([]policy.GitRemotePolicy(nil), config.Git.Remotes...), PushApprovalRequired: true},
 		Web: policy.WebPolicy{
 			Enabled: config.Web.Enabled, OriginPresets: normalizedPresets, OriginPresetSHA256: presetDigest,
@@ -389,8 +465,11 @@ func Compile(config Config, rules []webgateway.OriginRule, base policy.ProjectPo
 	result.Mode = config.Mode
 	result.Resources = config.Resources
 	result.Session = config.Session
-	result.Model = config.Model
-	result.Model.AllowedModels = append([]string(nil), config.Model.AllowedModels...)
+	result.Model = policy.ModelPolicy{
+		AllowedModels: append([]string(nil), config.Model.AllowedModels...), MaxRequests: config.Model.MaxRequests,
+		MaxConcurrent: config.Model.MaxConcurrent, MaxRequestBytes: config.Model.MaxRequestBytes,
+		MaxResponseBytes: config.Model.MaxResponseBytes,
+	}
 	result.Git = policy.GitPolicy{Remotes: append([]policy.GitRemotePolicy(nil), config.Git.Remotes...), PushApprovalRequired: true}
 	resolvedRules, presetDigest, err := ResolveWebRules(config, rules)
 	if err != nil {
@@ -593,7 +672,7 @@ func ensurePrivateDirectory(path string) error {
 	if err != nil || parentStatErr != nil || parentCanonicalErr != nil || parentCanonical != parent || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentStat.Uid != uint32(os.Geteuid()) {
 		return fmt.Errorf("Project configuration parent must exist, be current-user owned, and not be a symlink")
 	}
-	if err := os.Mkdir(path, 0700); err != nil {
+	if err := os.Mkdir(path, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
 	return securefs.CheckCanonicalOwnedDir(path)

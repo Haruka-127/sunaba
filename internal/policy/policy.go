@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	CurrentSchemaVersion          = 7
+	CurrentSchemaVersion          = 8
 	MaximumExportEntries          = 1_000_000
 	MaximumExportFileBytes  int64 = 8 << 30
 	MaximumExportTotalBytes int64 = 8 << 30
@@ -75,12 +75,11 @@ type SessionPolicy struct {
 }
 
 type ModelPolicy struct {
-	AuthMode         modelcatalog.AuthMode `json:"auth"`
-	AllowedModels    []string              `json:"allowed_models"`
-	MaxRequests      int                   `json:"max_requests"`
-	MaxConcurrent    int                   `json:"max_concurrent"`
-	MaxRequestBytes  int64                 `json:"max_request_bytes"`
-	MaxResponseBytes int64                 `json:"max_response_bytes"`
+	AllowedModels    []string `json:"allowed_models"`
+	MaxRequests      int      `json:"max_requests"`
+	MaxConcurrent    int      `json:"max_concurrent"`
+	MaxRequestBytes  int64    `json:"max_request_bytes"`
+	MaxResponseBytes int64    `json:"max_response_bytes"`
 }
 
 type GitPolicy struct {
@@ -224,13 +223,17 @@ func New(projectRoot, manifestDigest, openCodeVersion, containerVersion, agentIm
 	if err != nil {
 		return ProjectPolicy{}, err
 	}
+	defaultModels, err := modelcatalog.DefaultModels(modelcatalog.AuthOAuth)
+	if err != nil {
+		return ProjectPolicy{}, err
+	}
 	policy := ProjectPolicy{
 		SchemaVersion: CurrentSchemaVersion, ProjectID: state.ProjectID(canonical), ProjectRoot: canonical, Mode: mode,
 		Dependency: DependencyPolicy{ManifestSHA256: manifestDigest, OpenCode: openCodeVersion, AppleContainer: containerVersion, AgentImage: agentImage},
 		Resources:  ResourcePolicy{CPUs: 2, Memory: "2G", DiskBytes: 512 << 20, ProcessMax: 512, FileSizeMax: 512 << 20, OpenFileMax: 4096},
 		Session:    SessionPolicy{TTLSeconds: 3600, IdleSeconds: 900},
 		Model: ModelPolicy{
-			AuthMode: modelcatalog.AuthAPIKey, AllowedModels: []string{"gpt-5"}, MaxRequests: modelgateway.DefaultMaxRequests,
+			AllowedModels: defaultModels, MaxRequests: modelgateway.DefaultMaxRequests,
 			MaxConcurrent: modelgateway.DefaultMaxConcurrent, MaxRequestBytes: modelgateway.DefaultMaxRequestBytes,
 			MaxResponseBytes: modelgateway.DefaultMaxResponseBytes,
 		},
@@ -271,10 +274,12 @@ func (p ProjectPolicy) Validate() error {
 		p.Model.MaxResponseBytes <= 0 || p.Model.MaxResponseBytes > modelgateway.MaximumMaxResponseBytes {
 		return fmt.Errorf("Project Model Gateway policy is invalid")
 	}
-	if !uniqueSafeStrings(p.Model.AllowedModels, 128) || modelgateway.ValidateAllowedModels(p.Model.AllowedModels) != nil || modelcatalog.ValidateAuthMode(p.Model.AuthMode) != nil {
-		return fmt.Errorf("Project Model Gateway authentication or model policy is invalid")
+	if !uniqueSafeStrings(p.Model.AllowedModels, 128) || modelgateway.ValidateAllowedModels(p.Model.AllowedModels) != nil {
+		return fmt.Errorf("Project Model Gateway model policy is invalid")
 	}
-	if _, err := modelcatalog.Resolve(p.Model.AuthMode, p.Model.AllowedModels); err != nil {
+	// API-key availability is the complete fixed catalog. Compatibility with
+	// the selected global authentication mode is checked at Session activation.
+	if _, err := modelcatalog.Resolve(modelcatalog.AuthAPIKey, p.Model.AllowedModels); err != nil {
 		return fmt.Errorf("Project Model Gateway model catalog selection is invalid: %w", err)
 	}
 	if !validGitRemotes(p.Git.Remotes) || !p.Git.PushApprovalRequired {

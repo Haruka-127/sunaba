@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +17,7 @@ import (
 	"sunaba/internal/dependency"
 	"sunaba/internal/policy"
 	"sunaba/internal/projectconfig"
+	"sunaba/internal/securefs"
 	"sunaba/internal/state"
 	"sunaba/internal/versionconfig"
 )
@@ -84,6 +88,233 @@ func TestSetupRejectsMismatchedLegacyGlobalVersionBeforeHostMutation(t *testing.
 	paths, _ := versions.Paths()
 	if _, err := os.Lstat(paths.Lock); !os.IsNotExist(err) {
 		t.Fatalf("mismatched legacy state created a lock: %v", err)
+	}
+}
+
+func TestLegacyBootstrapLockMigrationPreservesProjectState(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	projectRoot := filepath.Join(base, "project")
+	if err := os.Mkdir(projectRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{
+		store:   &state.Store{Root: filepath.Join(base, "data", "sunaba")},
+		configs: &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")},
+		output:  io.Discard, errors: io.Discard,
+	}
+	if err := a.store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := a.versionStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := versions.SaveConfig(versionconfig.BootstrapConfig()); err != nil {
+		t.Fatal(err)
+	}
+	pinned := dependency.MustPinned()
+	legacy := legacyVersionLock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 7,
+		ResolvedAt: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC), Manifest: legacyManifestFromCurrent(pinned),
+	}
+	paths, _ := versions.Paths()
+	if err := writePrivateJSON(paths.Lock, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := versions.LoadLock(); err == nil {
+		t.Fatal("legacy lock unexpectedly passed the current lock schema")
+	}
+	migrated, legacyDigest, legacyRaw, err := loadLegacyBootstrapLock(versions, pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Generation != legacy.Generation || migrated.Manifest.Bun.Version == "" || migrated.Manifest.OpenTUI.Version == "" || migrated.Manifest.SunabaUI.SHA256 == "" {
+		t.Fatalf("migrated lock=%+v", migrated)
+	}
+	legacyBinding := state.DependencyBinding{
+		Generation: legacy.Generation, ManifestSHA256: legacyDigest,
+		OpenCodeVersion: pinned.OpenCode.Version, AppleContainerVersion: pinned.AppleContainer.Version, AgentImage: pinned.AgentImage.Tag,
+	}
+	if err := a.store.SaveGlobal(state.GlobalConfig{SchemaVersion: 2, Active: &legacyBinding}); err != nil {
+		t.Fatal(err)
+	}
+	projectPolicy, err := policy.New(projectRoot, legacyDigest, pinned.OpenCode.Version, pinned.AppleContainer.Version, pinned.AgentImage.Tag, "secure", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectState := filepath.Join(a.store.Root, "projects", projectPolicy.ProjectID)
+	if err := os.Mkdir(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(projectState, "policy.json")
+	if err := policy.Save(policyPath, projectPolicy); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"vm-state.sentinel", "pending-change-set.sentinel"} {
+		if err := os.WriteFile(filepath.Join(projectState, name), []byte("preserve"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := versionconfig.Lock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: legacy.Generation,
+		ResolvedAt: time.Now().UTC(), Manifest: pinned,
+	}
+	if err := a.commitLegacyDependencyMigration(target, []updateProject{{Path: policyPath, Policy: projectPolicy}}, legacyDependencySource{Lock: legacyRaw, Binding: legacyBinding}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := versions.LoadLock()
+	if err != nil || loaded.Manifest.SunabaUI.SHA256 != pinned.SunabaUI.SHA256 || loaded.Generation != legacy.Generation {
+		t.Fatalf("lock=%+v error=%v", loaded, err)
+	}
+	currentDigest, err := dependency.ManifestDigest(pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := a.store.LoadActiveDependency()
+	if err != nil || active.ManifestSHA256 != currentDigest || active.Generation != legacy.Generation {
+		t.Fatalf("active=%+v error=%v", active, err)
+	}
+	updatedPolicy, _, err := policy.LoadReadOnly(policyPath, time.Now())
+	if err != nil || updatedPolicy.ProjectID != projectPolicy.ProjectID || updatedPolicy.ProjectRoot != projectPolicy.ProjectRoot || updatedPolicy.Dependency.ManifestSHA256 != currentDigest {
+		t.Fatalf("Project policy=%+v error=%v", updatedPolicy, err)
+	}
+	for _, name := range []string{"vm-state.sentinel", "pending-change-set.sentinel"} {
+		data, err := os.ReadFile(filepath.Join(projectState, name))
+		if err != nil || string(data) != "preserve" {
+			t.Fatalf("%s changed: %q error=%v", name, data, err)
+		}
+	}
+}
+
+func TestLegacyBootstrapLockMigrationRollsBackPreparedFailure(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	a := &app{
+		store:   &state.Store{Root: filepath.Join(base, "data", "sunaba")},
+		configs: &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")},
+		output:  io.Discard, errors: io.Discard,
+	}
+	if err := a.store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := a.versionStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := versions.SaveConfig(versionconfig.BootstrapConfig()); err != nil {
+		t.Fatal(err)
+	}
+	pinned := dependency.MustPinned()
+	legacy := legacyVersionLock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 9,
+		ResolvedAt: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC), Manifest: legacyManifestFromCurrent(pinned),
+	}
+	paths, _ := versions.Paths()
+	if err := writePrivateJSON(paths.Lock, legacy); err != nil {
+		t.Fatal(err)
+	}
+	_, legacyDigest, legacyRaw, err := loadLegacyBootstrapLock(versions, pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyBinding := state.DependencyBinding{
+		Generation: legacy.Generation, ManifestSHA256: legacyDigest,
+		OpenCodeVersion: pinned.OpenCode.Version, AppleContainerVersion: pinned.AppleContainer.Version, AgentImage: pinned.AgentImage.Tag,
+	}
+	if err := a.store.SaveGlobal(state.GlobalConfig{SchemaVersion: 2, Active: &legacyBinding}); err != nil {
+		t.Fatal(err)
+	}
+
+	projects := make([]updateProject, 0, 2)
+	for index := 0; index < 2; index++ {
+		projectRoot := filepath.Join(base, fmt.Sprintf("project-%d", index))
+		if err := os.Mkdir(projectRoot, 0700); err != nil {
+			t.Fatal(err)
+		}
+		projectPolicy, err := policy.New(projectRoot, legacyDigest, pinned.OpenCode.Version, pinned.AppleContainer.Version, pinned.AgentImage.Tag, "secure", time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		projectState := filepath.Join(a.store.Root, "projects", projectPolicy.ProjectID)
+		if err := os.Mkdir(projectState, 0700); err != nil {
+			t.Fatal(err)
+		}
+		policyPath := filepath.Join(projectState, "policy.json")
+		if err := policy.Save(policyPath, projectPolicy); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectState, "vm-state.sentinel"), []byte("preserve"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		projects = append(projects, updateProject{Path: policyPath, Policy: projectPolicy})
+	}
+	target := versionconfig.Lock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: legacy.Generation,
+		ResolvedAt: time.Now().UTC(), Manifest: pinned,
+	}
+	injected := errors.New("injected Project save failure")
+	err = a.commitDependencyUpdateInternal(target, target, true, projects, &legacyDependencySource{Lock: legacyRaw, Binding: legacyBinding}, func(index int, _ string) error {
+		if index == 1 {
+			return injected
+		}
+		return nil
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("error=%v", err)
+	}
+	restoredRaw, err := securefs.ReadOwnedRegular(paths.Lock, 1<<20)
+	if err != nil || !bytes.Equal(restoredRaw, legacyRaw) {
+		t.Fatalf("restored legacy lock differs: error=%v", err)
+	}
+	active, err := a.store.LoadActiveDependency()
+	if err != nil || active != legacyBinding {
+		t.Fatalf("active=%+v error=%v", active, err)
+	}
+	for _, project := range projects {
+		loaded, _, err := policy.LoadReadOnly(project.Path, time.Now())
+		if err != nil || loaded.ProjectID != project.Policy.ProjectID || loaded.ProjectRoot != project.Policy.ProjectRoot || loaded.Dependency.ManifestSHA256 != legacyDigest {
+			t.Fatalf("Project policy=%+v error=%v", loaded, err)
+		}
+		sentinel, err := os.ReadFile(filepath.Join(filepath.Dir(project.Path), "vm-state.sentinel"))
+		if err != nil || string(sentinel) != "preserve" {
+			t.Fatalf("sentinel=%q error=%v", sentinel, err)
+		}
+	}
+	journalPath := filepath.Join(a.store.Root, "updates", "apply-journal.json")
+	if _, err := os.Lstat(journalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("journal was not removed: %v", err)
+	}
+}
+
+func TestLegacyBootstrapLockMigrationRejectsChangedPinsAndNewFields(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	versions := &versionconfig.Store{Root: filepath.Join(base, "config", "sunaba")}
+	if err := versions.SaveConfig(versionconfig.BootstrapConfig()); err != nil {
+		t.Fatal(err)
+	}
+	paths, _ := versions.Paths()
+	pinned := dependency.MustPinned()
+	legacy := legacyVersionLock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 1,
+		ResolvedAt: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC), Manifest: legacyManifestFromCurrent(pinned),
+	}
+	legacy.Manifest.OpenCode.Host.SHA256 = strings.Repeat("0", 64)
+	if err := writePrivateJSON(paths.Lock, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := loadLegacyBootstrapLock(versions, pinned); err == nil {
+		t.Fatal("legacy lock with changed OpenCode pin was migrated")
+	}
+	legacy.Manifest = legacyManifestFromCurrent(pinned)
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = bytes.Replace(encoded, []byte(`"provenance":`), []byte(`"bun":{},"provenance":`), 1)
+	if err := os.WriteFile(paths.Lock, encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := loadLegacyBootstrapLock(versions, pinned); err == nil {
+		t.Fatal("lock mixing legacy and current fields was migrated")
 	}
 }
 

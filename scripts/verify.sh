@@ -42,7 +42,7 @@ HELP="$({
   ./bin/sunaba up --help
   ./bin/sunaba destroy --help
 })"
-for REQUIRED in 'setup' '--config-only' 'versions' 'track' 'v1-stable' 'update' 'check' 'credentials' 'openai' 'project' 'init' '[path]' '--model-auth' 'oauth' 'api-key' 'config' 'validate' 'apply' 'agent' 'remote' 'web' 'approvals' 'changes' 'export' 'review' 'destroy' '--project-id' '--mode' 'secure' 'dev' 'never bind-mounted'; do
+for REQUIRED in 'setup' '--config-only' 'versions' 'track' 'v1-stable' 'update' 'check' 'credentials' 'openai' 'project' 'init' '[path]' 'oauth' 'api-key' 'config' 'validate' 'apply' 'agent' 'console' 'remote' 'web' 'approvals' 'changes' 'export' 'review' 'destroy' '--project-id' '--mode' 'secure' 'dev' 'never bind-mounted'; do
   grep -Fq -- "$REQUIRED" <<<"$HELP" || fail cli-help "missing $REQUIRED"
 done
 for OBSOLETE in '--no-firewall' 'env set' 'git set' 'reset --full' 'automatic approval'; do
@@ -52,6 +52,9 @@ for OBSOLETE in '--no-firewall' 'env set' 'git set' 'reset --full' 'automatic ap
 done
 if rg -n --glob '*.go' --glob '*.sh' --glob '!*_test.go' --glob '!scripts/verify.sh' -- '--no-firewall|OPENAI_API_KEY|EnvFiles:.*Project|Networks:.*default|HostPath:.*Project|server-password|EnvFileForContainer|_audit|func Attach\(|"permission"[[:space:]]*:[[:space:]]*"allow"' internal cmd scripts; then
   fail static-boundary "found an obsolete unsafe execution path"
+fi
+if rg -n --glob '*.go' --glob '*.sh' --glob '!*_test.go' --glob '!scripts/verify.sh' -- '/usr/bin/security|Security\.framework|SecKeychain'; then
+  fail static-boundary "found forbidden Keychain access"
 fi
 pass "CLI and static boundary"
 
@@ -72,7 +75,6 @@ fi
 
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] || fail integration 'requires macOS on Apple silicon'
 command -v container >/dev/null || fail integration 'container CLI not found'
-command -v opencode >/dev/null || fail integration 'opencode CLI not found'
 
 SUNABA_PHASE0_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase0' -count=1 -v
 SUNABA_PHASE1_INTEGRATION=1 go test -tags=integration ./test/integration -run 'TestPhase1' -count=1 -v
@@ -93,5 +95,5 @@ if [[ "${SUNABA_LIVE_OPENAI:-0}" == "1" ]]; then
   SUNABA_LIVE_OPENAI=1 go test -tags=integration ./test/integration -run '^TestLiveOpenAIThroughAgentVM$' -count=1 -v
   pass "live OpenAI Agent VM contract"
 else
-  skip live-openai 'set SUNABA_LIVE_OPENAI=1 to authorize one billable request using the macOS Keychain credential'
+  skip live-openai 'set SUNABA_LIVE_OPENAI=1 to authorize one billable request using the host credential file'
 fi

@@ -64,9 +64,10 @@ func TestWizardCancelAndEOFReturnNoCandidate(t *testing.T) {
 
 func TestWizardRequiresExplicitDevConfirmationAndFixedCatalogModels(t *testing.T) {
 	config, rules := testConfig(t)
-	// Select dev but reject its warning, then switch Model auth to OAuth and
-	// choose the first and second displayed fixed-catalog models.
-	input := strings.NewReader("2\nn\ny\n2\n1,2\n\n\n\ny\n")
+	// Select dev but reject its warning, then choose the first and second
+	// displayed OAuth catalog models. Authentication itself is not a Project
+	// wizard choice.
+	input := strings.NewReader("2\nn\ny\n1,2\n\n\n\ny\n")
 	var output bytes.Buffer
 	result, err := Run(input, &output, config, rules)
 	if err != nil {
@@ -75,10 +76,10 @@ func TestWizardRequiresExplicitDevConfirmationAndFixedCatalogModels(t *testing.T
 	if result.Config.Mode != "secure" {
 		t.Fatalf("dev mode was selected without confirmation: %s", result.Config.Mode)
 	}
-	if result.Config.Model.AuthMode != "oauth" || len(result.Config.Model.AllowedModels) != 2 {
+	if len(result.Config.Model.AllowedModels) != 2 {
 		t.Fatalf("unexpected Model configuration: %+v", result.Config.Model)
 	}
-	if !strings.Contains(output.String(), "does not guarantee prevention of data exfiltration") || !strings.Contains(output.String(), "Allowed models") {
+	if !strings.Contains(output.String(), "does not guarantee prevention of data exfiltration") || !strings.Contains(output.String(), "Allowed models") || strings.Contains(output.String(), "authentication method") {
 		t.Fatalf("wizard warning/catalog output missing: %s", output.String())
 	}
 }

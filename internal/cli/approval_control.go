@@ -399,10 +399,10 @@ func (s *controlledSession) shell(ctx context.Context, command string) (string, 
 		return "", fmt.Errorf("Agent Session capability expired")
 	}
 	if s.state != "running" {
-		return "", fmt.Errorf("guest shell requires a running Agent Session")
+		return "", fmt.Errorf("guest console requires a running Agent Session")
 	}
 	if command == "" || len(command) > 16<<10 || strings.IndexByte(command, 0) >= 0 {
-		return "", fmt.Errorf("guest shell command is invalid")
+		return "", fmt.Errorf("guest console command is invalid")
 	}
 	s.touchLocked(s.currentTime())
 	outer := "runuser -u sunaba-agent -- /run/sunaba/shell-wrapper \"$1\" 2>&1 | head -c 1048576; status=${PIPESTATUS[0]}; printf '\\n[SUNABA_EXIT=%d]\\n' \"$status\"; exit 0"

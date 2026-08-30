@@ -2,8 +2,6 @@ package trustedui
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -95,16 +93,16 @@ func ConfirmApply(input io.Reader, output io.Writer, request approval.Request) e
 	}
 	summary := approval.SanitizeText(request.Summary)
 	if _, err := fmt.Fprintf(output,
-		"SUNABA HOST TRUSTED APPROVAL\nOperation: apply Change Set\nProject: %s\nBaseline: %s\nMerged: %s\nChange Set: %s\nSummary: %s\nExpires: %s\nNonce: %s\nType the nonce exactly to approve: ",
+		"SUNABA HOST TRUSTED APPROVAL\nOperation: apply all changes\nProject: %s\nBaseline: %s\nMerged: %s\nChange Set: %s\nSummary: %s\nExpires: %s\nApply the entire displayed Change Set? Type 'apply all changes' to approve: ",
 		approval.SanitizeText(request.Binding.ProjectID), request.Binding.BaselineDigest, request.Binding.MergedDigest,
-		request.Binding.ChangeSetDigest, summary, request.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"), request.Nonce,
+		request.Binding.ChangeSetDigest, summary, request.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"),
 	); err != nil {
 		return err
 	}
-	return confirmNonce(input, output, request.Nonce)
+	return confirmApplyAll(input, output)
 }
 
-func confirmNonce(input io.Reader, output io.Writer, nonce string) error {
+func confirmApplyAll(input io.Reader, output io.Writer) error {
 	reader := bufio.NewReader(io.LimitReader(input, 514))
 	line, err := reader.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -118,11 +116,9 @@ func confirmNonce(input io.Reader, output io.Writer, nonce string) error {
 	if strings.ContainsAny(line, "\x00\n\r\t\x1b") {
 		return ErrRejected
 	}
-	presented := sha256.Sum256([]byte(line))
-	expected := sha256.Sum256([]byte(nonce))
-	if subtle.ConstantTimeCompare(presented[:], expected[:]) != 1 {
+	if line != "apply all changes" {
 		return ErrRejected
 	}
-	_, err = io.WriteString(output, "Approved by host input.\n")
+	_, err = io.WriteString(output, "Approved the entire displayed Change Set by host input.\n")
 	return err
 }

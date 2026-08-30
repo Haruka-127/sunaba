@@ -28,6 +28,47 @@ func TestPinnedManifest(t *testing.T) {
 	if m.GoModules["github.com/urfave/cli/v3"] != UrfaveCLIVersion {
 		t.Fatalf("urfave/cli=%q", m.GoModules["github.com/urfave/cli/v3"])
 	}
+	if m.Bun.Version != BunVersion || m.OpenTUI.Version != OpenTUIVersion || m.SunabaUI.SHA256 == "" {
+		t.Fatalf("sunaba-ui dependency contract is incomplete: Bun=%q OpenTUI=%q artifact=%q", m.Bun.Version, m.OpenTUI.Version, m.SunabaUI.SHA256)
+	}
+}
+
+func TestManifestRejectsUnpinnedUIBuildInputs(t *testing.T) {
+	for name, mutate := range map[string]func(*Manifest){
+		"Bun latest": func(m *Manifest) {
+			m.Bun.Host.URL = "https://github.com/oven-sh/bun/releases/latest/download/bun-darwin-aarch64.zip"
+		},
+		"OpenTUI range":      func(m *Manifest) { m.OpenTUI.Version = "^0.5.9" },
+		"OpenTUI digest":     func(m *Manifest) { m.OpenTUI.SHA256 = "" },
+		"sunaba-ui platform": func(m *Manifest) { m.SunabaUI.Arch = "x64" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			manifest := MustPinned()
+			mutate(&manifest)
+			if err := ValidateRuntimeManifest(manifest); err == nil {
+				t.Fatal("unpinned sunaba-ui dependency accepted")
+			}
+		})
+	}
+}
+
+func TestBootstrapAndUpdateGateBindExactUIArtifact(t *testing.T) {
+	manifest := MustPinned()
+	manifest.SunabaUI.SHA256 = strings.Repeat("f", 64)
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("bootstrap accepted a different sunaba-ui artifact")
+	}
+	current := MustPinned()
+	candidate := current
+	candidate.AppleContainer.Version = "1.2.3"
+	candidate.AppleContainer.Commit = strings.Repeat("c", 40)
+	candidate.Provenance.AppleContainer.Tag = candidate.AppleContainer.Version
+	candidate.Provenance.AppleContainer.Commit = candidate.AppleContainer.Commit
+	candidate.SunabaUI.SHA256 = strings.Repeat("f", 64)
+	evidence := UpdateEvidence{ArtifactDigests: true, RuntimeVersion: true, Lifecycle: true, NetworkIsolation: true, CopyExport: true, ResourceLimits: true}
+	if err := ValidateUpdateCandidate(current, candidate, evidence); err == nil {
+		t.Fatal("generic dependency update changed sunaba-ui without a dedicated gate")
+	}
 }
 
 func TestRuntimeManifestAcceptsAnotherExactV1Release(t *testing.T) {

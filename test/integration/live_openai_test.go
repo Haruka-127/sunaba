@@ -10,11 +10,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sunaba/internal/secretstore"
 )
 
 func TestLiveOpenAIThroughAgentVM(t *testing.T) {
 	if os.Getenv("SUNABA_LIVE_OPENAI") != "1" {
-		t.Skip("set SUNABA_LIVE_OPENAI=1 to authorize one billable OpenAI request through the macOS Keychain and an Agent VM")
+		t.Skip("set SUNABA_LIVE_OPENAI=1 to authorize one billable OpenAI request through the host credential file and an Agent VM")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -31,7 +33,12 @@ func TestLiveOpenAIThroughAgentVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIntegrationFile(t, filepath.Join(project, "README.md"), "live OpenAI integration fixture\n")
+	key, err := secretstore.LoadOpenAIKey(ctx)
+	if err != nil {
+		t.Fatalf("a real API key in the host credential file is required before the live gate: %v", err)
+	}
 	sunaba := buildHostBinary(t, ctx, runtimeBase, "sunaba", "./cmd/sunaba")
+	copyBundledSunabaUI(t, runtimeBase)
 	_ = buildLinuxBinary(t, ctx, runtimeBase, "sunaba-guest-relay", "./cmd/sunaba-guest-relay")
 	_ = buildHostBinary(t, ctx, runtimeBase, "sunaba-git-hook", "./cmd/sunaba-git-hook")
 	environment := append(os.Environ(), "XDG_DATA_HOME="+filepath.Join(runtimeBase, "data"), "XDG_CONFIG_HOME="+filepath.Join(runtimeBase, "config"))
@@ -42,8 +49,12 @@ func TestLiveOpenAIThroughAgentVM(t *testing.T) {
 		output, runErr := command.CombinedOutput()
 		return string(output), runErr
 	}
-	if output, err := runSunaba("", "credentials", "openai", "status"); err != nil {
-		t.Fatalf("OpenAI Keychain credential is required: %v: %s", err, output)
+	if output, err := runSunaba(key+"\n", "credentials", "openai", "api-key", "set"); err != nil {
+		t.Fatalf("copy real API key into isolated host credential state: %v: %s", err, output)
+	}
+	key = ""
+	if output, err := runSunaba("", "model", "auth", "api-key"); err != nil {
+		t.Fatalf("select global API key authentication: %v: %s", err, output)
 	}
 	if output, err := runSunaba("", "setup"); err != nil {
 		t.Fatalf("setup: %v: %s", err, output)
@@ -61,7 +72,7 @@ func TestLiveOpenAIThroughAgentVM(t *testing.T) {
 		t.Fatalf("up: %v: %s", err, output)
 	}
 	request := `curl --silent --show-error --fail-with-body http://127.0.0.1:4141/v1/responses -H "Content-Type: application/json" -H "Authorization: Bearer $SUNABA_MODEL_GATEWAY_TOKEN" -d '{"model":"gpt-5","input":"Reply with exactly SUNABA_LIVE_OK.","max_output_tokens":256}'`
-	output, err := runSunaba(request+"\n", "shell", "--dir", project)
+	output, err := runSunaba(request+"\n", "console", "--dir", project)
 	if err != nil || !strings.Contains(output, "SUNABA_LIVE_OK") || !strings.Contains(output, `"status":"completed"`) {
 		t.Fatalf("live OpenAI response contract failed: %v: %s", err, output)
 	}

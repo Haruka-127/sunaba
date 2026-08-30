@@ -78,6 +78,7 @@ type Config struct {
 	ModelGateway       http.Handler
 	ModelGatewayClose  func() error
 	ModelToken         string
+	ModelAuth          ModelAuthSnapshot
 	GitGateway         http.Handler
 	GitRemotes         []GitRemote
 	GitGatewayClose    func() error
@@ -119,6 +120,7 @@ type Activation struct {
 	ModelGateway      http.Handler
 	ModelGatewayClose func() error
 	ModelToken        string
+	ModelAuth         ModelAuthSnapshot
 	GitGateway        http.Handler
 	GitRemotes        []GitRemote
 	GitGatewayClose   func() error
@@ -143,6 +145,7 @@ type Session struct {
 	SnapshotPolicy     workspace.SnapshotPolicy
 	ExportPolicy       workspace.ExportPolicy
 	ExportPolicyDigest string
+	modelAuth          ModelAuthSnapshot
 
 	cfg                Config
 	lifecycleContext   context.Context
@@ -203,6 +206,7 @@ func Start(ctx context.Context, cfg Config) (_ *Session, err error) {
 		ProjectID: projectLock.ProjectID, ProjectRoot: projectLock.ProjectRoot,
 		VMID: cfg.VMID, SessionID: cfg.SessionID, cfg: cfg, lifecycleContext: ctx, projectLock: projectLock,
 		SnapshotPolicy: cfg.SnapshotPolicy, ExportPolicy: cfg.ExportPolicy, ExportPolicyDigest: cfg.ExportPolicyDigest,
+		modelAuth: cloneModelAuthSnapshot(cfg.ModelAuth),
 	}
 	defer func() {
 		if err != nil {
@@ -402,6 +406,9 @@ func newRecoverySession(ctx context.Context, cfg RecoveryConfig, projectLock *st
 }
 
 func validateConfig(cfg Config) error {
+	if err := validateModelAuthSnapshot(cfg.ModelAuth); err != nil {
+		return err
+	}
 	if cfg.Store == nil || cfg.Runtime == nil || !filepath.IsAbs(cfg.Store.Root) {
 		return fmt.Errorf("secure session requires an absolute state store and runtime")
 	}
@@ -469,10 +476,14 @@ func activationFromConfig(cfg Config) Activation {
 		ModelToken: cfg.ModelToken, GitGateway: cfg.GitGateway, GitRemotes: cfg.GitRemotes,
 		GitGatewayClose: cfg.GitGatewayClose, WebGateway: cfg.WebGateway, WebToken: cfg.WebToken,
 		WebGatewayClose: cfg.WebGatewayClose, ServerPassword: cfg.ServerPassword, LeaseTTL: cfg.LeaseTTL,
+		ModelAuth: cloneModelAuthSnapshot(cfg.ModelAuth),
 	}
 }
 
 func validateActivation(activation Activation) error {
+	if err := validateModelAuthSnapshot(activation.ModelAuth); err != nil {
+		return err
+	}
 	if !sessionIDPattern.MatchString(activation.SessionID) || len(activation.ProviderConfig) == 0 || !json.Valid(activation.ProviderConfig) || activation.ModelGateway == nil || activation.ModelGatewayClose == nil {
 		return fmt.Errorf("Agent Session activation identity and Model Gateway are required")
 	}
@@ -665,6 +676,8 @@ func (s *Session) ResumeWith(ctx context.Context, activation Activation) (err er
 	s.cfg.SessionID = activation.SessionID
 	s.cfg.ProviderConfig = append([]byte(nil), activation.ProviderConfig...)
 	s.cfg.ModelGateway, s.cfg.ModelGatewayClose, s.cfg.ModelToken = activation.ModelGateway, activation.ModelGatewayClose, activation.ModelToken
+	s.modelAuth = cloneModelAuthSnapshot(activation.ModelAuth)
+	s.cfg.ModelAuth = cloneModelAuthSnapshot(activation.ModelAuth)
 	s.cfg.GitGateway, s.cfg.GitRemotes, s.cfg.GitGatewayClose = activation.GitGateway, append([]GitRemote(nil), activation.GitRemotes...), activation.GitGatewayClose
 	s.cfg.WebGateway, s.cfg.WebToken, s.cfg.WebGatewayClose = activation.WebGateway, activation.WebToken, activation.WebGatewayClose
 	s.cfg.ServerPassword, s.cfg.LeaseTTL = activation.ServerPassword, activation.LeaseTTL
