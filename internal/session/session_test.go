@@ -541,14 +541,73 @@ func TestPausedExportRemountsWorkspaceBeforeFreeze(t *testing.T) {
 		t.Fatalf("export error=%v", err)
 	}
 	commands := fake.commands[before:]
-	if len(commands) < 3 || !strings.Contains(commands[0], "test -f /var/lib/sunaba/overlay.img") || !strings.Contains(commands[0], "mount -t overlay overlay") || strings.Contains(commands[0], "nohup") {
+	if len(commands) < 5 || !strings.Contains(commands[0], "test -f /var/lib/sunaba/export-frozen") {
+		t.Fatalf("paused export frozen probe missing: %q", commands[0])
+	}
+	if !strings.Contains(commands[1], "test -f /var/lib/sunaba/overlay.img") || !strings.Contains(commands[1], "mount -t overlay overlay") || strings.Contains(commands[1], "nohup") {
 		t.Fatalf("paused export remount command=%q", commands)
 	}
-	if !strings.Contains(commands[1], "SUNABA_EXTERNAL_GIT_SAFE") || !strings.Contains(commands[2], "/var/lib/sunaba/merged-export") {
+	if !strings.Contains(commands[2], "SUNABA_EXTERNAL_GIT_SAFE") || !strings.Contains(commands[4], "/var/lib/sunaba/merged-export") || !strings.Contains(commands[4], "touch /var/lib/sunaba/export-frozen") {
 		t.Fatalf("workspace freeze did not follow remount: %q", commands)
 	}
-	if strings.Contains(commands[2], "/var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/") {
-		t.Fatalf("workspace freeze copied both merged and upper trees: %q", commands[2])
+	if strings.Contains(commands[4], "/var/lib/sunaba/overlay/upper/. /var/lib/sunaba/upper/") {
+		t.Fatalf("workspace freeze copied both merged and upper trees: %q", commands[4])
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPausedExportRetryAfterFrozenFailureSkipsRefreeze(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StopAndExport(context.Background()); err == nil || !strings.Contains(err.Error(), "export frozen session root filesystem") {
+		t.Fatalf("first export error=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(s.Root, "sunaba-quarantine-"+s.SessionID)); err != nil {
+		t.Fatalf("first attempt left no quarantine: %v", err)
+	}
+	fake.exportFrozen = true
+	before := len(fake.commands)
+	if _, err := s.StopAndExport(context.Background()); err == nil || !strings.Contains(err.Error(), "export frozen session root filesystem") {
+		t.Fatalf("retry did not reach the export step: %v", err)
+	}
+	for _, command := range fake.commands[before:] {
+		if strings.Contains(command, "cp -a --preserve=all") || strings.Contains(command, "rm -rf /var/lib/sunaba/merged-export") {
+			t.Fatalf("retry re-froze the already frozen workspace: %q", command)
+		}
+		if strings.Contains(command, "test -f /var/lib/sunaba/overlay.img") {
+			t.Fatalf("retry required the removed overlay image: %q", command)
+		}
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStopAndExportRejectsChangedBaselineBeforeFreeze(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.ProjectRoot, "host-edit.txt"), []byte("host\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before := len(fake.commands)
+	if _, err := s.StopAndExport(context.Background()); err == nil || !strings.Contains(err.Error(), "baseline changed") {
+		t.Fatalf("baseline conflict error=%v", err)
+	}
+	for _, command := range fake.commands[before:] {
+		if strings.Contains(command, "cp -a --preserve=all") || strings.Contains(command, "rm -rf /var/lib/sunaba/merged-export") {
+			t.Fatalf("baseline conflict destroyed the guest workspace: %q", command)
+		}
 	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)
@@ -861,6 +920,7 @@ type fakeRuntime struct {
 	commands          []string
 	startHook         func()
 	startError        error
+	exportFrozen      bool
 }
 
 func (f *fakeRuntime) ImageExists(context.Context, string) (bool, error) { return true, nil }
@@ -925,6 +985,12 @@ func (f *fakeRuntime) Exec(context.Context, string, bool, []string) error { retu
 func (f *fakeRuntime) ExecOutput(_ context.Context, _ string, command []string) (string, error) {
 	joined := strings.Join(command, " ")
 	f.commands = append(f.commands, joined)
+	if strings.Contains(joined, "test -f /var/lib/sunaba/export-frozen") {
+		if f.exportFrozen {
+			return "frozen", nil
+		}
+		return "", nil
+	}
 	if strings.Contains(joined, "SUNABA_EXTERNAL_GIT_SAFE") {
 		if f.externalGitUnsafe {
 			return "SUNABA_EXTERNAL_GIT_UNSAFE", nil

@@ -1157,11 +1157,20 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 			return ExportResult{}, err
 		}
 	}
+	if current, err := workspace.BuildSnapshotManifest(s.ProjectRoot, s.cfg.SnapshotPolicy); err != nil || current.Digest != s.Baseline.Digest {
+		return ExportResult{}, fmt.Errorf("host Project baseline changed during session")
+	}
 	if err := s.stopChannels(ctx); err != nil {
 		return ExportResult{}, err
 	}
-	if err := s.prepareGuestExport(ctx); err != nil {
+	alreadyFrozen, err := s.guestExportFrozen(ctx)
+	if err != nil {
 		return ExportResult{}, err
+	}
+	if !alreadyFrozen {
+		if err := s.prepareGuestExport(ctx); err != nil {
+			return ExportResult{}, err
+		}
 	}
 	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
 		return ExportResult{}, fmt.Errorf("stop session VM for frozen export: %w", err)
@@ -1171,7 +1180,7 @@ func (s *Session) StopAndExport(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, fmt.Errorf("VM is not frozen: state=%s error=%v", stopped, err)
 	}
 	quarantine := filepath.Join(s.Root, "sunaba-quarantine-"+s.SessionID)
-	if err := makeNewPrivateDirectory(quarantine); err != nil {
+	if err := resetPrivateDirectory(quarantine); err != nil {
 		return ExportResult{}, err
 	}
 	archive := filepath.Join(quarantine, "rootfs.tar")
@@ -1317,7 +1326,22 @@ func (s *Session) startRevokedGatewaysForExport() error {
 	return nil
 }
 
+func (s *Session) guestExportFrozen(ctx context.Context) (bool, error) {
+	out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", "test -f /var/lib/sunaba/export-frozen && printf frozen || true"})
+	if err != nil {
+		return false, fmt.Errorf("probe frozen guest export state: %w: %s", err, approval.SanitizeText(out))
+	}
+	return strings.TrimSpace(out) == "frozen", nil
+}
+
 func (s *Session) mountPausedWorkspaceForExport(ctx context.Context) error {
+	frozen, err := s.guestExportFrozen(ctx)
+	if err != nil {
+		return err
+	}
+	if frozen {
+		return nil
+	}
 	script := strings.Join([]string{
 		"set -eu",
 		"test -d /var/lib/sunaba/lower",
@@ -1347,6 +1371,8 @@ func (s *Session) prepareGuestExport(ctx context.Context) error {
 		"rm -rf /var/lib/sunaba/merged-export",
 		"mkdir -p /var/lib/sunaba/merged-export",
 		"cp -a --preserve=all " + s.WorkspacePath + "/. /var/lib/sunaba/merged-export/",
+		"sync",
+		"touch /var/lib/sunaba/export-frozen",
 		"if grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then for attempt in $(seq 1 50); do umount " + s.WorkspacePath + " 2>/dev/null && break; sleep 0.1; done; fi",
 		"! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts",
 		"if ! grep -Fqs ' /var/lib/sunaba/overlay ' /proc/mounts; then mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay; fi",
@@ -1556,6 +1582,29 @@ func makeNewPrivateDirectory(path string) error {
 		return fmt.Errorf("session transaction directory must be mode 0700")
 	}
 	return nil
+}
+
+// resetPrivateDirectory replaces a previous attempt's partial output so an
+// interrupted export can be retried. It only reclaims a sunaba-* directory
+// that this process layout owns.
+func resetPrivateDirectory(path string) error {
+	if !filepath.IsAbs(path) || !strings.HasPrefix(filepath.Base(path), "sunaba-") {
+		return fmt.Errorf("session transaction directory must be an absolute sunaba-* path")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return makeNewPrivateDirectory(path)
+		}
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to reset a non-directory transaction path")
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return makeNewPrivateDirectory(path)
 }
 
 func (s *Session) removeFailedRoot() error {
