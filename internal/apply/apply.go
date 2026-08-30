@@ -227,6 +227,12 @@ func RecoverLocked(projectRoot, projectID string, snapshotPolicy workspace.Snaps
 		}
 		transactionRoot := filepath.Join(transactions, entry.Name())
 		encoded, err := securefs.ReadOwnedRegular(filepath.Join(transactionRoot, "journal.json"), 64<<20)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := removeTransactionRoot(transactionRoot, projectRoot); err != nil {
+				return err
+			}
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("read recovery journal: %w", err)
 		}

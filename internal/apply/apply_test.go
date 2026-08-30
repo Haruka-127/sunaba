@@ -128,6 +128,48 @@ func TestApplyCleansTransactionBeforeJournalFailure(t *testing.T) {
 	}
 }
 
+func TestRecoverLockedRemovesJournallessTransaction(t *testing.T) {
+	cfg := applyFixture(t)
+	baseline := mustManifest(t, cfg.ProjectRoot)
+	transactions := filepath.Join(cfg.ProjectRoot, ".sunaba", "transactions")
+	stranded := filepath.Join(transactions, "sunaba-apply-"+cfg.ProjectID+"-staged")
+	if err := os.MkdirAll(filepath.Join(stranded, "stage", "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(stranded, "stage", "nested", "partial"), "staging\n")
+	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID, cfg.SnapshotPolicy); err != nil {
+		t.Fatalf("journalless transaction blocked recovery: %v", err)
+	}
+	entries, err := os.ReadDir(transactions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("journalless transaction remained: %v", entries)
+	}
+	if recovered := mustManifest(t, cfg.ProjectRoot); recovered.Digest != baseline.Digest {
+		t.Fatalf("journalless recovery changed Project: %s", recovered.Digest)
+	}
+}
+
+func TestRecoverLockedRejectsUnreadableJournal(t *testing.T) {
+	cfg := applyFixture(t)
+	transactions := filepath.Join(cfg.ProjectRoot, ".sunaba", "transactions")
+	stranded := filepath.Join(transactions, "sunaba-apply-"+cfg.ProjectID+"-corrupt")
+	if err := os.MkdirAll(transactions, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(stranded, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stranded, "journal.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID, cfg.SnapshotPolicy); err == nil {
+		t.Fatal("unreadable journal was accepted")
+	}
+}
+
 func TestRecoverLockedRollsBackProcessCrashJournal(t *testing.T) {
 	cfg := applyFixture(t)
 	baseline := mustManifest(t, cfg.ProjectRoot)
