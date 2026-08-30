@@ -110,3 +110,28 @@ func TestCreateApprovedSnapshotSubsetRejectsChangedSource(t *testing.T) {
 		t.Fatalf("failed subset retained destination: %v", err)
 	}
 }
+
+func TestCreateApprovedSnapshotSubsetRejectsSourceChangedToHardlink(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "changed.txt")
+	writeFile(t, path, "approved")
+	approved, err := BuildSnapshotManifest(root, DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "external")
+	writeFile(t, external, "approved")
+	if err := os.Link(external, path); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "subset")
+	if _, err := CreateApprovedSnapshotSubset(root, destination, approved, []string{"changed.txt"}, DefaultSnapshotPolicy()); err == nil {
+		t.Fatal("hardlinked approved source was materialized")
+	}
+	if _, err := os.Lstat(destination); !os.IsNotExist(err) {
+		t.Fatalf("failed subset retained destination: %v", err)
+	}
+}
