@@ -567,6 +567,9 @@ func (s *Session) ExecCapture(ctx context.Context, command []string, stdoutLimit
 }
 
 func (s *Session) startGateway() error {
+	if err := s.stopStaleGateways(); err != nil {
+		return err
+	}
 	server, done, err := s.startUnixGateway("model-gateway.sock", s.cfg.ModelGateway)
 	if err != nil {
 		return err
@@ -1286,6 +1289,9 @@ func (s *Session) RetainForRecovery(ctx context.Context) error {
 }
 
 func (s *Session) startRevokedGatewaysForExport() error {
+	if err := s.stopStaleGateways(); err != nil {
+		return err
+	}
 	rejected := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 	})
@@ -1409,6 +1415,16 @@ func (s *Session) closeDevNetwork(ctx context.Context) error {
 		}
 	})
 	return closeErr
+}
+
+func (s *Session) stopStaleGateways() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var stopErr error
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.webGatewayServer, &s.webGatewayDone, "web_gateway.stopped"))
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.gitGatewayServer, &s.gitGatewayDone, "git_gateway.stopped"))
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.gatewayServer, &s.gatewayDone, "model_gateway.stopped"))
+	return stopErr
 }
 
 func (s *Session) stopChannels(ctx context.Context) error {

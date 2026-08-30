@@ -493,6 +493,40 @@ func TestPausedExportRevokesCapabilityBeforeRestartAndKeepsMountSocket(t *testin
 	}
 }
 
+func TestFailedPausedExportStopsReplacedGatewayServers(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fake.startError = errors.New("injected restart failure")
+	if _, err := s.StopAndExport(context.Background()); err == nil || !strings.Contains(err.Error(), "start paused session VM for export") {
+		t.Fatalf("restart error=%v", err)
+	}
+	if s.gatewayServer == nil || s.gatewayDone == nil {
+		t.Fatal("failed export did not leave the revoked gateway assigned")
+	}
+	previousDone := s.gatewayDone
+	fake.startError = nil
+	if _, err := s.StopAndExport(context.Background()); err == nil {
+		t.Fatal("retry unexpectedly succeeded")
+	}
+	select {
+	case _, open := <-previousDone:
+		if open {
+			t.Fatal("replaced gateway server channel was left open")
+		}
+	default:
+		t.Fatal("previous gateway server was not stopped before replacement")
+	}
+	if err := s.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPausedExportRemountsWorkspaceBeforeFreeze(t *testing.T) {
 	cfg, fake := sessionFixture(t)
 	s, err := Start(context.Background(), cfg)
