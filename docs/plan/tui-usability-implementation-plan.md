@@ -23,8 +23,8 @@
 
 今回実装しない。
 
-- toolchainや依存cacheの永続化
-- Change Setの部分適用
+- VM内toolchain全体の自動永続化
+- 一般的なNormal file単位の部分適用、NormalとBulkの別approval
 - diffのsyntax highlight
 - review済みfileの追跡と、未review fileに対する警告
 - mouse操作
@@ -117,9 +117,9 @@ API keyはmaskされた入力欄で受け取る。secretを画面、履歴、log
 
 OpenCode TUI終了後、Go側がSession capability、relay、server password等を既存仕様どおり失効し、sunaba TUIを新しく起動してHomeへ戻す。OpenTUI helperがOpenCode process、VM、Gatewayを直接起動・停止しない。
 
-### 3.7 Change Set review
+### 3.7 Work Set review
 
-Changes画面に表示するのは、hostがbaselineとexport結果から生成したChange Setに含まれる変更fileだけとする。
+Changes画面はNormal changesとBulk pathsの2 sectionにする。Normalにはhostがbaselineとexport結果から生成したCore Change Setの変更fileだけを表示し、Bulkにはdirectory root、分類理由、aggregate count/size、capture状態、digest prefix、現在のdispositionだけをbounded表示する。通常画面へdescendant filenameを列挙しない。
 
 - 左pane: 変更file一覧
 - 右pane: 選択fileのdiff
@@ -134,7 +134,7 @@ symlink、実行可能file、binary、巨大fileには明示的なrisk表示を�
 
 reviewは途中で終了できる。pending Change Setを保持し、同じChange Setのreviewを再開できる。初期実装では閲覧済みfileを記録しない。
 
-`Apply all changes`はChanges画面からだけ実行でき、対象はChange Set全体とする。file数と全体適用であることを示す確認画面を経て、確認直後にもidentityを再検証する。部分適用は行わない。利用者へdigestやnonceの手入力を求めず、Go側が表示中のChange Set identityと一回限りの承認を内部で束縛する。
+`Apply current plan`は全Bulk pathがterminal dispositionへ解決され、必要dataとguardがdurableな場合だけChanges画面に表示する。確認画面はNormal全件、各Bulk disposition、line reviewしていない制限を示す。一般的なNormal file部分適用、Normal/Bulkの別approval、directory mergeは行わない。利用者へdigestやnonceの手入力を求めず、Go側が表示中のWork Set、Resolution、Apply Planと一回限りの承認を内部で束縛する。
 
 ### 3.8 Git push承認
 
@@ -406,7 +406,7 @@ Keychainよりat-rest保護が弱く、同じmacOS user権限の別processから
 - add、modify、delete、rename、mode、symlink、binary、large fileを分類する
 - wide side-by-sideとnarrow unifiedが同じChange Setを表す
 - review終了後もpendingを保持し再開できる
-- applyは全体だけで、stale revision、baseline変更、Change Set identity変更を拒否する
+- applyは単一Apply Plan全体だけで、unresolved Bulk、stale revision、baseline変更、Work Set/Resolution/Plan identity変更を拒否する
 - digestやnonceの手入力なしで一回限りの承認へ束縛される
 
 ## 9. 完了条件
@@ -417,4 +417,4 @@ Keychainよりat-rest保護が弱く、同じmacOS user権限の別processから
 - 既存のVM、Gateway、Snapshot、Change Set、approvalのセキュリティ不変条件が維持される。
 - 認証にmacOS password promptを必要とせず、Keychainへアクセスしない。
 - UIは英語、利用者向け文書と実装計画は日本語で整合する。
-- 保留したtoolchain/cache永続化と部分applyが混入していない。
+- Normal file単位部分apply、Normal/Bulk別approval、directory mergeが混入していない。

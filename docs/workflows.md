@@ -57,15 +57,15 @@ OpenCodeを終了しても自動export、apply、destroyは行いません。作
 
 ## 変更をhostへ反映する
 
-1. VM作業をexportしてpending Change Setを作ります。通常はHomeからChangesへ進みます。CLIでは次を使います。
+1. VM作業をexportしてpending Work Setを作ります。通常はHomeからChangesへ進みます。CLIでは次を使います。
 
    ```sh
    sunaba changes export --dir /path/to/project
    ```
 
-2. Changesで変更fileを選択してdiffとriskを確認します。`Tab`でFiles、Diff、Actionsを移動します。Diffは`↑`/`↓`またはPageUp/PageDownで全rowをページ越しに確認し、長い行は`←`/`→`または`Home`/`End`、hunk間は`n`/`p`で移動します。wide terminalはline番号付きside-by-side、narrow terminalはline番号付きunifiedです。binary、巨大file、symlink、実行可能file、mode変更の警告を見落とさないでください。
+2. Normal changesで変更fileを選択してdiffとriskを確認します。Bulk pathsがある場合はroot単位の件数、size、分類理由、digestを確認し、`Keep host unchanged`、`Retain as artifact`、またはexact inventoryの`Discard VM-only data`へ明示的に解決します。`node_modules`という名前だけで不要とは判断しません。
 
-3. 途中で戻ってもpendingは保持されます。適用する場合は`Apply all N files`を選び、次の確認画面で全体適用を確定します。部分適用はなく、表示中のChange Set全体だけが対象です。digestやnonceは入力しません。
+3. 途中で戻ってもpendingは保持されます。すべてのBulk pathが解決済みになると`Apply current plan`が有効になります。次の確認画面でNormal全件とBulk dispositionを一度だけ確定します。Normal file単位部分適用やNormal/Bulk別approvalはなく、digestやnonceは入力しません。
 
 CLIでreview/applyする場合:
 
@@ -75,6 +75,30 @@ sunaba changes apply --dir /path/to/project
 ```
 
 CLI確認では`apply all changes`と入力します。apply後はhost Projectが変わるため、次のVM作成前にSnapshot previewと承認をやり直します。
+
+CLIでBulk状態を確認する場合:
+
+```sh
+sunaba changes status --dir /path/to/project --json
+sunaba changes bulk list --dir /path/to/project
+sunaba changes bulk show --dir /path/to/project <bulk-id>
+sunaba changes bulk review-normally --dir /path/to/project <bulk-id> --expect-workset <digest> --expect-bulk <digest>
+```
+
+mutationには表示されたexact Work Set digestとBulk object digestを`--expect-workset`、`--expect-bulk`で指定します。古いdigestやpath名だけでは変更できません。
+
+`Keep host unchanged`でApply Planを完了した後も、VM-only resultはProject-bound retained itemとして残ります。後から確認または明示破棄する場合:
+
+```sh
+sunaba retained list --dir /path/to/project
+sunaba retained show --dir /path/to/project <retained-id>
+sunaba retained discard --dir /path/to/project <retained-id> \
+  --expect-object <object-digest> \
+  --expect-bytes <logical-bytes> \
+  --yes
+```
+
+discardは表示したexact identityが変わっていない場合だけ実行されます。descendant filenameは通常一覧へ出さず、Project destroyも未処理の保持dataを暗黙削除しません。
 
 ## AI connectionを変更する
 

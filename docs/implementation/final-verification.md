@@ -31,7 +31,7 @@ go test -tags=integration -run '^$' ./test/integration
 ./scripts/build-ui.sh
 ```
 
-2026-08-30の`feat/opentui-ux`で上記4 commandを再実行しPASSした。UI gateはOpenTUI helper test 20件、TypeScript typecheck、standalone build、固定SHA-256 `24d6451d295b836cda3258ff283d900d009b174c402e4b4f4f263835ab9d95ed`、Mach-O/owner/mode/architectureを検証した。通常gateは全unit、vet、host/guest build、CLI/help、Keychain禁止を含むstatic boundaryを検証した。全raceとintegration build-tagのcompile-onlyもPASSした。Apple Container、実credential、sudo、pfを使う実機操作は実行していない。
+2026-08-31の`feat/opentui-ux`で上記4 commandを再実行しPASSした。UI gateはOpenTUI helper test 21件、TypeScript typecheck、standalone build、固定SHA-256 `af4c787730e125b98535e50cc1ac818410083a529411006c2ef29af305c15fd2`、Mach-O/owner/mode/architectureを検証した。通常gateはBulk classifier/object/Work Set/retentionを含む全unit、vet、host/guest build、CLI/help、Keychain禁止を含むstatic boundaryを検証した。全raceとintegration build-tagのcompile-onlyもPASSした。Apple Container、実credential、sudo、pfを使う実機操作は実行しておらず、directory applyは引き続き無効である。
 
 2026-08-20の当時mainで先頭3 commandを実行し、通常gate、全race、integration build-tagのコンパイルがPASSした。通常gateはformat、全unit、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを検証する。`go test -tags=integration -run '^$'`はcompile-onlyであり、Apple Container VMを起動しない。
 

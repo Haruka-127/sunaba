@@ -113,6 +113,10 @@ sunaba snapshot approve --dir /path/to/project --digest <表示されたdigest>
 
 host Projectが変わった後は、次のVM作成前にpreviewと承認をやり直します。
 
+Snapshot previewは`Core input`、`Bulk input`、`Excluded`を分けて表示します。既定では任意階層のexact directory component `node_modules`がBulkです。BulkはVM lowerへcopyされず、既存host directoryはそのまま残ります。これは「不要」「cache」「破棄可能」という判定ではありません。`snapshot.exclude`は保持も行わない強い除外であり、Bulkとは意味が異なります。
+
+`node_modules`をVMへ自動importしないため、依存はlockfileと許可済みWeb accessからVM内で再生成します。secure modeで必要なpackage originを許可していない場合やofflineの場合、installは失敗します。host treeや過去artifactを互換性の推測だけで自動seedしません。
+
 ## HomeとOpenCode
 
 Homeは現在実行できるactionだけを表示します。主なactionは`Start`、`Resume`、`Review changes`、`Settings`、`Recovery`です。
@@ -234,13 +238,23 @@ sunaba approvals --dir /path/to/project
 
 remote、ref、old/new object ID、force/deleteを確認し、approveまたはrejectします。承認はexact bindingへのone-shotで、期限内に変更せず同じpushを再実行した場合だけ有効です。
 
-## Changes
+## ChangesとBulk paths
 
-Changesにはhostがbaselineとexport結果から生成したChange Setの変更fileだけを表示します。状態は`A`、`M`、`D`、`R`です。wide terminalはline番号とBefore/After headerを持つside-by-side、narrow terminalはline番号付きunified diffへ切り替わります。`Tab`でFiles、Diff、Actionsへfocusを移し、Filesでは矢印とEnterを使います。Diffでは`↑`/`↓`またはPageUp/PageDownで全rowをページ越しに移動し、`←`/`→`で長い行を横scroll、`Home`/`End`で行の先頭・末尾、`n`/`p`で次・前のhunkへ移動します。画面には全row中の現在pageと、横方向に未表示部分がある場合の`‹`/`›`を表示します。actionと操作helpは画面下部に固定されます。
+Changesは`Normal changes`と`Bulk paths`の2 sectionです。Normalにはhostがbaselineとexport結果から生成したCore Change Setの変更fileだけを表示します。状態は`A`、`M`、`D`、`R`です。wide terminalはline番号とBefore/After headerを持つside-by-side、narrow terminalはline番号付きunified diffへ切り替わります。`Tab`でFiles、Diff、Actionsへfocusを移し、Filesでは矢印とEnterを使います。Diffでは`↑`/`↓`またはPageUp/PageDownで全rowをページ越しに移動し、`←`/`→`で長い行を横scroll、`Home`/`End`で行の先頭・末尾、`n`/`p`で次・前のhunkへ移動します。
+
+Bulk pathsはroot directory、分類理由、file/directory/symlink数、logical size、capture状態、digest prefix、dispositionを表示します。通常画面へdescendant filenameやsymlink targetを列挙しません。各pathで選べる操作は次です。
+
+- `Keep host unchanged`: host pathへ作用せず、Project-bound retained itemとして保持
+- `Retain as artifact`: host pathへ作用せず、Project lifecycleから独立したartifactとしてpin
+- `Discard VM-only data`: exact inventoryを最終Apply Planで確認した後だけ破棄
+- `Review normally`: baselineがabsentでexact objectがNormal hard limit内の場合、新しいderived Work Setを作ってline reviewへ移す
+- `Apply entire directory`: exact directoryを置換する操作。Apple Container実機gate完了まで表示・実行しない
+
+未解決Bulk pathが一つでもある間、Apply actionは表示されません。Bulk分類だけで自動host反映、自動破棄、自動承認は行いません。
 
 symlink、実行可能file、binary、巨大file、mode変更にはrisk表示が付きます。内容を安全に表示できない場合はtype、size、hash、理由を表示し、外部previewを起動しません。reviewを中断してもpending Change Setは保持されます。
 
-`Apply all N files`はfile数、全体適用、再検証内容を示す確認画面を経て、表示中のChange Set全体だけを適用します。部分適用はありません。Go側がview revision、Project、baseline、Merged View、Change Set、一回限りのapprovalを内部で束縛し、確認直後にもidentityを再検証するため、digestやnonceの手入力は不要です。
+`Apply current plan`はNormal changes全件と、解決済みBulk disposition、retention処理を一つのApply Planとして確認します。Normal file単位の部分適用、Normal/Bulkの別approval、directory mergeはありません。Go側がview revision、Project、Workspace policy、Work Set、Resolution、Apply Plan、object digest、一回限りのapprovalを内部で束縛し、確認直後にもidentityを再検証します。
 
 CLI経路:
 
@@ -248,7 +262,16 @@ CLI経路:
 sunaba changes export --dir /path/to/project
 sunaba changes review --dir /path/to/project
 sunaba changes apply --dir /path/to/project
+sunaba changes status --dir /path/to/project --json
+sunaba changes bulk list --dir /path/to/project
+sunaba changes bulk show --dir /path/to/project <bulk-id>
+sunaba changes bulk review-normally --dir /path/to/project <bulk-id> --expect-workset <digest> --expect-bulk <digest>
+sunaba retained list --dir /path/to/project
+sunaba retained show --dir /path/to/project <retained-id>
+sunaba retained discard --dir /path/to/project <retained-id> --expect-object <digest> --expect-bytes <bytes> --yes
 ```
+
+`Keep host unchanged`で保持したdataはopaque retained IDで管理します。discardは一覧または詳細に表示されたexact object digestとlogical byte数を再指定した場合だけ実行され、active Work SetのApply approvalとは別の明示的maintenance操作です。descendant filenameは通常の一覧へ出しません。
 
 CLI applyの確認phraseは`apply all changes`です。適用後はhost Projectが変わるため、新しいVMの前にSnapshot previewと承認をやり直します。
 
@@ -263,7 +286,7 @@ sunaba status --dir /path/to/project
 sunaba changes export --dir /path/to/project
 ```
 
-VM-only作業やpending成果物を明示的に捨てる場合だけ、次を使います。
+Bulkを含まないVM-only作業やpending成果物を明示的に捨てる場合だけ、次を使います。Bulk Object、Project-bound retained item、retention finalization journalがある場合はProject stateの破棄を拒否します。
 
 ```sh
 sunaba recreate --dir /path/to/project --discard-pending
@@ -309,4 +332,4 @@ sunaba project list --active
 - HTTPS CONNECT tunnel内部のmethod、path、header、upload内容の検査
 - Agentが生成したcode、dependency、binaryの安全性
 - 同じmacOS user権限の別processに対するcredential fileの秘匿
-- toolchain/cache永続化、Change Set部分適用、syntax highlight、review済みfile追跡、mouse、日本語UI、plugin、embedded terminal
+- VM toolchain全体の自動永続化、Normal file単位部分適用、Normal/Bulk別approval、directory merge、syntax highlight、review済みfile追跡、mouse、日本語UI、plugin、embedded terminal

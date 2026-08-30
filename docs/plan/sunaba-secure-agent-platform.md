@@ -106,6 +106,11 @@ sunabaの目的は、AIエージェントを単に制限することではない
 | SD-23 | 通常操作はbundled OpenTUI helperによる英語TUIへ集約し、Go側を唯一のauthorityとする | コマンド暗記を減らしつつ、UI processへpolicy判断やhost mutationを移さないため |
 | SD-24 | OpenAI credentialはhost-only private fileへ保存し、認証方式はsunaba global設定とする | Keychain password promptをなくし、Projectごとの反復選択を避けるため。同一macOS userの別processから読まれ得る残余リスクは受容する |
 | SD-25 | Setupで確認する推奨設定はsecure、OAuth、`common-development` Web accessとする | 利用者の一括確認後だけ、安全な通常開発に必要な既定経路を有効にするため |
+| SD-26 | pending workspaceをNormal changesとBulk pathsの2 laneへ分け、最終承認は単一Apply Planにする | 大量依存treeでsource reviewを妨害せず、未判断dataの暗黙破棄や別々の部分applyを避けるため |
+| SD-27 | exact component `node_modules`を既定Bulk Rootとし、Snapshot lowerへ入れない | host向けnative dependencyや大量cacheをLinux guestへ暗黙移送せず、通常reviewをboundedに保つため |
+| SD-28 | Bulk分類をdata価値や破棄可否の判断に使わない | 誤分類がdata loss、自動host反映、自動承認へ直結しないようにするため |
+| SD-29 | 全Bulk Rootが明示dispositionを持つまでApply Planを作らない | keep、artifact、directory apply、discardのいずれにも利用者判断とexact identityを要求するため |
+| SD-30 | directory applyはpinned Apple Containerのfrozen readout実機gate通過まで無効にする | full merged copy、whiteout、opaque、rename等の意味論を推測で承認境界にしないため |
 
 ---
 
@@ -126,6 +131,11 @@ sunabaの目的は、AIエージェントを単に制限することではない
 | Project Snapshot | VMの作成またはクリーン再生成時点の、ホスト承認済みプロジェクトを固定した読み取り専用基準 |
 | Workspace Overlay | Project Snapshotをlower、Project専用領域をupper/workとするVM内OverlayFSのmerged view |
 | Change Set | 固定baselineとexport済みmerged workspaceをホスト側で比較して作る、検査・承認可能な変更集合 |
+| Pending Work Set | Normal changes、保持済みBulk Record、作成時policyを一つのimmutable identityへ束縛したpending成果物 |
+| Bulk Root | 通常のline reviewには大きすぎるか、明示ruleでsummary reviewへ分けたdirectory。不要・cache・破棄可能という意味ではない |
+| Bulk Object | host safe walkerが作るcanonical manifest、SHA-256 blob、Merkle digestからなるprivateなexact directory object |
+| Disposition | Bulk Rootについてkeep host、retain artifact、apply directory、discardのいずれを行うかという明示判断 |
+| Apply Plan | Normal changes全件と全Bulk disposition、retention処理、no-touch rootを一度の承認へ束縛するprojection |
 | Clean Recreation | 現在のVMと書き込み層を破棄し、承認済みProject Snapshotから新しいVMを作る操作 |
 | Transparent Mediation | 標準的なOpenCode、Git、Webツールの操作を保ったまま、通信経路だけをGatewayへ接続する方式 |
 
@@ -413,6 +423,20 @@ sequenceDiagram
 
 ## 9. Workspace、OverlayFS、Change Set
 
+pending成果物は`Pending Work Set`として次の2 laneへ分ける。
+
+```text
+Pending Work Set
+├── Normal changes  通常のfile一覧とline diff
+└── Bulk paths      directory単位のbounded summaryとexact identity
+```
+
+`bulk`はreview方式の分類であり、不要、cache、破棄可能を意味しない。Normal changesは常に全件をApply Planへ含める。Bulk Rootは`Keep host unchanged`、`Retain as artifact`、`Apply entire directory`、`Discard VM-only data`のterminal dispositionをすべて明示するまでApplyできない。NormalとBulkを別々に承認・適用せず、全体を一つのApply Planとone-shot approvalへ束縛する。一般的なfile単位部分適用とdirectory mergeは行わない。
+
+`Review normally`はterminal dispositionではない。baselineがabsentでresultがexact managed objectとして保持され、Normal hard limit内に収まる場合だけ、対象rootをCoreへ移したderived Work Setを生成する。元Work Setを部分適用せず、元objectはderived Work Setと最終Apply Planへcleanup対象として束縛し、Project transactionとretention finalizationが完了するまで削除しない。
+
+Work Set schema v5、Project config v5、effective policy v9、Recovery v2、TUI protocol v4だけを開発中schemaとして扱う。旧schemaとの後方互換や暗黙migrationは製品要件にしない。
+
 ### 9.1 レイヤー構成
 
 ```mermaid
@@ -460,6 +484,12 @@ Snapshotへ含める対象はhost側Project policyで決め、Project内のfile�
 
 `project.json`の`snapshot.exclude`はhost-onlyなroot-relative literal pathの集合とし、該当path以下をSnapshot対象から外す。Project内の`.gitignore`を暗黙のセキュリティ境界には使わない。利用者が明示的にimportした場合だけ、negationやglobを含まないliteral entryを除外候補へ取り込み、`config apply`前にhost-only設定として確認する。
 
+`snapshot.exclude`はSnapshot、export、Work Set、保持、host applyのすべてから外す強い除外である。Bulkとは相互変換しない。Bulk selectorはhost-only policyのroot-relative `literal`とexact directory `component`だけを許可し、glob、regex、negation、shell展開、`.gitignore`の暗黙利用を拒否する。優先順位はProtected Path、`snapshot.exclude`、exact normal override、literal Bulk、component Bulk、structural overflow、Normalの順とする。
+
+既定policyは任意階層のdirectory componentがbyte単位でexactに`node_modules`と一致した最初のancestorをBulk Rootとし、nested matchを重複登録しない。Bulk RootはVM lowerへcopyせず、既存host directoryは`present_untracked`として保持してreplace/delete guardに使わない。依存導入には許可済みnetworkが必要であり、host dependency treeを自動importしない。
+
+明示ruleに一致しないtreeも、entry数、logical bytes、review item、manifest bytes、direct child数のsoft limitを超えたdirectoryを決定的な順序でstructural overflowとしてBulkへ移す。Project root自体は自動Bulkにせず、directoryへ安全に分割できないCore hard-limit超過はRecoveryへfail closedする。
+
 各VM作成前にSnapshot previewを生成し、entry/file数、総size、boundedな大容量file一覧、秘密らしいfile名だけを内容を表示せず提示する。利用者はpreviewのexact manifest digestをhost側で承認し、VM作成時は同じpolicy digestかつ同じmanifest digestでなければ拒否する。`project init`は登録とhost-only設定の作成だけを行い、未使用のSnapshotを作らない。
 
 - source、`opencode.json`、`.opencode/`、`.gitignore`、`.gitmodules`は通常のProject fileとして含められる。Project固有のOpenCode設定やpluginはVM内serverだけが読み込む
@@ -483,11 +513,13 @@ canonical manifestは、正規化済み相対path、file type、mode、size、co
 7. 利用者または後続の検査処理へ、制御文字をescapeしたChange Setを提示する。
 8. 承認されたChange Setだけをホスト作業ツリーへ適用する。
 
-pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みbaseline Snapshot、検証済みMerged View、両manifest、Change Set、作成時の正規化済みSnapshot/export policyとそのdigestを自己完結した組として保存する。保存した両Snapshot、policy、Change Setのdigestを再検証できた場合だけpendingを確定し、容量不足や保存失敗ではAgent VMを破棄しない。pending確定に失敗した場合はsecure/devのどちらでも、停止VM、固定runtime root、検証済みMerged ViewのdigestをProject-boundなhost-only recovery recordへ束縛し、`changes export`が同じfrozen成果物のpending確定を再試行できるようにする。通常cleanupはrecord保存失敗を削除許可とせず、guardlessな停止VMをfail closedで拒否する。これによりexport後にhost worktreeや無関係なcurrent Project policyが変化しても、作成時のpolicyで変更前後の内容をreview/applyできる。ただしhost baselineが変化したpendingのapplyは9.5のとおり拒否する。
+pending Work Setは、host-onlyなProject stateのmode `0700`領域へ、検証済みCore baseline/result、Core Change Set、Bulk Record、exact Bulk Object参照、作成時Workspace policyとdigest、別revisionのResolutionを自己完結した組として保存する。Bulk Objectはopaque IDの`0700` directory、`0600` canonical manifestとcontent-addressed blobで保持し、Project由来filenameをstorage path、通常audit、通常Bulk一覧へ展開しない。保存失敗、容量不足、timeout、capture失敗では停止VMを破棄せずRecovery v2へfail closedする。
+
+Recovery v2はProject、VM、Session、runtime、Workspace policy、partitioned baseline、Bulk record、捕捉済みWork Setを束縛する。VM-only dataがexact object、opaque recovery artifact、適用済み、または最終Apply Planで明示discardのいずれにもなっていなければVMやProject stateを削除しない。
 
 内容確認はhost側の`changes review`で行う。reviewはread-onlyであり、保存済みbaselineとMerged Viewをfd-relativeかつsymlink非追跡で再検証し、Change Set digestへ対応する追加、変更、削除、rename、type、mode、実行属性、symlink target、text差分を表示する。差分生成と表示ではProjectのGit設定、外部`diff`、pager、editor、syntax highlighter、MIME判定、preview helper、scriptを起動しない。text判定、1 file、総入力、行長、行数、diff出力へhost固定の上限を設け、binary、invalid UTF-8、巨大file等の内容を表示できない場合はsize、SHA-256、modeと未表示理由を明示する。path、symlink target、diff本文を含むすべてのuntrusted表示はterminal sanitizerを通す。
 
-### 9.4 Change Setの検証と適用
+### 9.4 Work Setの検証と適用
 
 最低限、次を検査する。
 
@@ -506,6 +538,12 @@ pending Change Setは、host-onlyなProject stateのmode `0700`領域へ、検�
 guestが提出するパッチや変更一覧は表示用の参考にはできるが、権威ある入力にしてはならない。
 
 applyはProject lockを保持し、canonical Project rootのdirectory descriptorから相対的に行う。既存symlinkを辿らず、通常fileは同一directory内の一時fileへ書いて`fsync`後にrenameする。全操作を事前検証し、影響を受ける既存entryをhost側transaction領域へ退避してから変更する。削除とdirectory操作もroot外へ作用しないことを各操作時に再検証する。途中失敗やprocess crashではjournalからrollbackまたは明示的なrecoveryを行い、部分適用を成功扱いしない。
+
+Apply PlanはWork Set、Resolution revision、Workspace policy、current Core baseline、Core Change Set、Bulk selection、exact before/after guard、no-touch roots、retention operationをcanonical digestへ含める。Project mutation開始直前にこのdigestへ束縛した一回限りのapprovalをconsumeする。postconditionはfull VM Merged Viewではなく、Bulk rootsを除くCore projection、apply対象BulkのMerkle digest、no-touch rootを跨がないtransaction rootで検証する。
+
+Project transactionは全成功またはrollbackとする。Project commit後のretention finalizationは別phaseのdurable journalで再実行可能にし、cleanup失敗時はdataを余分に残す方向へfailする。Project-bound retained itemまたは未完了retention journalがあるProjectのdestroyを拒否する。
+
+`Apply entire directory`はexact managed objectとabsent/exact before guardだけを受け付け、`present_untracked`、type change、merge、special file、opaque artifactを拒否する。現行実装では`absent -> directory`のtransaction codeだけを検証用に持ち、pinned Apple Container上でfull merged copyに依存しないfrozen readout、whiteout、opaque、rename、hardlinkの実機gateが通るまで製品actionを表示・実行しない。
 
 ### 9.5 競合
 

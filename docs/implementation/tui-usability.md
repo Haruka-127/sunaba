@@ -23,7 +23,7 @@
 ./scripts/build-ui.sh
 ```
 
-2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 20件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v3生成物SHA-256は`24d6451d295b836cda3258ff283d900d009b174c402e4b4f4f263835ab9d95ed`である。helperはterminal restore後もresponse frameのtransport closeまでmainを生存させ、authority viewの配列契約違反はbinding検証済みの`terminal_error`としてfail closedで返す。Changesはcanonical rowからresponsive diffを描画し、長い行の横scroll、hunk移動、最大256 row・64 KiB単位のhost-authoritative page遷移により、安全上限内の変更を末尾まで確認できる。利用者環境へのglobal installは行っていない。
+2026-08-31にproject-local Bunで再実行し、OpenTUI helper test 21件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v4生成物SHA-256は`af4c787730e125b98535e50cc1ac818410083a529411006c2ef29af305c15fd2`である。helperはterminal restore後もresponse frameのtransport closeまでmainを生存させ、authority viewの配列契約違反はbinding検証済みの`terminal_error`としてfail closedで返す。Changesはcanonical rowからresponsive diffを描画し、長い行の横scroll、hunk移動、最大256 row・64 KiB単位のhost-authoritative page遷移により、安全上限内の変更を末尾まで確認できる。protocol v4ではbounded Bulk sectionとopaque action IDを追加し、descendant filenameを通常frameへ含めない。利用者環境へのglobal installは行っていない。
 
 ## 自動gate
 

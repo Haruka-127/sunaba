@@ -15,4 +15,5 @@
 - [Phase 4](./phase-4.md)
 - [Phase 5](./phase-5.md)
 - [TUI利用性実装](./tui-usability.md)
+- [Bulk Work Set実装](./bulk-workset.md)
 - [最終検証台帳](./final-verification.md)
