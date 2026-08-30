@@ -126,6 +126,7 @@ Changes画面に表示するのは、hostがbaselineとexport結果から生成�
 - 状態label: `A`、`M`、`D`、`R`
 - wide terminal: before/afterのside-by-side
 - narrow terminal: unified diffへ自動fallback
+- file一覧、diff、actionを独立focus領域にし、diffはterminal高に収まるviewportでscrollする。actionとkey helpは画面下部に固定する
 
 初期実装は追加行と削除行だけを色分けし、色だけに意味を依存させない。syntax highlightは行わない。
 
@@ -133,7 +134,7 @@ symlink、実行可能file、binary、巨大fileには明示的なrisk表示を�
 
 reviewは途中で終了できる。pending Change Setを保持し、同じChange Setのreviewを再開できる。初期実装では閲覧済みfileを記録しない。
 
-`Apply all changes`はChanges画面からだけ実行でき、対象はChange Set全体とする。部分適用は行わない。利用者へdigestやnonceの手入力を求めず、Go側が表示中のChange Set identityと一回限りの承認を内部で束縛する。
+`Apply all changes`はChanges画面からだけ実行でき、対象はChange Set全体とする。file数と全体適用であることを示す確認画面を経て、確認直後にもidentityを再検証する。部分適用は行わない。利用者へdigestやnonceの手入力を求めず、Go側が表示中のChange Set identityと一回限りの承認を内部で束縛する。
 
 ### 3.8 Git push承認
 
@@ -200,6 +201,7 @@ protocolはversion付き、request/response型のbounded JSON messageとする�
 - screen ID
 - immutable view revision
 - sanitized text field
+- Changes専用のbounded file entry、unified row、side-by-side cell。repository由来textは行・cell単位でsanitizeし、改行、column、footerはhelper所有の構造として描画する
 - action ID
 - bounded input field
 - terminal capabilityとwidth/height
@@ -309,6 +311,7 @@ Keychainよりat-rest保護が弱く、同じmacOS user権限の別processから
 - Home、Project selector、Setup、Settings、Changes、Recovery componentを実装する。
 - componentがpolicy判断を持たないよう、表示とevent変換だけにする。
 - narrow/wide diff layoutをterminal widthから決める。
+- file/diff/action focus、diff viewport、resize、固定footerをChanges専用rendererで処理する。
 - exitとsignal時のterminal restore test harnessを用意する。
 
 ### 6.5 Change Set review

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPECTED_BUN="1.3.14"
 EXPECTED_BUN_SHA256="e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233"
-EXPECTED_UI_SHA256="27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
+EXPECTED_UI_SHA256="e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
 
 [[ -x "$ROOT/.cache/tools/bun-$EXPECTED_BUN/bun" ]] || {
   printf 'FAIL sunaba-ui - missing project-local Bun %s at .cache/tools/bun-%s/bun\n' "$EXPECTED_BUN" "$EXPECTED_BUN" >&2

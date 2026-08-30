@@ -198,6 +198,49 @@ func TestLegacyBootstrapLockMigrationPreservesProjectState(t *testing.T) {
 	}
 }
 
+func TestProtocolV1UIFullLockRequiresExactSetupMigration(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	a := &app{
+		store: &state.Store{Root: filepath.Join(base, "data", "sunaba")}, configs: &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")},
+		output: io.Discard, errors: io.Discard,
+	}
+	if err := a.store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := a.versionStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := versions.SaveConfig(versionconfig.BootstrapConfig()); err != nil {
+		t.Fatal(err)
+	}
+	pinned := dependency.MustPinned()
+	previous := versionconfig.Lock{
+		SchemaVersion: versionconfig.SchemaVersion, Generation: 9, ResolvedAt: time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC),
+		Manifest: dependency.LegacySunabaUIV1Manifest(pinned),
+	}
+	paths, _ := versions.Paths()
+	if err := writePrivateJSON(paths.Lock, previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := versions.LoadLock(); err == nil {
+		t.Fatal("protocol-v1 sunaba-ui lock passed the protocol-v2 contract")
+	}
+	if _, err := a.activeVersionLock(); !errors.Is(err, errLegacyDependencyMigrationRequired) {
+		t.Fatalf("old full UI lock classification error=%v", err)
+	}
+	migrated, previousDigest, _, err := loadLegacyBootstrapLock(versions, pinned)
+	if err != nil || previousDigest == "" || migrated.Generation != previous.Generation || !reflect.DeepEqual(migrated.Manifest, pinned) {
+		t.Fatalf("migrated=%+v digest=%q error=%v", migrated, previousDigest, err)
+	}
+	previous.Manifest.OpenTUI.Version = "0.5.8"
+	if encoded, err := json.Marshal(previous); err != nil {
+		t.Fatal(err)
+	} else if _, _, err := decodeLegacyBootstrapLock(encoded, pinned); err == nil {
+		t.Fatal("modified protocol-v1 dependency lock was accepted for migration")
+	}
+}
+
 func TestLegacyBootstrapLockMigrationRollsBackPreparedFailure(t *testing.T) {
 	base, _ := filepath.EvalSymlinks(t.TempDir())
 	a := &app{

@@ -14,5 +14,6 @@ test("helper exposes no Project, credential, network, shell, browser, clipboard,
     'from "@opentui/core"',
     'from "./protocol"',
     'from "./lifecycle"',
+    'from "./changes"',
   ])
 })

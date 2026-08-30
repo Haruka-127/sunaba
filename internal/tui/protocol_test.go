@@ -28,6 +28,29 @@ func testEvent(view View) Event {
 	return Event{Version: ProtocolVersion, Type: "event", ScreenID: view.ScreenID, Revision: view.Revision, Binding: view.Binding, Kind: EventAction, ActionID: "start", Capability: TerminalCapability{Color: true, Unicode: true}, Size: TerminalSize{Width: 120, Height: 40}}
 }
 
+func testChangesView(t *testing.T) View {
+	t.Helper()
+	binding := Binding{ProcessID: 123, ProjectID: "project-1", Nonce: strings.Repeat("a", 64)}
+	view, err := PrepareView(View{
+		Version: ProtocolVersion, Type: "view", ScreenID: "changes", Revision: 8, Binding: binding,
+		Title:   "Review changes",
+		Actions: []Action{{ID: "file.0", Label: "A test.txt"}, {ID: "apply-all", Label: "Apply all 1 file"}, {ID: "back", Label: "Back"}},
+		Changes: &ChangesView{
+			Summary: "1 file · 1 added", Layout: "side-by-side", Page: 1, Pages: 1, SelectedActionID: "file.0",
+			Files:   []ChangeFile{{ActionID: "file.0", Status: "A", Path: "test.txt"}},
+			Unified: []UnifiedDiffRow{{Kind: "hunk", Text: "@@ -0,0 +1,1 @@"}, {Kind: "add", NewLine: 1, Text: "test"}},
+			SideBySide: []SideBySideDiffRow{
+				{Kind: "hunk", Header: "@@ -0,0 +1,1 @@", Before: DiffCell{Kind: "empty"}, After: DiffCell{Kind: "empty"}},
+				{Kind: "content", Before: DiffCell{Kind: "empty"}, After: DiffCell{Kind: "add", Line: 1, Text: "test"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return view
+}
+
 func TestFrameRoundTripAndStrictJSON(t *testing.T) {
 	view := testView(t)
 	var encoded bytes.Buffer
@@ -39,7 +62,7 @@ func TestFrameRoundTripAndStrictJSON(t *testing.T) {
 		t.Fatalf("decoded=%+v error=%v", decoded, err)
 	}
 	for _, payload := range []string{
-		`{"version":1,"type":"event","screen_id":"home","revision":7,"binding":{"process_id":123,"project_id":"project-1","nonce":"` + strings.Repeat("a", 64) + `"},"kind":"exit","action_id":"","input":"","capability":{"color":false,"unicode":false},"size":{"width":80,"height":24},"error":"","unknown":true}`,
+		`{"version":2,"type":"event","screen_id":"home","revision":7,"binding":{"process_id":123,"project_id":"project-1","nonce":"` + strings.Repeat("a", 64) + `"},"kind":"exit","action_id":"","input":"","capability":{"color":false,"unicode":false},"size":{"width":80,"height":24},"error":"","unknown":true}`,
 		`{} {}`,
 	} {
 		var frame bytes.Buffer
@@ -129,5 +152,32 @@ func TestViewRejectsAggregateTextOversize(t *testing.T) {
 	}
 	if err := view.Validate(); err == nil {
 		t.Fatal("aggregate oversize view accepted")
+	}
+}
+
+func TestStructuredChangesRowsOwnLayoutAndBindVisibleFileActions(t *testing.T) {
+	view := testChangesView(t)
+	if err := view.Validate(); err != nil || view.Changes == nil || view.Changes.Unified[1].Text != "test" {
+		t.Fatalf("structured view=%+v error=%v", view.Changes, err)
+	}
+	for name, mutate := range map[string]func(*View){
+		"unbound selection": func(candidate *View) { candidate.Changes.SelectedActionID = "file.1" },
+		"unsafe diff row":   func(candidate *View) { candidate.Changes.Unified[1].Text = "test\nfake action" },
+		"invalid line":      func(candidate *View) { candidate.Changes.Unified[1].NewLine = 0 },
+		"unknown cell kind": func(candidate *View) { candidate.Changes.SideBySide[1].After.Kind = "execute" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := testChangesView(t)
+			mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("unsafe structured Changes view was accepted")
+			}
+		})
+	}
+	unsafe := testChangesView(t)
+	unsafe.Changes.Files[0].Path = "fake\nApply all"
+	prepared, err := PrepareView(unsafe)
+	if err != nil || strings.Contains(prepared.Changes.Files[0].Path, "\n") || !strings.Contains(prepared.Changes.Files[0].Path, "<U+000A>") {
+		t.Fatalf("prepared path=%q error=%v", prepared.Changes.Files[0].Path, err)
 	}
 }

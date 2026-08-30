@@ -21,8 +21,11 @@ func TestBuildReviewScreenUsesChangedFilesAndResponsiveLayouts(t *testing.T) {
 	if err != nil || wide.Layout != ReviewLayoutSideBySide || len(wide.Unified) != 4 || len(wide.SideBySide) != 3 {
 		t.Fatalf("wide screen=%+v error=%v", wide, err)
 	}
-	if wide.SideBySide[2].BeforeKind != '-' || wide.SideBySide[2].Before != "old\n" || wide.SideBySide[2].AfterKind != '+' || wide.SideBySide[2].After != "new\n" {
+	if wide.SideBySide[1].BeforeLine != 1 || wide.SideBySide[1].AfterLine != 1 || wide.SideBySide[2].BeforeKind != '-' || wide.SideBySide[2].BeforeLine != 2 || wide.SideBySide[2].Before != "old" || wide.SideBySide[2].AfterKind != '+' || wide.SideBySide[2].AfterLine != 2 || wide.SideBySide[2].After != "new" {
 		t.Fatalf("side-by-side replacement=%+v", wide.SideBySide[2])
+	}
+	if wide.Unified[1].OldLine != 1 || wide.Unified[1].NewLine != 1 || wide.Unified[2].OldLine != 2 || strings.Contains(wide.Unified[2].Text, "\n") {
+		t.Fatalf("unified line metadata=%+v", wide.Unified)
 	}
 }
 

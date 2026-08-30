@@ -18,7 +18,33 @@ import (
 	"sunaba/internal/state"
 	hosttui "sunaba/internal/tui"
 	"sunaba/internal/versionconfig"
+	"sunaba/internal/workspace"
 )
+
+func TestTUIChangesUsesStructuredRowsWithoutLayoutNewlines(t *testing.T) {
+	screen := workspace.ReviewScreen{
+		Layout: workspace.ReviewLayoutSideBySide, Selected: 0,
+		Files:      []workspace.ReviewFile{{Status: "A", Path: "test.txt"}},
+		Unified:    []workspace.UnifiedReviewRow{{Kind: '@', Text: "@@ -0,0 +1,1 @@"}, {Kind: '+', NewLine: 1, Text: "test"}},
+		SideBySide: []workspace.SideBySideReviewRow{{BeforeKind: '@', Before: "@@ -0,0", AfterKind: '@', After: "+1,1 @@"}, {AfterKind: '+', AfterLine: 1, After: "test"}},
+	}
+	model := reviewChangesView(screen, screen.Files, 1, 1, 0)
+	view := hosttui.View{
+		Version: hosttui.ProtocolVersion, Type: "view", ScreenID: "changes", Revision: 1,
+		Binding: hosttui.Binding{ProcessID: 123, ProjectID: "project-1", Nonce: strings.Repeat("a", 64)},
+		Title:   "Review", Actions: []hosttui.Action{noInputAction("file.0", "A test.txt"), noInputAction("apply-all", "Apply all changes"), noInputAction("back", "Back")}, Changes: model,
+	}
+	prepared, err := hosttui.PrepareView(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Fields) != 0 || prepared.Changes.SelectedActionID != "file.0" || prepared.Changes.Unified[1].Text != "test" || prepared.Changes.SideBySide[1].After.Line != 1 || strings.Contains(prepared.Changes.Unified[1].Text, "\n") {
+		t.Fatalf("structured Changes view=%+v", prepared.Changes)
+	}
+	if summary := reviewSummary(screen.Files); !strings.Contains(summary, "1 file") || !strings.Contains(summary, "1 added") {
+		t.Fatalf("summary=%q", summary)
+	}
+}
 
 func TestTUIRejectsNonInteractiveTerminalBeforeStateAccess(t *testing.T) {
 	a := &app{

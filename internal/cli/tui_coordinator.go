@@ -65,7 +65,7 @@ func (a *app) runSetup(ctx context.Context, configOnly bool) error {
 
 func (c *tuiCoordinator) migrateLegacyDependencies(ctx context.Context) (bool, error) {
 	fields := []hosttui.TextField{
-		{ID: "reason", Label: "Required update", Text: "The existing dependency lock predates the managed Bun, OpenTUI, and sunaba-ui artifacts."},
+		{ID: "reason", Label: "Required update", Text: "The existing dependency lock uses an older exact managed TUI artifact contract."},
 		{ID: "scope", Label: "Changes", Text: "The dependency lock, active binding, and registered Project dependency digests are migrated together."},
 		{ID: "safety", Label: "Safety", Text: "Nothing is changed until Continue. Active Project operations or mismatched dependency state stop the migration."},
 	}
@@ -872,7 +872,6 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 		start := page * pageSize
 		end := min(start+pageSize, len(screen.Files))
 		visible := screen.Files[start:end]
-		fields := reviewFields(screen, visible, page+1, (len(screen.Files)+pageSize-1)/pageSize)
 		actions := make([]hosttui.Action, 0, hosttui.MaxActions)
 		for index := start; index < end; index++ {
 			file := screen.Files[index]
@@ -884,8 +883,9 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 		if end < len(screen.Files) {
 			actions = append(actions, noInputAction("page.next", "Next files"))
 		}
-		actions = append(actions, noInputAction("apply-all", "Apply all changes"), noInputAction("back", "Back and keep pending changes"))
-		view := c.view("changes", "Review the host-generated Change Set", fields, actions)
+		actions = append(actions, noInputAction("apply-all", "Apply all "+fileCountLabel(len(screen.Files))), noInputAction("back", "Keep pending and back"))
+		view := c.view("changes", "Review the host-generated Change Set", nil, actions)
+		view.Changes = reviewChangesView(screen, visible, page+1, (len(screen.Files)+pageSize-1)/pageSize, start)
 		identity := pendingIdentity(pending)
 		event, err := c.exchange(ctx, project.policy.ProjectID, view)
 		if err != nil {
@@ -899,14 +899,32 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 			if err != nil || pendingIdentity(latest) != identity {
 				return fmt.Errorf("the pending Change Set changed after it was displayed; review it again")
 			}
+			confirm := c.view("changes", "Apply the reviewed Change Set?", []hosttui.TextField{
+				{ID: "summary", Label: "Pending changes", Text: reviewSummary(screen.Files)},
+				{ID: "scope", Label: "Apply scope", Text: "All files in this host-generated Change Set; partial apply is not performed."},
+				{ID: "safety", Label: "Revalidation", Text: "Project baseline and Change Set identity are checked again immediately before apply."},
+			}, []hosttui.Action{noInputAction("confirm-apply", "Confirm apply all "+fileCountLabel(len(screen.Files))), noInputAction("back", "Back to review")})
+			confirmation, err := c.exchange(ctx, project.policy.ProjectID, confirm)
+			if err != nil {
+				return err
+			}
+			if confirmation.Kind != hosttui.EventAction || confirmation.ActionID != "confirm-apply" {
+				continue
+			}
+			latest, err = loadPending(project.state, project.policy)
+			if err != nil || pendingIdentity(latest) != identity {
+				return fmt.Errorf("the pending Change Set changed after confirmation; review it again")
+			}
 			return c.app.applyPendingApproved(project.policy, project.state, latest, review)
 		}
 		if event.ActionID == "page.prev" {
 			page--
+			selected = screen.Files[max(0, start-pageSize)].Path
 			continue
 		}
 		if event.ActionID == "page.next" {
 			page++
+			selected = screen.Files[end].Path
 			continue
 		}
 		var index int
@@ -916,46 +934,80 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 	}
 }
 
-func reviewFields(screen workspace.ReviewScreen, visible []workspace.ReviewFile, page, pages int) []hosttui.TextField {
-	files := make([]string, 0, len(visible))
-	for _, file := range visible {
-		line := file.Status + " " + file.Path
+func reviewChangesView(screen workspace.ReviewScreen, visible []workspace.ReviewFile, page, pages, start int) *hosttui.ChangesView {
+	files := make([]hosttui.ChangeFile, 0, len(visible))
+	for offset, file := range visible {
+		detail := ""
 		if file.From != "" {
-			line += " (from " + file.From + ")"
+			detail = "from " + file.From
 		}
 		if len(file.Risks) > 0 {
-			line += " [RISK: " + strings.Join(file.Risks, ", ") + "]"
+			detail = strings.TrimSpace(detail + " RISK: " + strings.Join(file.Risks, ", "))
 		}
 		if file.OpaqueReason != "" {
-			line += fmt.Sprintf(" [type=%s size=%d sha256=%s reason=%s]", file.Type, file.Size, file.SHA256, file.OpaqueReason)
+			detail = strings.TrimSpace(detail + fmt.Sprintf(" type=%s size=%d sha256=%s reason=%s", file.Type, file.Size, file.SHA256, file.OpaqueReason))
 		}
-		files = append(files, line)
+		files = append(files, hosttui.ChangeFile{ActionID: fmt.Sprintf("file.%d", start+offset), Status: file.Status, Path: file.Path, Detail: detail})
 	}
-	var diff strings.Builder
-	if screen.Layout == workspace.ReviewLayoutSideBySide {
-		for _, row := range screen.SideBySide {
-			fmt.Fprintf(&diff, "%c %-48s | %c %s\n", printableKind(row.BeforeKind), row.Before, printableKind(row.AfterKind), row.After)
+	model := &hosttui.ChangesView{
+		Summary: reviewSummary(screen.Files), Layout: string(screen.Layout), Page: page, Pages: pages,
+		SelectedActionID: fmt.Sprintf("file.%d", screen.Selected), Files: files,
+		Unified: make([]hosttui.UnifiedDiffRow, 0, len(screen.Unified)), SideBySide: make([]hosttui.SideBySideDiffRow, 0, len(screen.SideBySide)),
+	}
+	for _, row := range screen.Unified {
+		kind := map[byte]string{'@': "hunk", ' ': "context", '-': "delete", '+': "add"}[row.Kind]
+		model.Unified = append(model.Unified, hosttui.UnifiedDiffRow{Kind: kind, OldLine: row.OldLine, NewLine: row.NewLine, Text: row.Text})
+	}
+	for _, row := range screen.SideBySide {
+		if row.BeforeKind == '@' && row.AfterKind == '@' {
+			empty := hosttui.DiffCell{Kind: "empty"}
+			model.SideBySide = append(model.SideBySide, hosttui.SideBySideDiffRow{Kind: "hunk", Header: row.Before + " " + row.After, Before: empty, After: empty})
+			continue
 		}
-	} else {
-		for _, row := range screen.Unified {
-			fmt.Fprintf(&diff, "%c %s\n", printableKind(row.Kind), row.Text)
-		}
+		model.SideBySide = append(model.SideBySide, hosttui.SideBySideDiffRow{
+			Kind:   "content",
+			Before: hosttui.DiffCell{Kind: reviewCellKind(row.BeforeKind), Line: row.BeforeLine, Text: row.Before},
+			After:  hosttui.DiffCell{Kind: reviewCellKind(row.AfterKind), Line: row.AfterLine, Text: row.After},
+		})
 	}
-	if screen.Item.OpaqueReason != "" {
-		fmt.Fprintf(&diff, "Content not rendered: %s", screen.Item.OpaqueReason)
+	if screen.Item.OpaqueReason != "" && len(model.Unified) == 0 && len(model.SideBySide) == 0 {
+		model.Unified = append(model.Unified, hosttui.UnifiedDiffRow{Kind: "hunk", Text: "Content not rendered: " + screen.Item.OpaqueReason})
+		empty := hosttui.DiffCell{Kind: "empty"}
+		model.SideBySide = append(model.SideBySide, hosttui.SideBySideDiffRow{Kind: "hunk", Header: "Content not rendered: " + screen.Item.OpaqueReason, Before: empty, After: empty})
 	}
-	return []hosttui.TextField{
-		{ID: "files", Label: fmt.Sprintf("Changed files (page %d/%d)", page, pages), Text: strings.Join(files, "\n")},
-		{ID: "layout", Label: "Layout", Text: string(screen.Layout)},
-		{ID: "diff", Label: "Selected diff", Text: diff.String()},
+	return model
+}
+
+func reviewCellKind(kind byte) string {
+	switch kind {
+	case ' ':
+		return "context"
+	case '-':
+		return "delete"
+	case '+':
+		return "add"
+	default:
+		return "empty"
 	}
 }
 
-func printableKind(kind byte) byte {
-	if kind == 0 {
-		return ' '
+func reviewSummary(files []workspace.ReviewFile) string {
+	counts := map[string]int{}
+	risks := 0
+	for _, file := range files {
+		counts[file.Status]++
+		if len(file.Risks) > 0 || file.OpaqueReason != "" {
+			risks++
+		}
 	}
-	return kind
+	return fmt.Sprintf("%s · %d added · %d modified · %d deleted · %d renamed · %d with warnings", fileCountLabel(len(files)), counts["A"], counts["M"], counts["D"], counts["R"], risks)
+}
+
+func fileCountLabel(count int) string {
+	if count == 1 {
+		return "1 file"
+	}
+	return fmt.Sprintf("%d files", count)
 }
 
 func pendingIdentity(pending pendingChange) string {

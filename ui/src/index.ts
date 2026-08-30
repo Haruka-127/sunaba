@@ -1,6 +1,7 @@
-import { StyledText, TextRenderable, createCliRenderer, green, red, stringToStyledText, type CliRenderer, type KeyEvent, type TextChunk } from "@opentui/core"
+import { CliRenderEvents, StyledText, TextRenderable, createCliRenderer, green, red, stringToStyledText, type CliRenderer, type KeyEvent, type TextChunk } from "@opentui/core"
 import { MAX_FRAME_BYTES, decodeFrame, encodeFrame, makeEvent, parseView, type UIEvent, type View } from "./protocol"
 import { createFinisher } from "./lifecycle"
+import { changesActionIndexes, initialChangesState, renderChanges, type ChangesFocus, type ChangesState, type Segment } from "./changes"
 
 type Launch = { socket: string; projectID: string; nonce: string }
 type Transport = { socket: Bun.Socket<undefined>; view: View }
@@ -74,28 +75,26 @@ function screenName(screenID: string): string {
   }
 }
 
-function renderText(view: View, selected: number, inputMode: boolean, input: string): StyledText {
+function renderText(view: View, selected: number, inputMode: boolean, input: string, changesState?: ChangesState, width = 80, height = 24): StyledText {
   const chunks: TextChunk[] = []
   const plain = (value: string) => chunks.push(...stringToStyledText(value).chunks)
-  const diff = (value: string) => {
-    for (const line of value.split(/(?<=\n)/u)) {
-      if (process.env.NO_COLOR === undefined && line.startsWith("+ ")) chunks.push(green(line))
-      else if (process.env.NO_COLOR === undefined && line.startsWith("- ")) chunks.push(red(line))
-      else if (process.env.NO_COLOR === undefined && line.includes(" | ")) {
-        const separator = line.indexOf(" | ")
-        const before = line.slice(0, separator)
-        const after = line.slice(separator + 3)
-        if (before.startsWith("- ")) chunks.push(red(before)); else plain(before)
-        plain(" | ")
-        if (after.startsWith("+ ")) chunks.push(green(after)); else plain(after)
-      } else plain(line)
+  const styled = (segment: Segment) => {
+    if (process.env.NO_COLOR === undefined && segment.tone === "add") chunks.push(green(segment.text))
+    else if (process.env.NO_COLOR === undefined && segment.tone === "delete") chunks.push(red(segment.text))
+    else plain(segment.text)
+  }
+  if (view.changes && changesState) {
+    const display = renderChanges(view, changesState, width, height)
+    for (let index = 0; index < display.lines.length; index++) {
+      for (const segment of display.lines[index]) styled(segment)
+      if (index + 1 < display.lines.length) plain("\n")
     }
+    return new StyledText(chunks)
   }
   plain(`sunaba · ${screenName(view.screen_id)}\n${view.title}\n\n`)
   for (const field of view.fields) {
     plain(`${field.label}: `)
-    if (view.screen_id === "changes" && field.id === "diff") diff(field.text)
-    else plain(field.text)
+    plain(field.text)
     plain("\n")
   }
   if (view.fields.length) plain("\n")
@@ -117,6 +116,7 @@ async function run(transport: Transport): Promise<void> {
   let selected = 0
   let inputMode = false
   let input = ""
+  let changesState = transport.view.changes ? initialChangesState(transport.view) : undefined
 
   const finishOnce = createFinisher<UIEvent>(() => renderer?.destroy(), (event) => transport.socket.end(encodeFrame(event)))
   const finish = (event: UIEvent) => { if (finished) return; finished = true; finishOnce(event) }
@@ -132,9 +132,9 @@ async function run(transport: Transport): Promise<void> {
       useKittyKeyboard: null,
       openConsoleOnError: false,
     })
-    const content = new TextRenderable(renderer, { content: renderText(transport.view, selected, inputMode, input) })
+    const content = new TextRenderable(renderer, { content: renderText(transport.view, selected, inputMode, input, changesState, renderer.width, renderer.height) })
     renderer.root.add(content)
-    const redraw = () => { content.content = renderText(transport.view, selected, inputMode, input) }
+    const redraw = () => { content.content = renderText(transport.view, selected, inputMode, input, changesState, renderer!.width, renderer!.height) }
     const cancel = () => finish(makeEvent(transport.view, "cancel"))
     const signal = () => cancel()
     const panic = (error: unknown) => {
@@ -146,6 +146,7 @@ async function run(transport: Transport): Promise<void> {
     process.once("SIGHUP", signal)
     process.once("uncaughtException", panic)
     process.once("unhandledRejection", panic)
+    renderer.on(CliRenderEvents.RESIZE, redraw)
     renderer.keyInput.on("keypress", (key: KeyEvent) => {
       if (finished || key.eventType === "release") return
       if (key.name === "escape") {
@@ -154,6 +155,48 @@ async function run(transport: Transport): Promise<void> {
           input = ""
           redraw()
         } else cancel()
+        return
+      }
+      if (changesState && transport.view.changes) {
+        const changes = transport.view.changes
+        const focuses: ChangesFocus[] = ["files", "diff", "actions"]
+        if (key.name === "tab") {
+          changesState.focus = focuses[(focuses.indexOf(changesState.focus) + 1) % focuses.length]
+          redraw()
+          return
+        }
+        if (changesState.focus === "files") {
+          if (key.name === "down") changesState.fileCursor = Math.min(changes.files.length - 1, changesState.fileCursor + 1)
+          else if (key.name === "up") changesState.fileCursor = Math.max(0, changesState.fileCursor - 1)
+          else if (key.name === "return" || key.name === "enter") {
+            const actionID = changes.files[changesState.fileCursor]?.action_id
+            const action = transport.view.actions.find((candidate) => candidate.id === actionID)
+            if (action) finish(makeEvent(transport.view, "action", action.id))
+            return
+          }
+          redraw()
+          return
+        }
+        if (changesState.focus === "diff") {
+          const display = renderChanges(transport.view, changesState, renderer!.width, renderer!.height)
+          const currentOffset = Math.min(display.maxDiffOffset, changesState.diffOffset)
+          if (key.name === "down") changesState.diffOffset = Math.min(display.maxDiffOffset, currentOffset + 1)
+          else if (key.name === "up") changesState.diffOffset = Math.max(0, currentOffset - 1)
+          else if (key.name === "pagedown") changesState.diffOffset = Math.min(display.maxDiffOffset, currentOffset + display.diffPageSize)
+          else if (key.name === "pageup") changesState.diffOffset = Math.max(0, currentOffset - display.diffPageSize)
+          else if (key.name === "return" || key.name === "enter") changesState.focus = "files"
+          redraw()
+          return
+        }
+        const actionIndexes = changesActionIndexes(transport.view)
+        if (key.name === "right" || key.name === "down") changesState.actionCursor = actionIndexes.length ? (changesState.actionCursor + 1) % actionIndexes.length : 0
+        else if (key.name === "left" || key.name === "up") changesState.actionCursor = actionIndexes.length ? (changesState.actionCursor + actionIndexes.length - 1) % actionIndexes.length : 0
+        else if ((key.name === "return" || key.name === "enter") && actionIndexes.length) {
+          const action = transport.view.actions[actionIndexes[changesState.actionCursor]]
+          finish(makeEvent(transport.view, "action", action.id))
+          return
+        }
+        redraw()
         return
       }
       if (inputMode) {

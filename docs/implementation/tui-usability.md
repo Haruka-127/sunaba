@@ -9,10 +9,10 @@
 | 1 | credential file、global settings、UI protocol、managed artifactのstrict contractを追加 | `internal/secretstore/store_test.go`、`internal/usersettings/settings_test.go`、`internal/tui/protocol_test.go`、`internal/dependency/dependency_test.go` |
 | 2 | Keychain実装を削除し、owner-only file、atomic replacement、process間lockへAPI keyとOAuthを独立保存 | `internal/secretstore/store.go`、`internal/openauth/codex_test.go`、`scripts/verify.sh`の禁止API scan |
 | 3 | OAuth既定のglobal設定へ認証方式を移し、Project schema migrationとSession開始時snapshotを実装 | `internal/usersettings/`、`internal/projectconfig/config_test.go`、`internal/policy/policy_test.go`、`internal/session/model_auth_test.go` |
-| 4 | Bun 1.3.14、OpenTUI 0.5.9、standalone `sunaba-ui`をexact version/digestで固定。旧bootstrap lockを厳密に識別して確認後にtransactional migrationし、Go authorityとone-shot helperをowner/PID/UID/Project/nonceへ束縛 | `internal/dependency/manifest.json`、`ui/bun.lock`、`internal/tui/`、`internal/cli/version_commands_test.go`、`scripts/build-ui.sh` |
+| 4 | Bun 1.3.14、OpenTUI 0.5.9、standalone `sunaba-ui` protocol v2をexact version/digestで固定。旧bootstrap lockとexact protocol v1 lockを厳密に識別して確認後にtransactional migrationし、Go authorityとone-shot helperをowner/PID/UID/Project/nonceへ束縛 | `internal/dependency/manifest.json`、`ui/bun.lock`、`internal/tui/`、`internal/cli/version_commands_test.go`、`scripts/build-ui.sh` |
 | 5 | canonical Project自動選択、bounded selector pagination、状態別Home、Start前のdigest-bound Snapshot review、helper終了後だけOpenCodeへterminalをhandoffし終了後にfresh Homeを生成 | `internal/cli/tui_coordinator.go`、`internal/cli/tui_coordinator_test.go` |
 | 6 | Continue前に永続化しないSetup、推奨Web詳細、明示選択Git remote、global AI接続、Settingsを実装 | `internal/cli/tui_coordinator.go`、`TestTUISetupDoesNotPersistBeforeContinue` |
-| 7 | 変更fileだけのindex、A/M/D/R、mode/symlink/binary/large metadata、wide/narrow diff、pagination、Change Set identity再検証、全体applyを実装 | `internal/workspace/review_screen.go`、`internal/workspace/review_screen_test.go`、`internal/cli/tui_coordinator.go` |
+| 7 | 改行を含まない構造化diff row/cell、変更fileだけのindex、A/M/D/R、mode/symlink/binary/large metadata、line番号付きwide/narrow diff、file/diff/action focus、scroll viewport、固定footer、pagination、確認前後のChange Set identity再検証、全体applyを実装 | `internal/workspace/review_screen.go`、`internal/tui/protocol.go`、`internal/cli/tui_coordinator.go`、`ui/src/changes.ts`、`ui/test/changes.test.ts` |
 | 8 | Recoveryに削除対象、保持対象、回復不能work、安全なexport/recreate順を表示。Git pushの既存one-shot host approvalをHomeから案内 | `internal/cli/tui_coordinator.go`、`internal/trustedui/approval_test.go`、`internal/approval/approval_test.go` |
 | 9 | 引数なしTTYをTUI、non-TTYをfail-closed errorとし、`console`を正規名、`shell`をalias、model authをselectorなしglobal操作へ変更 | `internal/cli/commands.go`、`internal/cli/cli_test.go`、`internal/cli/tui_coordinator_test.go` |
 | 10 | 導入、通常操作、設定、変更確認、復旧を現行UIへ更新し、内部進捗は本記録へ分離 | [`README.md`](../../README.md)、[`user-guide.md`](../user-guide.md)、[`workflows.md`](../workflows.md) |
@@ -23,7 +23,7 @@
 ./scripts/build-ui.sh
 ```
 
-2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 10件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。生成物SHA-256は`27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6`である。利用者環境へのglobal installは行っていない。
+2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 15件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v2生成物SHA-256は`e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176`である。利用者環境へのglobal installは行っていない。
 
 ## 自動gate
 

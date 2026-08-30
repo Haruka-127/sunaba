@@ -690,6 +690,16 @@ func loadLegacyBootstrapLock(store *versionconfig.Store, pinned dependency.Manif
 }
 
 func decodeLegacyBootstrapLock(data []byte, pinned dependency.Manifest) (versionconfig.Lock, string, error) {
+	var previous versionconfig.Lock
+	if err := securefs.DecodeStrictJSON(data, &previous); err == nil && previous.SchemaVersion == versionconfig.SchemaVersion && previous.Generation > 0 && !previous.ResolvedAt.IsZero() && previous.ResolvedAt.Location() == time.UTC && reflect.DeepEqual(previous.Manifest, dependency.LegacySunabaUIV1Manifest(pinned)) {
+		encoded, err := json.Marshal(previous.Manifest)
+		if err != nil {
+			return versionconfig.Lock{}, "", err
+		}
+		digest := sha256.Sum256(encoded)
+		previous.Manifest = pinned
+		return previous, hex.EncodeToString(digest[:]), nil
+	}
 	var legacy legacyVersionLock
 	if err := securefs.DecodeStrictJSON(data, &legacy); err != nil || legacy.SchemaVersion != versionconfig.SchemaVersion || legacy.Generation == 0 || legacy.ResolvedAt.IsZero() || legacy.ResolvedAt.Location() != time.UTC {
 		return versionconfig.Lock{}, "", fmt.Errorf("legacy version lock metadata is invalid")

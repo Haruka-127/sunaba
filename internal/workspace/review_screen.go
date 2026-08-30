@@ -1,6 +1,9 @@
 package workspace
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const WideReviewMinimumWidth = 120
 
@@ -23,14 +26,18 @@ type ReviewFile struct {
 }
 
 type UnifiedReviewRow struct {
-	Kind byte
-	Text string
+	Kind    byte
+	OldLine int
+	NewLine int
+	Text    string
 }
 
 type SideBySideReviewRow struct {
 	BeforeKind byte
+	BeforeLine int
 	Before     string
 	AfterKind  byte
+	AfterLine  int
 	After      string
 }
 
@@ -125,31 +132,47 @@ func reviewRows(item ReviewItem) ([]UnifiedReviewRow, []SideBySideReviewRow) {
 		afterHeader := fmt.Sprintf("+%d,%d @@", hunk.NewStart, hunk.NewLines)
 		unified = append(unified, UnifiedReviewRow{Kind: '@', Text: beforeHeader + " " + afterHeader})
 		side = append(side, SideBySideReviewRow{BeforeKind: '@', Before: beforeHeader, AfterKind: '@', After: afterHeader})
-		var removed, added []string
+		type editLine struct {
+			line int
+			text string
+		}
+		oldLine, newLine := hunk.OldStart, hunk.NewStart
+		var removed, added []editLine
 		flushEdits := func() {
 			count := max(len(removed), len(added))
 			for index := 0; index < count; index++ {
 				row := SideBySideReviewRow{}
 				if index < len(removed) {
-					row.BeforeKind, row.Before = '-', removed[index]
+					row.BeforeKind, row.BeforeLine, row.Before = '-', removed[index].line, removed[index].text
 				}
 				if index < len(added) {
-					row.AfterKind, row.After = '+', added[index]
+					row.AfterKind, row.AfterLine, row.After = '+', added[index].line, added[index].text
 				}
 				side = append(side, row)
 			}
 			removed, added = nil, nil
 		}
 		for _, line := range hunk.Lines {
-			unified = append(unified, UnifiedReviewRow{Kind: line.Kind, Text: line.Text})
+			text := line.Text
+			if strings.HasSuffix(text, "\n") {
+				text = strings.TrimSuffix(text, "\n")
+				text = strings.TrimSuffix(text, "\r")
+			}
 			switch line.Kind {
 			case '-':
-				removed = append(removed, line.Text)
+				unified = append(unified, UnifiedReviewRow{Kind: line.Kind, OldLine: oldLine, Text: text})
+				removed = append(removed, editLine{line: oldLine, text: text})
+				oldLine++
 			case '+':
-				added = append(added, line.Text)
+				unified = append(unified, UnifiedReviewRow{Kind: line.Kind, NewLine: newLine, Text: text})
+				added = append(added, editLine{line: newLine, text: text})
+				newLine++
 			default:
+				unified = append(unified, UnifiedReviewRow{Kind: line.Kind, OldLine: oldLine, NewLine: newLine, Text: text})
 				flushEdits()
-				side = append(side, SideBySideReviewRow{BeforeKind: ' ', Before: line.Text, AfterKind: ' ', After: line.Text})
+				side = append(side, SideBySideReviewRow{BeforeKind: ' ', BeforeLine: oldLine, Before: text, AfterKind: ' ', AfterLine: newLine, After: text})
+				oldLine++
+				newLine++
 			}
 		}
 		flushEdits()

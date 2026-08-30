@@ -236,11 +236,11 @@ remote、ref、old/new object ID、force/deleteを確認し、approveまたはre
 
 ## Changes
 
-Changesにはhostがbaselineとexport結果から生成したChange Setの変更fileだけを表示します。状態は`A`、`M`、`D`、`R`です。wide terminalはbefore/afterのside-by-side、narrow terminalはunified diffへ切り替わります。
+Changesにはhostがbaselineとexport結果から生成したChange Setの変更fileだけを表示します。状態は`A`、`M`、`D`、`R`です。wide terminalはline番号とBefore/After headerを持つside-by-side、narrow terminalはline番号付きunified diffへ切り替わります。`Tab`でFiles、Diff、Actionsへfocusを移し、Filesでは矢印とEnter、Diffでは矢印またはPageUp/PageDownを使います。actionと操作helpは画面下部に固定されます。
 
 symlink、実行可能file、binary、巨大file、mode変更にはrisk表示が付きます。内容を安全に表示できない場合はtype、size、hash、理由を表示し、外部previewを起動しません。reviewを中断してもpending Change Setは保持されます。
 
-`Apply all changes`は表示中のChange Set全体だけを適用します。部分適用はありません。Go側がview revision、Project、baseline、Merged View、Change Set、一回限りのapprovalを内部で束縛するため、digestやnonceの手入力は不要です。
+`Apply all N files`はfile数、全体適用、再検証内容を示す確認画面を経て、表示中のChange Set全体だけを適用します。部分適用はありません。Go側がview revision、Project、baseline、Merged View、Change Set、一回限りのapprovalを内部で束縛し、確認直後にもidentityを再検証するため、digestやnonceの手入力は不要です。
 
 CLI経路:
 

@@ -22,7 +22,10 @@ const (
 	BunExecutableSHA256   = "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233"
 	OpenTUIVersion        = "0.5.9"
 	OpenTUISHA256         = "d9c9b952ff39a79ed52a7f2cb364977d9859b55cdc346bdbfa55b3d4bff77940"
-	SunabaUISHA256        = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
+	SunabaUIVersion       = "2"
+	SunabaUISHA256        = "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
+	LegacySunabaUIVersion = "1"
+	LegacySunabaUISHA256  = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
 	UrfaveCLIVersion      = "v3.10.1"
 )
 
@@ -310,10 +313,19 @@ func validateUIArtifacts(m Manifest) error {
 	if m.OpenTUI.Package != "@opentui/core" || !exactVersionPattern.MatchString(m.OpenTUI.Version) || m.OpenTUI.URL != "https://registry.npmjs.org/@opentui/core/-/core-"+m.OpenTUI.Version+".tgz" || !sha256Pattern.MatchString(m.OpenTUI.SHA256) || !strings.HasPrefix(m.OpenTUI.Integrity, "sha512-") {
 		return fmt.Errorf("OpenTUI package is not version and digest pinned")
 	}
-	if m.SunabaUI.Version != "1" || m.SunabaUI.OS != "darwin" || m.SunabaUI.Arch != "arm64" || !sha256Pattern.MatchString(m.SunabaUI.SHA256) {
+	if m.SunabaUI.Version != SunabaUIVersion || m.SunabaUI.OS != "darwin" || m.SunabaUI.Arch != "arm64" || !sha256Pattern.MatchString(m.SunabaUI.SHA256) {
 		return fmt.Errorf("sunaba-ui standalone artifact is not platform and digest pinned")
 	}
 	return nil
+}
+
+// LegacySunabaUIV1Manifest returns the only full pre-protocol-v2 bootstrap
+// manifest eligible for the explicit setup migration. Callers must compare
+// the complete manifest; matching the old helper digest alone is insufficient.
+func LegacySunabaUIV1Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.Version = LegacySunabaUIVersion
+	pinned.SunabaUI.SHA256 = LegacySunabaUISHA256
+	return pinned
 }
 
 func validateCandidateSyntax(m Manifest) error {

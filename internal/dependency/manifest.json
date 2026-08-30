@@ -52,10 +52,10 @@
     "integrity": "sha512-d0EWYyp6djitu1N1R0o75NrLl4TxY3oJEmRNrX9vSKKC5/jriGQdSV6lJmwiB77O0cxtBnPzWztAV79vA1J2fA=="
   },
   "sunaba_ui": {
-    "version": "1",
+    "version": "2",
     "os": "darwin",
     "arch": "arm64",
-    "sha256": "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
+    "sha256": "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
   },
   "provenance": {
     "apple_container": {

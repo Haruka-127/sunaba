@@ -18,12 +18,14 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2
 	MaxFrameBytes   = 256 << 10
 	MaxTextBytes    = 64 << 10
 	MaxInputBytes   = 4 << 10
 	MaxActions      = 32
 	MaxFields       = 256
+	MaxChangeFiles  = MaxActions - 4
+	MaxDiffRows     = 1024
 )
 
 var (
@@ -56,17 +58,60 @@ type Action struct {
 	Input InputSpec `json:"input"`
 }
 
+// ChangeFile is a bounded, already sanitized file-list entry. ActionID names
+// the exact authority action to return when this entry is opened.
+type ChangeFile struct {
+	ActionID string `json:"action_id"`
+	Status   string `json:"status"`
+	Path     string `json:"path"`
+	Detail   string `json:"detail"`
+}
+
+// UnifiedDiffRow and SideBySideDiffRow keep repository-controlled text in
+// individual cells. Newlines and column separators remain UI-owned structure.
+type UnifiedDiffRow struct {
+	Kind    string `json:"kind"`
+	OldLine int    `json:"old_line"`
+	NewLine int    `json:"new_line"`
+	Text    string `json:"text"`
+}
+
+type DiffCell struct {
+	Kind string `json:"kind"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+type SideBySideDiffRow struct {
+	Kind   string   `json:"kind"`
+	Header string   `json:"header"`
+	Before DiffCell `json:"before"`
+	After  DiffCell `json:"after"`
+}
+
+type ChangesView struct {
+	Summary          string              `json:"summary"`
+	Layout           string              `json:"layout"`
+	Page             int                 `json:"page"`
+	Pages            int                 `json:"pages"`
+	SelectedActionID string              `json:"selected_action_id"`
+	Files            []ChangeFile        `json:"files"`
+	Unified          []UnifiedDiffRow    `json:"unified"`
+	SideBySide       []SideBySideDiffRow `json:"side_by_side"`
+}
+
 // View is immutable for a given ScreenID and Revision. All text must pass the
 // host sanitizer before it crosses the process boundary.
 type View struct {
-	Version  int         `json:"version"`
-	Type     string      `json:"type"`
-	ScreenID string      `json:"screen_id"`
-	Revision uint64      `json:"revision"`
-	Binding  Binding     `json:"binding"`
-	Title    string      `json:"title"`
-	Fields   []TextField `json:"fields"`
-	Actions  []Action    `json:"actions"`
+	Version  int          `json:"version"`
+	Type     string       `json:"type"`
+	ScreenID string       `json:"screen_id"`
+	Revision uint64       `json:"revision"`
+	Binding  Binding      `json:"binding"`
+	Title    string       `json:"title"`
+	Fields   []TextField  `json:"fields"`
+	Actions  []Action     `json:"actions"`
+	Changes  *ChangesView `json:"changes"`
 }
 
 type TerminalCapability struct {
@@ -147,10 +192,108 @@ func (v View) Validate() error {
 		}
 		seenActions[action.ID] = struct{}{}
 	}
+	if v.Changes != nil {
+		if v.ScreenID != "changes" {
+			return errors.New("structured Changes data is only valid on the Changes screen")
+		}
+		changesBytes, err := v.Changes.validate(seenActions)
+		if err != nil {
+			return err
+		}
+		totalBytes += changesBytes
+	}
 	if totalBytes > MaxFrameBytes/2 {
 		return errors.New("UI view content exceeds its aggregate size bound")
 	}
 	return nil
+}
+
+func (c ChangesView) validate(actions map[string]struct{}) (int, error) {
+	if c.Summary == "" || len(c.Summary) > MaxTextBytes || SanitizeDisplayText(c.Summary) != c.Summary || (c.Layout != "unified" && c.Layout != "side-by-side") || c.Page <= 0 || c.Pages < c.Page || len(c.Files) == 0 || len(c.Files) > MaxChangeFiles || len(c.Unified) > MaxDiffRows || len(c.SideBySide) > MaxDiffRows {
+		return 0, errors.New("structured Changes summary or bounds are invalid")
+	}
+	total := len(c.Summary) + len(c.Layout) + len(c.SelectedActionID)
+	selected := false
+	seen := make(map[string]struct{}, len(c.Files))
+	for _, file := range c.Files {
+		total += len(file.ActionID) + len(file.Status) + len(file.Path) + len(file.Detail)
+		if !idPattern.MatchString(file.ActionID) || (file.Status != "A" && file.Status != "M" && file.Status != "D" && file.Status != "R") || file.Path == "" || len(file.Path)+len(file.Detail) > MaxTextBytes || SanitizeDisplayText(file.Path) != file.Path || SanitizeDisplayText(file.Detail) != file.Detail {
+			return 0, errors.New("structured Changes file entry is invalid")
+		}
+		if _, exists := actions[file.ActionID]; !exists {
+			return 0, errors.New("structured Changes file is not bound to an authority action")
+		}
+		if _, duplicate := seen[file.ActionID]; duplicate {
+			return 0, errors.New("structured Changes file action is duplicated")
+		}
+		seen[file.ActionID] = struct{}{}
+		selected = selected || file.ActionID == c.SelectedActionID
+	}
+	if !selected {
+		return 0, errors.New("structured Changes selection is not visible")
+	}
+	for _, row := range c.Unified {
+		total += len(row.Kind) + len(row.Text)
+		if !validUnifiedDiffRow(row) {
+			return 0, errors.New("structured unified diff row is invalid")
+		}
+	}
+	for _, row := range c.SideBySide {
+		total += len(row.Kind) + len(row.Header) + len(row.Before.Kind) + len(row.Before.Text) + len(row.After.Kind) + len(row.After.Text)
+		if !validSideBySideDiffRow(row) {
+			return 0, errors.New("structured side-by-side diff row is invalid")
+		}
+	}
+	return total, nil
+}
+
+func validUnifiedDiffRow(row UnifiedDiffRow) bool {
+	if len(row.Text) > MaxTextBytes || SanitizeDisplayText(row.Text) != row.Text {
+		return false
+	}
+	switch row.Kind {
+	case "hunk":
+		return row.Text != "" && row.OldLine == 0 && row.NewLine == 0
+	case "context":
+		return row.OldLine > 0 && row.NewLine > 0
+	case "delete":
+		return row.OldLine > 0 && row.NewLine == 0
+	case "add":
+		return row.OldLine == 0 && row.NewLine > 0
+	default:
+		return false
+	}
+}
+
+func validSideBySideDiffRow(row SideBySideDiffRow) bool {
+	if len(row.Header)+len(row.Before.Text)+len(row.After.Text) > MaxTextBytes || SanitizeDisplayText(row.Header) != row.Header || SanitizeDisplayText(row.Before.Text) != row.Before.Text || SanitizeDisplayText(row.After.Text) != row.After.Text {
+		return false
+	}
+	if row.Kind == "hunk" {
+		empty := DiffCell{Kind: "empty"}
+		return row.Header != "" && row.Before == empty && row.After == empty
+	}
+	if row.Kind != "content" || row.Header != "" {
+		return false
+	}
+	validCell := func(cell DiffCell, allowed ...string) bool {
+		if cell.Kind == "empty" {
+			return cell.Line == 0 && cell.Text == ""
+		}
+		if cell.Line <= 0 {
+			return false
+		}
+		for _, kind := range allowed {
+			if cell.Kind == kind {
+				return true
+			}
+		}
+		return false
+	}
+	if !validCell(row.Before, "context", "delete") || !validCell(row.After, "context", "add") {
+		return false
+	}
+	return row.Before.Kind != "empty" || row.After.Kind != "empty"
 }
 
 // PrepareView is the mandatory sanitization seam for data that may originate
@@ -163,6 +306,22 @@ func PrepareView(view View) (View, error) {
 	}
 	for index := range view.Actions {
 		view.Actions[index].Label = SanitizeDisplayText(view.Actions[index].Label)
+	}
+	if view.Changes != nil {
+		view.Changes.Summary = SanitizeDisplayText(view.Changes.Summary)
+		for index := range view.Changes.Files {
+			view.Changes.Files[index].Path = SanitizeDisplayText(view.Changes.Files[index].Path)
+			view.Changes.Files[index].Detail = SanitizeDisplayText(view.Changes.Files[index].Detail)
+		}
+		for index := range view.Changes.Unified {
+			view.Changes.Unified[index].Text = SanitizeDisplayText(view.Changes.Unified[index].Text)
+		}
+		for index := range view.Changes.SideBySide {
+			row := &view.Changes.SideBySide[index]
+			row.Header = SanitizeDisplayText(row.Header)
+			row.Before.Text = SanitizeDisplayText(row.Before.Text)
+			row.After.Text = SanitizeDisplayText(row.After.Text)
+		}
 	}
 	return view, view.Validate()
 }
