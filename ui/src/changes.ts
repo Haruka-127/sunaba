@@ -67,14 +67,23 @@ function cell(cell: DiffCell, width: number): Segment {
   return toned(prefix + fit(cell.text, Math.max(1, width - textWidth(prefix))), tone(cell.kind))
 }
 
+function sideColumns(width: number): { before: number; after: number } {
+  const before = Math.max(12, Math.floor((width - 3) / 2))
+  return { before, after: Math.max(1, width - before - 3) }
+}
+
+function emptySideLine(width: number): DisplayLine {
+  const columns = sideColumns(width)
+  return [plain(" ".repeat(columns.before)), plain(" │ "), plain(" ".repeat(columns.after))]
+}
+
 function sideLine(row: SideBySideDiffRow, width: number): DisplayLine {
+  const columns = sideColumns(width)
   if (row.kind === "hunk") {
     const label = `── ${row.header} `
-    return [toned(label + "─".repeat(Math.max(0, width - textWidth(label))), "muted")]
+    return [toned(fit(label, columns.before).replace(/ +$/, (spaces) => "─".repeat(spaces.length)), "muted"), plain("─┼─"), toned("─".repeat(columns.after), "muted")]
   }
-  const column = Math.max(12, Math.floor((width - 3) / 2))
-  const remainder = Math.max(1, width - column - 3)
-  return [cell(row.before, column), plain(" │ "), cell(row.after, remainder)]
+  return [cell(row.before, columns.before), plain(" │ "), cell(row.after, columns.after)]
 }
 
 function diffLines(changes: ChangesView, width: number, sideBySide: boolean): DisplayLine[] {
@@ -172,7 +181,7 @@ export function renderChanges(view: View, state: ChangesState, width: number, he
       const fileIndex = window.start + row
       const file = window.files[row]
       const left = file ? fileLabel(file, fileIndex === state.fileCursor && state.focus === "files", file.action_id === changes.selected_action_id, leftWidth) : " ".repeat(leftWidth)
-      lines.push([plain(left), plain(" │ "), ...(renderedDiff[row] ?? [plain("")])])
+      lines.push([plain(left), plain(" │ "), ...(renderedDiff[row] ?? (useSideBySide ? emptySideLine(rightWidth) : [plain("")]))])
     }
   } else {
     const fileRows = Math.max(1, Math.min(5, changes.files.length, Math.floor(contentRows / 3)))

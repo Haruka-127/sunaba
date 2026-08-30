@@ -51,6 +51,12 @@ describe("Changes screen", () => {
     expect(output).toContain("+ test")
     expect(output).not.toContain("(empty)")
     expect(output).not.toContain("<U+000A>")
+    const renderedLines = output.split("\n")
+    const columns = renderedLines.findIndex((line) => line.includes("BEFORE (original)"))
+    const footer = renderedLines.findIndex((line) => line.startsWith("─") && !line.includes("┼"))
+    expect(columns).toBeGreaterThan(0)
+    expect(footer).toBeGreaterThan(columns)
+    for (const line of renderedLines.slice(columns, footer)) expect(line.split(/[│┼]/u)).toHaveLength(3)
     expect(output.split("\n").at(-1)).toContain("Enter open diff")
   })
 

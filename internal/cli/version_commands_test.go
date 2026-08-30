@@ -358,6 +358,7 @@ func TestEarlierProtocolV2ArtifactsRemainEligibleForExactSetupMigration(t *testi
 	pinned := dependency.MustPinned()
 	for name, manifest := range map[string]dependency.Manifest{
 		"earlier": dependency.EarlierSunabaUIV2Manifest(pinned),
+		"older":   dependency.OlderSunabaUIV2Manifest(pinned),
 		"initial": dependency.InitialSunabaUIV2Manifest(pinned),
 	} {
 		t.Run(name, func(t *testing.T) {
