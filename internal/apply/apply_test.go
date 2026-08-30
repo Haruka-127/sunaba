@@ -3,6 +3,7 @@ package apply
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,6 +168,91 @@ func TestRecoverLockedRejectsUnreadableJournal(t *testing.T) {
 	}
 	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID, cfg.SnapshotPolicy); err == nil {
 		t.Fatal("unreadable journal was accepted")
+	}
+}
+
+func TestApplyKeepsVerifiedResultWhenTransactionCleanupFails(t *testing.T) {
+	cfg := applyFixture(t)
+	var leftover string
+	result, err := applyLocked(cfg, func(stage string) error {
+		if leftover == "" && strings.HasPrefix(stage, "install:") {
+			matches, globErr := filepath.Glob(filepath.Join(cfg.ProjectRoot, ".sunaba", "transactions", "sunaba-apply-*"))
+			if globErr != nil || len(matches) != 1 {
+				return fmt.Errorf("transaction roots=%v error=%v", matches, globErr)
+			}
+			leftover = filepath.Join(matches[0], "leftover")
+			if err := os.Mkdir(leftover, 0700); err != nil {
+				return err
+			}
+			write(t, filepath.Join(leftover, "child"), "blocker\n")
+			return os.Chmod(leftover, 0500)
+		}
+		return nil
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Digest != cfg.Merged.Digest {
+		t.Fatalf("result=%s merged=%s", result.Digest, cfg.Merged.Digest)
+	}
+	assertContent(t, filepath.Join(cfg.ProjectRoot, "modify.txt"), "after\n")
+	assertContent(t, filepath.Join(cfg.ProjectRoot, "add.txt"), "added\n")
+	if leftover == "" {
+		t.Fatal("cleanup blocker was never installed")
+	}
+	matches, err := filepath.Glob(filepath.Join(cfg.ProjectRoot, ".sunaba", "transactions", "sunaba-apply-*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("blocked transaction was removed: matches=%v error=%v", matches, err)
+	}
+	if err := os.Chmod(leftover, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverLocked(cfg.ProjectRoot, cfg.ProjectID, cfg.SnapshotPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if recovered := mustManifest(t, cfg.ProjectRoot); recovered.Digest != cfg.Merged.Digest {
+		t.Fatalf("recovery rolled back committed apply: %s", recovered.Digest)
+	}
+	entries, err := os.ReadDir(filepath.Join(cfg.ProjectRoot, ".sunaba", "transactions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("committed transaction remained: %v", entries)
+	}
+}
+
+func TestApplyRollsBackWhenCommittedMarkerCannotPersist(t *testing.T) {
+	cfg := applyFixture(t)
+	baseline := mustManifest(t, cfg.ProjectRoot)
+	blocked := false
+	_, err := applyLocked(cfg, func(stage string) error {
+		if !blocked && strings.HasPrefix(stage, "install:") {
+			blocked = true
+			matches, globErr := filepath.Glob(filepath.Join(cfg.ProjectRoot, ".sunaba", "transactions", "sunaba-apply-*"))
+			if globErr != nil || len(matches) != 1 {
+				return fmt.Errorf("transaction roots=%v error=%v", matches, globErr)
+			}
+			if err := os.Chmod(matches[0], 0500); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, true)
+	if err == nil {
+		t.Fatal("unwritable transaction root was accepted")
+	}
+	if recovered := mustManifest(t, cfg.ProjectRoot); recovered.Digest != baseline.Digest {
+		t.Fatalf("rollback digest=%s baseline=%s", recovered.Digest, baseline.Digest)
+	}
+	matches, err := filepath.Glob(filepath.Join(cfg.ProjectRoot, ".sunaba", "transactions", "sunaba-apply-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, match := range matches {
+		if err := os.Chmod(match, 0700); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
