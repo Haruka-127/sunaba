@@ -43,6 +43,8 @@ func TestTUIChangesUsesStructuredRowsWithoutLayoutNewlines(t *testing.T) {
 	}
 	if summary := reviewSummary(screen.Files); !strings.Contains(summary, "1 file") || !strings.Contains(summary, "1 added") {
 		t.Fatalf("summary=%q", summary)
+	} else if strings.Contains(summary, "0 modified") || !strings.Contains(summary, "no warnings") {
+		t.Fatalf("summary includes zero-value noise or omits warning state: %q", summary)
 	}
 }
 

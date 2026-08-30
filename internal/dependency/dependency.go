@@ -24,9 +24,10 @@ const (
 	OpenTUISHA256           = "d9c9b952ff39a79ed52a7f2cb364977d9859b55cdc346bdbfa55b3d4bff77940"
 	OpenTUIIntegrity        = "sha512-d0EWYyp6djitu1N1R0o75NrLl4TxY3oJEmRNrX9vSKKC5/jriGQdSV6lJmwiB77O0cxtBnPzWztAV79vA1J2fA=="
 	SunabaUIVersion         = "2"
-	SunabaUISHA256          = "454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509"
-	PreviousSunabaUISHA256  = "2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2"
-	EarlierSunabaUIV2SHA256 = "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
+	SunabaUISHA256          = "97c224d92c992415014742908a71400c5500233e63aff4e543ee2be29e19f1e2"
+	PreviousSunabaUISHA256  = "454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509"
+	EarlierSunabaUIV2SHA256 = "2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2"
+	InitialSunabaUIV2SHA256 = "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
 	LegacySunabaUIVersion   = "1"
 	LegacySunabaUISHA256    = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
 	UrfaveCLIVersion        = "v3.10.1"
@@ -366,6 +367,13 @@ func EarlierSunabaUIV2Manifest(pinned Manifest) Manifest {
 	return pinned
 }
 
+// InitialSunabaUIV2Manifest retains the first exact protocol-v2 artifact for
+// users upgrading across multiple helper-only releases.
+func InitialSunabaUIV2Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.SHA256 = InitialSunabaUIV2SHA256
+	return pinned
+}
+
 // MigratableBootstrapUIManifests returns only known exact bootstrap manifests.
 // Digest-only matches are intentionally insufficient for setup migration.
 func MigratableBootstrapUIManifests(pinned Manifest) []Manifest {
@@ -373,6 +381,7 @@ func MigratableBootstrapUIManifests(pinned Manifest) []Manifest {
 		LegacySunabaUIV1Manifest(pinned),
 		PreviousSunabaUIV2Manifest(pinned),
 		EarlierSunabaUIV2Manifest(pinned),
+		InitialSunabaUIV2Manifest(pinned),
 	}
 }
 

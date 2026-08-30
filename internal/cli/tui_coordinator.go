@@ -1026,7 +1026,21 @@ func reviewSummary(files []workspace.ReviewFile) string {
 			risks++
 		}
 	}
-	return fmt.Sprintf("%s · %d added · %d modified · %d deleted · %d renamed · %d with warnings", fileCountLabel(len(files)), counts["A"], counts["M"], counts["D"], counts["R"], risks)
+	parts := []string{fileCountLabel(len(files))}
+	for _, item := range []struct {
+		status string
+		label  string
+	}{{"A", "added"}, {"M", "modified"}, {"D", "deleted"}, {"R", "renamed"}} {
+		if count := counts[item.status]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", count, item.label))
+		}
+	}
+	if risks == 0 {
+		parts = append(parts, "no warnings")
+	} else {
+		parts = append(parts, fmt.Sprintf("%d with warnings", risks))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func fileCountLabel(count int) string {

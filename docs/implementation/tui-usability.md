@@ -23,7 +23,7 @@
 ./scripts/build-ui.sh
 ```
 
-2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 16件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v2生成物SHA-256は`454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509`である。helperはterminal restore後もresponse frameのtransport closeまでmainを生存させ、authority viewの配列契約違反はbinding検証済みの`terminal_error`としてfail closedで返す。利用者環境へのglobal installは行っていない。
+2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 16件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v2生成物SHA-256は`97c224d92c992415014742908a71400c5500233e63aff4e543ee2be29e19f1e2`である。helperはterminal restore後もresponse frameのtransport closeまでmainを生存させ、authority viewの配列契約違反はbinding検証済みの`terminal_error`としてfail closedで返す。Changesのside-by-side表示はoriginal/proposed、変更状態、hunk境界を明示し、空cellを表示上の文字で埋めない。利用者環境へのglobal installは行っていない。
 
 ## 自動gate
 

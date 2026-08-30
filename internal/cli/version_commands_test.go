@@ -354,25 +354,38 @@ func TestPreviousProtocolV2ArtifactRequiresExactSetupMigration(t *testing.T) {
 	}
 }
 
-func TestEarlierProtocolV2ArtifactRemainsEligibleForExactSetupMigration(t *testing.T) {
+func TestEarlierProtocolV2ArtifactsRemainEligibleForExactSetupMigration(t *testing.T) {
 	pinned := dependency.MustPinned()
+	for name, manifest := range map[string]dependency.Manifest{
+		"earlier": dependency.EarlierSunabaUIV2Manifest(pinned),
+		"initial": dependency.InitialSunabaUIV2Manifest(pinned),
+	} {
+		t.Run(name, func(t *testing.T) {
+			previous := versionconfig.Lock{
+				SchemaVersion: versionconfig.SchemaVersion,
+				Generation:    8,
+				ResolvedAt:    time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC),
+				Manifest:      manifest,
+			}
+			encoded, err := json.Marshal(previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			migrated, previousDigest, err := decodeLegacyBootstrapLock(encoded, pinned)
+			if err != nil || previousDigest == "" || migrated.Generation != previous.Generation || !reflect.DeepEqual(migrated.Manifest, pinned) {
+				t.Fatalf("migrated=%+v digest=%q error=%v", migrated, previousDigest, err)
+			}
+		})
+	}
+
 	previous := versionconfig.Lock{
 		SchemaVersion: versionconfig.SchemaVersion,
 		Generation:    8,
 		ResolvedAt:    time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC),
 		Manifest:      dependency.EarlierSunabaUIV2Manifest(pinned),
 	}
-	encoded, err := json.Marshal(previous)
-	if err != nil {
-		t.Fatal(err)
-	}
-	migrated, previousDigest, err := decodeLegacyBootstrapLock(encoded, pinned)
-	if err != nil || previousDigest == "" || migrated.Generation != previous.Generation || !reflect.DeepEqual(migrated.Manifest, pinned) {
-		t.Fatalf("migrated=%+v digest=%q error=%v", migrated, previousDigest, err)
-	}
-
 	previous.Manifest.SunabaUI.SHA256 = strings.Repeat("f", 64)
-	encoded, err = json.Marshal(previous)
+	encoded, err := json.Marshal(previous)
 	if err != nil {
 		t.Fatal(err)
 	}

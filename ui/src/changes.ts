@@ -62,13 +62,16 @@ function unifiedLine(row: UnifiedDiffRow, width: number): DisplayLine {
 }
 
 function cell(cell: DiffCell, width: number): Segment {
+  if (cell.kind === "empty") return toned(" ".repeat(Math.max(0, width)), "muted")
   const prefix = `${lineNumber(cell.line)} ${marker(cell.kind)} `
-  const body = cell.kind === "empty" ? "(empty)" : cell.text
-  return toned(prefix + fit(body, Math.max(1, width - textWidth(prefix))), cell.kind === "empty" ? "muted" : tone(cell.kind))
+  return toned(prefix + fit(cell.text, Math.max(1, width - textWidth(prefix))), tone(cell.kind))
 }
 
 function sideLine(row: SideBySideDiffRow, width: number): DisplayLine {
-  if (row.kind === "hunk") return [toned(fit(row.header, width), "muted")]
+  if (row.kind === "hunk") {
+    const label = `── ${row.header} `
+    return [toned(label + "─".repeat(Math.max(0, width - textWidth(label))), "muted")]
+  }
   const column = Math.max(12, Math.floor((width - 3) / 2))
   const remainder = Math.max(1, width - column - 3)
   return [cell(row.before, column), plain(" │ "), cell(row.after, remainder)]
@@ -79,7 +82,8 @@ function diffLines(changes: ChangesView, width: number, sideBySide: boolean): Di
     const column = Math.max(12, Math.floor((width - 3) / 2))
     const remainder = Math.max(1, width - column - 3)
     return [
-      [plain(fit("Before", column)), plain(" │ "), plain(fit("After", remainder))],
+      [plain(fit("BEFORE (original)", column)), plain(" │ "), plain(fit("AFTER (proposed)", remainder))],
+      [plain("─".repeat(column)), plain("─┼─"), plain("─".repeat(remainder))],
       ...changes.side_by_side.map((row) => sideLine(row, width)),
     ]
   }
@@ -89,6 +93,13 @@ function diffLines(changes: ChangesView, width: number, sideBySide: boolean): Di
 function fileLabel(file: ChangeFile, cursor: boolean, selected: boolean, width: number): string {
   const prefix = `${cursor ? ">" : " "}${selected ? "*" : " "} ${file.status}${file.detail ? "!" : " "} `
   return fit(prefix + file.path, width)
+}
+
+function statusLabel(status: ChangeFile["status"]): string {
+  if (status === "A") return "ADDED"
+  if (status === "M") return "MODIFIED"
+  if (status === "D") return "DELETED"
+  return "RENAMED"
 }
 
 function focused(name: string, active: boolean): string {
@@ -155,7 +166,7 @@ export function renderChanges(view: View, state: ChangesState, width: number, he
     const window = fileWindow(changes, state.fileCursor, availableDiffRows)
     lines.push([
       plain(fit(`${focused("Files", state.focus === "files")} ${changes.page}/${changes.pages}`, leftWidth)), plain(" │ "),
-      plain(fit(`${focused("Diff", state.focus === "diff")} ${selectedFile.status} ${selectedFile.path} · ${useSideBySide ? "side-by-side" : "unified"} · ${offset + 1}-${Math.min(allDiff.length, offset + availableDiffRows)}/${allDiff.length}`, rightWidth)),
+      plain(fit(`${focused("Diff", state.focus === "diff")} ${statusLabel(selectedFile.status)} · ${selectedFile.path} · ${useSideBySide ? "side-by-side" : "unified"} · ${offset + 1}-${Math.min(allDiff.length, offset + availableDiffRows)}/${allDiff.length}`, rightWidth)),
     ])
     for (let row = 0; row < availableDiffRows; row++) {
       const fileIndex = window.start + row
@@ -172,7 +183,7 @@ export function renderChanges(view: View, state: ChangesState, width: number, he
       const file = window.files[row]
       if (file) lines.push([plain(fileLabel(file, fileIndex === state.fileCursor && state.focus === "files", file.action_id === changes.selected_action_id, width))])
     }
-    lines.push([plain(`${focused("Diff", state.focus === "diff")} ${selectedFile.status} ${selectedFile.path} · unified`)])
+    lines.push([plain(`${focused("Diff", state.focus === "diff")} ${statusLabel(selectedFile.status)} · ${selectedFile.path} · unified`)])
     availableDiffRows = Math.max(1, contentRows - fileRows - 2)
     const allDiff = diffLines(changes, width, false)
     const maxOffset = Math.max(0, allDiff.length - availableDiffRows)
@@ -181,7 +192,7 @@ export function renderChanges(view: View, state: ChangesState, width: number, he
     lines.push(...renderedDiff)
   }
 
-  const allDiffCount = useSideBySide && width >= 100 ? changes.side_by_side.length + 1 : changes.unified.length
+  const allDiffCount = useSideBySide && width >= 100 ? changes.side_by_side.length + 2 : changes.unified.length
   const maxDiffOffset = Math.max(0, allDiffCount - availableDiffRows)
   while (lines.length < height - footerRows) lines.push([])
   lines.splice(height - footerRows)
