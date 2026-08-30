@@ -18,14 +18,15 @@ import (
 )
 
 const (
-	ProtocolVersion = 2
-	MaxFrameBytes   = 256 << 10
-	MaxTextBytes    = 64 << 10
-	MaxInputBytes   = 4 << 10
-	MaxActions      = 32
-	MaxFields       = 256
-	MaxChangeFiles  = MaxActions - 4
-	MaxDiffRows     = 1024
+	ProtocolVersion  = 3
+	MaxFrameBytes    = 256 << 10
+	MaxTextBytes     = 64 << 10
+	MaxInputBytes    = 4 << 10
+	MaxActions       = 32
+	MaxFields        = 256
+	MaxChangeFiles   = MaxActions - 6
+	MaxDiffRows      = 256
+	MaxDiffTotalRows = 8192
 )
 
 var (
@@ -67,22 +68,16 @@ type ChangeFile struct {
 	Detail   string `json:"detail"`
 }
 
-// UnifiedDiffRow and SideBySideDiffRow keep repository-controlled text in
-// individual cells. Newlines and column separators remain UI-owned structure.
-type UnifiedDiffRow struct {
-	Kind    string `json:"kind"`
-	OldLine int    `json:"old_line"`
-	NewLine int    `json:"new_line"`
-	Text    string `json:"text"`
-}
-
+// DiffRow keeps repository-controlled text in individual cells. Newlines and
+// column separators remain UI-owned structure; the helper derives responsive
+// unified and side-by-side layouts from this single canonical representation.
 type DiffCell struct {
 	Kind string `json:"kind"`
 	Line int    `json:"line"`
 	Text string `json:"text"`
 }
 
-type SideBySideDiffRow struct {
+type DiffRow struct {
 	Kind   string   `json:"kind"`
 	Header string   `json:"header"`
 	Before DiffCell `json:"before"`
@@ -90,14 +85,19 @@ type SideBySideDiffRow struct {
 }
 
 type ChangesView struct {
-	Summary          string              `json:"summary"`
-	Layout           string              `json:"layout"`
-	Page             int                 `json:"page"`
-	Pages            int                 `json:"pages"`
-	SelectedActionID string              `json:"selected_action_id"`
-	Files            []ChangeFile        `json:"files"`
-	Unified          []UnifiedDiffRow    `json:"unified"`
-	SideBySide       []SideBySideDiffRow `json:"side_by_side"`
+	Summary             string       `json:"summary"`
+	Layout              string       `json:"layout"`
+	Page                int          `json:"page"`
+	Pages               int          `json:"pages"`
+	SelectedActionID    string       `json:"selected_action_id"`
+	InitialFocus        string       `json:"initial_focus"`
+	InitialDiffPosition string       `json:"initial_diff_position"`
+	DiffStart           int          `json:"diff_start"`
+	DiffTotal           int          `json:"diff_total"`
+	DiffPage            int          `json:"diff_page"`
+	DiffPages           int          `json:"diff_pages"`
+	Files               []ChangeFile `json:"files"`
+	Rows                []DiffRow    `json:"rows"`
 }
 
 // View is immutable for a given ScreenID and Revision. All text must pass the
@@ -209,8 +209,11 @@ func (v View) Validate() error {
 }
 
 func (c ChangesView) validate(actions map[string]struct{}) (int, error) {
-	if c.Files == nil || c.Unified == nil || c.SideBySide == nil || c.Summary == "" || len(c.Summary) > MaxTextBytes || SanitizeDisplayText(c.Summary) != c.Summary || (c.Layout != "unified" && c.Layout != "side-by-side") || c.Page <= 0 || c.Pages < c.Page || len(c.Files) == 0 || len(c.Files) > MaxChangeFiles || len(c.Unified) > MaxDiffRows || len(c.SideBySide) > MaxDiffRows {
+	if c.Files == nil || c.Rows == nil || c.Summary == "" || len(c.Summary) > MaxTextBytes || SanitizeDisplayText(c.Summary) != c.Summary || c.Layout != "side-by-side" || (c.InitialFocus != "files" && c.InitialFocus != "diff") || (c.InitialDiffPosition != "start" && c.InitialDiffPosition != "end") || c.Page <= 0 || c.Pages < c.Page || c.DiffPage <= 0 || c.DiffPages < c.DiffPage || c.DiffStart < 0 || c.DiffTotal < 0 || c.DiffTotal > MaxDiffTotalRows || len(c.Files) == 0 || len(c.Files) > MaxChangeFiles || len(c.Rows) > MaxDiffRows {
 		return 0, errors.New("structured Changes summary or bounds are invalid")
+	}
+	if c.DiffTotal == 0 && (c.DiffStart != 0 || len(c.Rows) != 0 || c.DiffPage != 1 || c.DiffPages != 1) || c.DiffTotal > 0 && (len(c.Rows) == 0 || c.DiffStart >= c.DiffTotal || c.DiffStart+len(c.Rows) > c.DiffTotal) {
+		return 0, errors.New("structured Changes diff window is invalid")
 	}
 	total := len(c.Summary) + len(c.Layout) + len(c.SelectedActionID)
 	selected := false
@@ -232,40 +235,16 @@ func (c ChangesView) validate(actions map[string]struct{}) (int, error) {
 	if !selected {
 		return 0, errors.New("structured Changes selection is not visible")
 	}
-	for _, row := range c.Unified {
-		total += len(row.Kind) + len(row.Text)
-		if !validUnifiedDiffRow(row) {
-			return 0, errors.New("structured unified diff row is invalid")
-		}
-	}
-	for _, row := range c.SideBySide {
+	for _, row := range c.Rows {
 		total += len(row.Kind) + len(row.Header) + len(row.Before.Kind) + len(row.Before.Text) + len(row.After.Kind) + len(row.After.Text)
-		if !validSideBySideDiffRow(row) {
-			return 0, errors.New("structured side-by-side diff row is invalid")
+		if !validDiffRow(row) {
+			return 0, errors.New("structured diff row is invalid")
 		}
 	}
 	return total, nil
 }
 
-func validUnifiedDiffRow(row UnifiedDiffRow) bool {
-	if len(row.Text) > MaxTextBytes || SanitizeDisplayText(row.Text) != row.Text {
-		return false
-	}
-	switch row.Kind {
-	case "hunk":
-		return row.Text != "" && row.OldLine == 0 && row.NewLine == 0
-	case "context":
-		return row.OldLine > 0 && row.NewLine > 0
-	case "delete":
-		return row.OldLine > 0 && row.NewLine == 0
-	case "add":
-		return row.OldLine == 0 && row.NewLine > 0
-	default:
-		return false
-	}
-}
-
-func validSideBySideDiffRow(row SideBySideDiffRow) bool {
+func validDiffRow(row DiffRow) bool {
 	if len(row.Header)+len(row.Before.Text)+len(row.After.Text) > MaxTextBytes || SanitizeDisplayText(row.Header) != row.Header || SanitizeDisplayText(row.Before.Text) != row.Before.Text || SanitizeDisplayText(row.After.Text) != row.After.Text {
 		return false
 	}
@@ -317,22 +296,16 @@ func PrepareView(view View) (View, error) {
 		if view.Changes.Files == nil {
 			view.Changes.Files = []ChangeFile{}
 		}
-		if view.Changes.Unified == nil {
-			view.Changes.Unified = []UnifiedDiffRow{}
-		}
-		if view.Changes.SideBySide == nil {
-			view.Changes.SideBySide = []SideBySideDiffRow{}
+		if view.Changes.Rows == nil {
+			view.Changes.Rows = []DiffRow{}
 		}
 		view.Changes.Summary = SanitizeDisplayText(view.Changes.Summary)
 		for index := range view.Changes.Files {
 			view.Changes.Files[index].Path = SanitizeDisplayText(view.Changes.Files[index].Path)
 			view.Changes.Files[index].Detail = SanitizeDisplayText(view.Changes.Files[index].Detail)
 		}
-		for index := range view.Changes.Unified {
-			view.Changes.Unified[index].Text = SanitizeDisplayText(view.Changes.Unified[index].Text)
-		}
-		for index := range view.Changes.SideBySide {
-			row := &view.Changes.SideBySide[index]
+		for index := range view.Changes.Rows {
+			row := &view.Changes.Rows[index]
 			row.Header = SanitizeDisplayText(row.Header)
 			row.Before.Text = SanitizeDisplayText(row.Before.Text)
 			row.After.Text = SanitizeDisplayText(row.After.Text)

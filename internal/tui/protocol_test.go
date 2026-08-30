@@ -36,7 +36,7 @@ func TestPrepareViewNormalizesStructuredChangesArrays(t *testing.T) {
 		Fields:  []TextField{},
 		Actions: []Action{{ID: "file.0", Label: "A test.txt"}},
 		Changes: &ChangesView{
-			Summary: "1 file", Layout: "unified", Page: 1, Pages: 1, SelectedActionID: "file.0",
+			Summary: "1 file", Layout: "side-by-side", Page: 1, Pages: 1, SelectedActionID: "file.0", InitialFocus: "files", InitialDiffPosition: "start", DiffPage: 1, DiffPages: 1,
 			Files: []ChangeFile{{ActionID: "file.0", Status: "A", Path: "test.txt"}},
 		},
 	}
@@ -44,14 +44,14 @@ func TestPrepareViewNormalizesStructuredChangesArrays(t *testing.T) {
 		t.Fatal("nil structured Changes arrays passed the protocol contract")
 	}
 	prepared, err := PrepareView(view)
-	if err != nil || prepared.Changes.Unified == nil || prepared.Changes.SideBySide == nil {
+	if err != nil || prepared.Changes.Rows == nil {
 		t.Fatalf("prepared=%+v error=%v", prepared, err)
 	}
 	encoded, err := json.Marshal(prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(encoded, []byte(`"unified":[]`)) || !bytes.Contains(encoded, []byte(`"side_by_side":[]`)) {
+	if !bytes.Contains(encoded, []byte(`"rows":[]`)) {
 		t.Fatalf("structured Changes arrays were not encoded as arrays: %s", encoded)
 	}
 }
@@ -85,10 +85,10 @@ func testChangesView(t *testing.T) View {
 		Title:   "Review changes",
 		Actions: []Action{{ID: "file.0", Label: "A test.txt"}, {ID: "apply-all", Label: "Apply all 1 file"}, {ID: "back", Label: "Back"}},
 		Changes: &ChangesView{
-			Summary: "1 file · 1 added", Layout: "side-by-side", Page: 1, Pages: 1, SelectedActionID: "file.0",
-			Files:   []ChangeFile{{ActionID: "file.0", Status: "A", Path: "test.txt"}},
-			Unified: []UnifiedDiffRow{{Kind: "hunk", Text: "@@ -0,0 +1,1 @@"}, {Kind: "add", NewLine: 1, Text: "test"}},
-			SideBySide: []SideBySideDiffRow{
+			Summary: "1 file · 1 added", Layout: "side-by-side", Page: 1, Pages: 1, SelectedActionID: "file.0", InitialFocus: "files", InitialDiffPosition: "start",
+			DiffTotal: 2, DiffPage: 1, DiffPages: 1,
+			Files: []ChangeFile{{ActionID: "file.0", Status: "A", Path: "test.txt"}},
+			Rows: []DiffRow{
 				{Kind: "hunk", Header: "@@ -0,0 +1,1 @@", Before: DiffCell{Kind: "empty"}, After: DiffCell{Kind: "empty"}},
 				{Kind: "content", Before: DiffCell{Kind: "empty"}, After: DiffCell{Kind: "add", Line: 1, Text: "test"}},
 			},
@@ -111,7 +111,7 @@ func TestFrameRoundTripAndStrictJSON(t *testing.T) {
 		t.Fatalf("decoded=%+v error=%v", decoded, err)
 	}
 	for _, payload := range []string{
-		`{"version":2,"type":"event","screen_id":"home","revision":7,"binding":{"process_id":123,"project_id":"project-1","nonce":"` + strings.Repeat("a", 64) + `"},"kind":"exit","action_id":"","input":"","capability":{"color":false,"unicode":false},"size":{"width":80,"height":24},"error":"","unknown":true}`,
+		`{"version":3,"type":"event","screen_id":"home","revision":7,"binding":{"process_id":123,"project_id":"project-1","nonce":"` + strings.Repeat("a", 64) + `"},"kind":"exit","action_id":"","input":"","capability":{"color":false,"unicode":false},"size":{"width":80,"height":24},"error":"","unknown":true}`,
 		`{} {}`,
 	} {
 		var frame bytes.Buffer
@@ -206,14 +206,15 @@ func TestViewRejectsAggregateTextOversize(t *testing.T) {
 
 func TestStructuredChangesRowsOwnLayoutAndBindVisibleFileActions(t *testing.T) {
 	view := testChangesView(t)
-	if err := view.Validate(); err != nil || view.Changes == nil || view.Changes.Unified[1].Text != "test" {
+	if err := view.Validate(); err != nil || view.Changes == nil || view.Changes.Rows[1].After.Text != "test" {
 		t.Fatalf("structured view=%+v error=%v", view.Changes, err)
 	}
 	for name, mutate := range map[string]func(*View){
 		"unbound selection": func(candidate *View) { candidate.Changes.SelectedActionID = "file.1" },
-		"unsafe diff row":   func(candidate *View) { candidate.Changes.Unified[1].Text = "test\nfake action" },
-		"invalid line":      func(candidate *View) { candidate.Changes.Unified[1].NewLine = 0 },
-		"unknown cell kind": func(candidate *View) { candidate.Changes.SideBySide[1].After.Kind = "execute" },
+		"unsafe diff row":   func(candidate *View) { candidate.Changes.Rows[1].After.Text = "test\nfake action" },
+		"invalid line":      func(candidate *View) { candidate.Changes.Rows[1].After.Line = 0 },
+		"unknown cell kind": func(candidate *View) { candidate.Changes.Rows[1].After.Kind = "execute" },
+		"invalid window":    func(candidate *View) { candidate.Changes.DiffStart = 2 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := testChangesView(t)

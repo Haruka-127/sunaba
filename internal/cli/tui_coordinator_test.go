@@ -28,7 +28,8 @@ func TestTUIChangesUsesStructuredRowsWithoutLayoutNewlines(t *testing.T) {
 		Unified:    []workspace.UnifiedReviewRow{{Kind: '@', Text: "@@ -0,0 +1,1 @@"}, {Kind: '+', NewLine: 1, Text: "test"}},
 		SideBySide: []workspace.SideBySideReviewRow{{BeforeKind: '@', Before: "@@ -0,0", AfterKind: '@', After: "+1,1 @@"}, {AfterKind: '+', AfterLine: 1, After: "test"}},
 	}
-	model := reviewChangesView(screen, screen.Files, 1, 1, 0)
+	rows := reviewDiffRows(screen)
+	model := reviewChangesView(screen, screen.Files, 1, 1, 0, rows, 0, len(rows), 1, 1, false, false)
 	view := hosttui.View{
 		Version: hosttui.ProtocolVersion, Type: "view", ScreenID: "changes", Revision: 1,
 		Binding: hosttui.Binding{ProcessID: 123, ProjectID: "project-1", Nonce: strings.Repeat("a", 64)},
@@ -38,13 +39,53 @@ func TestTUIChangesUsesStructuredRowsWithoutLayoutNewlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.Fields == nil || len(prepared.Fields) != 0 || prepared.Changes.SelectedActionID != "file.0" || prepared.Changes.Unified[1].Text != "test" || prepared.Changes.SideBySide[1].After.Line != 1 || strings.Contains(prepared.Changes.Unified[1].Text, "\n") {
+	if prepared.Fields == nil || len(prepared.Fields) != 0 || prepared.Changes.SelectedActionID != "file.0" || prepared.Changes.Rows[1].After.Text != "test" || prepared.Changes.Rows[1].After.Line != 1 || strings.Contains(prepared.Changes.Rows[1].After.Text, "\n") {
 		t.Fatalf("structured Changes view=%+v", prepared.Changes)
 	}
 	if summary := reviewSummary(screen.Files); !strings.Contains(summary, "1 file") || !strings.Contains(summary, "1 added") {
 		t.Fatalf("summary=%q", summary)
 	} else if strings.Contains(summary, "0 modified") || !strings.Contains(summary, "no warnings") {
 		t.Fatalf("summary includes zero-value noise or omits warning state: %q", summary)
+	}
+}
+
+func TestTUIDiffPagesPreserveEveryBoundedRow(t *testing.T) {
+	rows := make([]hosttui.DiffRow, 600)
+	for index := range rows {
+		rows[index] = hosttui.DiffRow{
+			Kind:   "content",
+			Before: hosttui.DiffCell{Kind: "delete", Line: index + 1, Text: strings.Repeat("b", 300)},
+			After:  hosttui.DiffCell{Kind: "add", Line: index + 1, Text: strings.Repeat("a", 300)},
+		}
+	}
+	pages := reviewDiffPages(rows)
+	if len(pages) < 3 {
+		t.Fatalf("diff pages=%d", len(pages))
+	}
+	next := 0
+	for _, page := range pages {
+		if page.start != next || page.end <= page.start || page.end-page.start > hosttui.MaxDiffRows {
+			t.Fatalf("invalid diff page=%+v next=%d", page, next)
+		}
+		next = page.end
+	}
+	if next != len(rows) {
+		t.Fatalf("paged rows=%d want=%d", next, len(rows))
+	}
+}
+
+func TestTUIDiffRowsDeduplicateContextAndSplitOversizePairs(t *testing.T) {
+	long := strings.Repeat("x", (hosttui.MaxTextBytes/2)+1)
+	screen := workspace.ReviewScreen{SideBySide: []workspace.SideBySideReviewRow{
+		{BeforeKind: ' ', BeforeLine: 1, Before: "same", AfterKind: ' ', AfterLine: 1, After: "same"},
+		{BeforeKind: '-', BeforeLine: 2, Before: long, AfterKind: '+', AfterLine: 2, After: long},
+	}}
+	rows := reviewDiffRows(screen)
+	if len(rows) != 3 || rows[0].Before.Text != "same" || rows[0].After.Text != "" {
+		t.Fatalf("canonical context rows=%+v", rows)
+	}
+	if rows[1].Before.Text != long || rows[1].After.Kind != "empty" || rows[2].Before.Kind != "empty" || rows[2].After.Text != long {
+		t.Fatalf("split replacement rows=%+v", rows[1:])
 	}
 }
 

@@ -63,7 +63,7 @@ OpenCodeを終了しても自動export、apply、destroyは行いません。作
    sunaba changes export --dir /path/to/project
    ```
 
-2. Changesで変更fileを選択してdiffとriskを確認します。`Tab`でFiles、Diff、Actionsを移動し、Diffは矢印またはPageUp/PageDownでscrollします。wide terminalはline番号付きside-by-side、narrow terminalはline番号付きunifiedです。binary、巨大file、symlink、実行可能file、mode変更の警告を見落とさないでください。
+2. Changesで変更fileを選択してdiffとriskを確認します。`Tab`でFiles、Diff、Actionsを移動します。Diffは`↑`/`↓`またはPageUp/PageDownで全rowをページ越しに確認し、長い行は`←`/`→`または`Home`/`End`、hunk間は`n`/`p`で移動します。wide terminalはline番号付きside-by-side、narrow terminalはline番号付きunifiedです。binary、巨大file、symlink、実行可能file、mode変更の警告を見落とさないでください。
 
 3. 途中で戻ってもpendingは保持されます。適用する場合は`Apply all N files`を選び、次の確認画面で全体適用を確定します。部分適用はなく、表示中のChange Set全体だけが対象です。digestやnonceは入力しません。
 

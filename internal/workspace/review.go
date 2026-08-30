@@ -19,7 +19,7 @@ const (
 	maximumReviewFileBytes    = int64(512 << 10)
 	maximumReviewTotalBytes   = int64(1 << 20)
 	maximumReviewLines        = 2_000
-	maximumReviewLineBytes    = 256 << 10
+	maximumReviewLineBytes    = 64 << 10
 	maximumReviewEditDistance = 512
 	maximumReviewItems        = 2_000
 )

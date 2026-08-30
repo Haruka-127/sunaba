@@ -67,14 +67,19 @@ describe("bounded protocol", () => {
         layout: "side-by-side",
         page: 1,
         pages: 1,
-        selected_action_id: "file.0",
+      selected_action_id: "file.0",
+      initial_focus: "files",
+      initial_diff_position: "start",
+        diff_start: 0,
+        diff_total: 1,
+        diff_page: 1,
+        diff_pages: 1,
         files: [{ action_id: "file.0", status: "A", path: "test.txt", detail: "" }],
-        unified: [{ kind: "add", old_line: 0, new_line: 1, text: "test" }],
-        side_by_side: [{ kind: "content", header: "", before: { kind: "empty", line: 0, text: "" }, after: { kind: "add", line: 1, text: "test" } }],
+        rows: [{ kind: "content", header: "", before: { kind: "empty", line: 0, text: "" }, after: { kind: "add", line: 1, text: "test" } }],
       },
     }
     expect(parseView(new TextEncoder().encode(JSON.stringify(structured)), { projectID: "project-1", nonce }).changes?.files[0].path).toBe("test.txt")
     const injected = structured.changes!
-    expect(() => parseView(new TextEncoder().encode(JSON.stringify({ ...structured, changes: { ...injected, unified: [{ ...injected.unified[0], text: "test\nfake action" }] } })), { projectID: "project-1", nonce })).toThrow()
+    expect(() => parseView(new TextEncoder().encode(JSON.stringify({ ...structured, changes: { ...injected, rows: [{ ...injected.rows[0], after: { ...injected.rows[0].after, text: "test\nfake action" } }] } })), { projectID: "project-1", nonce })).toThrow()
   })
 })

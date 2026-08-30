@@ -224,7 +224,7 @@ func TestProtocolV1UIFullLockRequiresExactSetupMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := versions.LoadLock(); err == nil {
-		t.Fatal("protocol-v1 sunaba-ui lock passed the protocol-v2 contract")
+		t.Fatal("protocol-v1 sunaba-ui lock passed the protocol-v3 contract")
 	}
 	if _, err := a.activeVersionLock(); !errors.Is(err, errLegacyDependencyMigrationRequired) {
 		t.Fatalf("old full UI lock classification error=%v", err)
@@ -359,6 +359,7 @@ func TestEarlierProtocolV2ArtifactsRemainEligibleForExactSetupMigration(t *testi
 	for name, manifest := range map[string]dependency.Manifest{
 		"earlier": dependency.EarlierSunabaUIV2Manifest(pinned),
 		"older":   dependency.OlderSunabaUIV2Manifest(pinned),
+		"oldest":  dependency.OldestSunabaUIV2Manifest(pinned),
 		"initial": dependency.InitialSunabaUIV2Manifest(pinned),
 	} {
 		t.Run(name, func(t *testing.T) {

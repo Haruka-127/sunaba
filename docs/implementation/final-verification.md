@@ -17,7 +17,7 @@
 | Git Gateway | `TestPhase3GitGatewayInAgentVM`、`internal/gitgateway` smart HTTP/TOCTOU/partial-failure/fuzz test | 2026-08-11の実VMgateはPASS。current mainの番号/ID承認とExternal Git guardはunit/raceのみ。LIVE RECHECK |
 | Web Gateway | Phase 4 measurement/integration、`internal/webgateway` attack/compatibility/fuzz test | 過去の実VMattack/compatibility gateはPASS。current mainでは再実行していない。LIVE RECHECK |
 | Phase 5 hardening | dependency/provenance、migration、retention/redaction、ENOSPC/reboot/partial failure、4 bounded fuzz target | current mainの通常gateはPASS。clean-roomと4 bounded fuzz targetは再実行していない |
-| TUI利用性 Checkpoint 1〜10 | [`tui-usability.md`](./tui-usability.md)、`internal/tui`、`internal/cli/tui_coordinator_test.go`、`internal/secretstore`、`internal/usersettings`、`ui/test` | AUTO PASS。protocol v2の構造化Changes表示を含む通常gate、全race、UI build、integration compileを2026-08-30に再実行。LIVE RECHECK |
+| TUI利用性 Checkpoint 1〜10 | [`tui-usability.md`](./tui-usability.md)、`internal/tui`、`internal/cli/tui_coordinator_test.go`、`internal/secretstore`、`internal/usersettings`、`ui/test` | AUTO PASS。protocol v3のbounded page・縦横scroll対応Changes表示を含む通常gate、全race、UI build、integration compileを2026-08-30に再実行。LIVE RECHECK |
 | dev active-session egress | `TestDevSessionNetworkBoundary`がactive public egress、host/LAN/peer/inbound拒否、稼働VMのdeny-all quiesce、stopを検査 | 2026-08-11の実機gateはPASS。current mainのdev recovery変更後は再実行していない。LIVE RECHECK |
 | 最終cleanup / user resource非干渉 | exact nameとowner/project/VM labelを再検証するcleanup、最終`container ls` / network / volume / process / temp inventory | 2026-08-11の実機作業後はPASS。current mainではcontainerを起動しておらず、新しい実機inventoryは未実施 |
 | Git運用 | topic branch上の意図別Conventional Commit、`git status` | `feat/opentui-ux`で作業し、pushは行わない。2026-08-20以前のmain統合履歴は保持 |
@@ -31,7 +31,7 @@ go test -tags=integration -run '^$' ./test/integration
 ./scripts/build-ui.sh
 ```
 
-2026-08-30の`feat/opentui-ux`で上記4 commandを再実行しPASSした。UI gateはOpenTUI helper test 16件、TypeScript typecheck、standalone build、固定SHA-256 `bda47df068d6b187399b8aaa3efd1fbc3155cb8957a17e2e8a63bec4e9277f7a`、Mach-O/owner/mode/architectureを検証した。通常gateは全unit、vet、host/guest build、CLI/help、Keychain禁止を含むstatic boundaryを検証した。全raceとintegration build-tagのcompile-onlyもPASSした。Apple Container、実credential、sudo、pfを使う実機操作は実行していない。
+2026-08-30の`feat/opentui-ux`で上記4 commandを再実行しPASSした。UI gateはOpenTUI helper test 20件、TypeScript typecheck、standalone build、固定SHA-256 `24d6451d295b836cda3258ff283d900d009b174c402e4b4f4f263835ab9d95ed`、Mach-O/owner/mode/architectureを検証した。通常gateは全unit、vet、host/guest build、CLI/help、Keychain禁止を含むstatic boundaryを検証した。全raceとintegration build-tagのcompile-onlyもPASSした。Apple Container、実credential、sudo、pfを使う実機操作は実行していない。
 
 2026-08-20の当時mainで先頭3 commandを実行し、通常gate、全race、integration build-tagのコンパイルがPASSした。通常gateはformat、全unit、vet、host binary、Linux/AArch64 guest relay、Git hook、CLI/static unsafe-path boundaryを検証する。`go test -tags=integration -run '^$'`はcompile-onlyであり、Apple Container VMを起動しない。
 

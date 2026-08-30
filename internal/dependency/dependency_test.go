@@ -76,6 +76,7 @@ func TestCompiledUIContractRejectsPreviousAndSubstitutedArtifacts(t *testing.T) 
 		"previous protocol-v2 artifact": PreviousSunabaUIV2Manifest(MustPinned()),
 		"earlier protocol-v2 artifact":  EarlierSunabaUIV2Manifest(MustPinned()),
 		"older protocol-v2 artifact":    OlderSunabaUIV2Manifest(MustPinned()),
+		"oldest protocol-v2 artifact":   OldestSunabaUIV2Manifest(MustPinned()),
 		"initial protocol-v2 artifact":  InitialSunabaUIV2Manifest(MustPinned()),
 		"substituted artifact": func() Manifest {
 			manifest := MustPinned()

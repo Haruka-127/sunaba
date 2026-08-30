@@ -886,18 +886,27 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 	}
 	selected := ""
 	page := 0
+	diffPage := 0
+	initialDiffFocus := false
+	initialDiffEnd := false
 	for {
 		screen, err := workspace.BuildReviewScreen(review, c.width, selected)
 		if err != nil {
 			return err
 		}
-		const pageSize = hosttui.MaxActions - 4
+		const pageSize = hosttui.MaxChangeFiles
 		if page*pageSize >= len(screen.Files) {
 			page = 0
 		}
 		start := page * pageSize
 		end := min(start+pageSize, len(screen.Files))
 		visible := screen.Files[start:end]
+		diffRows := reviewDiffRows(screen)
+		diffPages := reviewDiffPages(diffRows)
+		if diffPage >= len(diffPages) {
+			diffPage = 0
+		}
+		diffWindow := diffPages[diffPage]
 		actions := make([]hosttui.Action, 0, hosttui.MaxActions)
 		for index := start; index < end; index++ {
 			file := screen.Files[index]
@@ -909,9 +918,15 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 		if end < len(screen.Files) {
 			actions = append(actions, noInputAction("page.next", "Next files"))
 		}
+		if diffPage > 0 {
+			actions = append(actions, noInputAction("diff.prev", "Previous diff page"))
+		}
+		if diffPage+1 < len(diffPages) {
+			actions = append(actions, noInputAction("diff.next", "Next diff page"))
+		}
 		actions = append(actions, noInputAction("apply-all", "Apply all "+fileCountLabel(len(screen.Files))), noInputAction("back", "Keep pending and back"))
 		view := c.view("changes", "Review the host-generated Change Set", nil, actions)
-		view.Changes = reviewChangesView(screen, visible, page+1, (len(screen.Files)+pageSize-1)/pageSize, start)
+		view.Changes = reviewChangesView(screen, visible, page+1, (len(screen.Files)+pageSize-1)/pageSize, start, diffRows[diffWindow.start:diffWindow.end], diffWindow.start, len(diffRows), diffPage+1, len(diffPages), initialDiffFocus, initialDiffEnd)
 		identity := pendingIdentity(pending)
 		event, err := c.exchange(ctx, project.policy.ProjectID, view)
 		if err != nil {
@@ -919,6 +934,18 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 		}
 		if event.Kind != hosttui.EventAction || event.ActionID == "back" {
 			return nil
+		}
+		if event.ActionID == "diff.prev" {
+			diffPage--
+			initialDiffFocus = true
+			initialDiffEnd = true
+			continue
+		}
+		if event.ActionID == "diff.next" {
+			diffPage++
+			initialDiffFocus = true
+			initialDiffEnd = false
+			continue
 		}
 		if event.ActionID == "apply-all" {
 			latest, err := loadPending(project.state, project.policy)
@@ -946,21 +973,93 @@ func (c *tuiCoordinator) changesForPending(ctx context.Context, project tuiProje
 		if event.ActionID == "page.prev" {
 			page--
 			selected = screen.Files[max(0, start-pageSize)].Path
+			diffPage = 0
+			initialDiffFocus = false
+			initialDiffEnd = false
 			continue
 		}
 		if event.ActionID == "page.next" {
 			page++
 			selected = screen.Files[end].Path
+			diffPage = 0
+			initialDiffFocus = false
+			initialDiffEnd = false
 			continue
 		}
 		var index int
 		if _, err := fmt.Sscanf(event.ActionID, "file.%d", &index); err == nil && index >= 0 && index < len(screen.Files) {
 			selected = screen.Files[index].Path
+			diffPage = 0
+			initialDiffFocus = false
+			initialDiffEnd = false
 		}
 	}
 }
 
-func reviewChangesView(screen workspace.ReviewScreen, visible []workspace.ReviewFile, page, pages, start int) *hosttui.ChangesView {
+const maximumTUIDiffPageBytes = 64 << 10
+
+type tuiDiffPage struct {
+	start int
+	end   int
+}
+
+func reviewDiffRows(screen workspace.ReviewScreen) []hosttui.DiffRow {
+	rows := make([]hosttui.DiffRow, 0, len(screen.SideBySide))
+	for _, row := range screen.SideBySide {
+		if row.BeforeKind == '@' && row.AfterKind == '@' {
+			empty := hosttui.DiffCell{Kind: "empty"}
+			rows = append(rows, hosttui.DiffRow{Kind: "hunk", Header: row.Before + " " + row.After, Before: empty, After: empty})
+			continue
+		}
+		canonical := hosttui.DiffRow{
+			Kind:   "content",
+			Before: hosttui.DiffCell{Kind: reviewCellKind(row.BeforeKind), Line: row.BeforeLine, Text: row.Before},
+			After:  hosttui.DiffCell{Kind: reviewCellKind(row.AfterKind), Line: row.AfterLine, Text: row.After},
+		}
+		if canonical.Before.Kind == "context" && canonical.After.Kind == "context" && canonical.Before.Text == canonical.After.Text {
+			canonical.After.Text = ""
+		}
+		if len(canonical.Before.Text)+len(canonical.After.Text) > hosttui.MaxTextBytes {
+			empty := hosttui.DiffCell{Kind: "empty"}
+			rows = append(rows,
+				hosttui.DiffRow{Kind: "content", Before: canonical.Before, After: empty},
+				hosttui.DiffRow{Kind: "content", Before: empty, After: canonical.After},
+			)
+			continue
+		}
+		rows = append(rows, canonical)
+	}
+	if screen.Item.OpaqueReason != "" && len(rows) == 0 {
+		empty := hosttui.DiffCell{Kind: "empty"}
+		rows = append(rows, hosttui.DiffRow{Kind: "hunk", Header: "Content not rendered: " + screen.Item.OpaqueReason, Before: empty, After: empty})
+	}
+	return rows
+}
+
+func reviewDiffPages(rows []hosttui.DiffRow) []tuiDiffPage {
+	if len(rows) == 0 {
+		return []tuiDiffPage{{}}
+	}
+	pages := make([]tuiDiffPage, 0, (len(rows)+hosttui.MaxDiffRows-1)/hosttui.MaxDiffRows)
+	for start := 0; start < len(rows); {
+		end := start
+		bytes := 0
+		for end < len(rows) && end-start < hosttui.MaxDiffRows {
+			row := rows[end]
+			rowBytes := len(row.Kind) + len(row.Header) + len(row.Before.Kind) + len(row.Before.Text) + len(row.After.Kind) + len(row.After.Text)
+			if end > start && bytes+rowBytes > maximumTUIDiffPageBytes {
+				break
+			}
+			bytes += rowBytes
+			end++
+		}
+		pages = append(pages, tuiDiffPage{start: start, end: end})
+		start = end
+	}
+	return pages
+}
+
+func reviewChangesView(screen workspace.ReviewScreen, visible []workspace.ReviewFile, page, pages, start int, rows []hosttui.DiffRow, diffStart, diffTotal, diffPage, diffPages int, initialDiffFocus, initialDiffEnd bool) *hosttui.ChangesView {
 	files := make([]hosttui.ChangeFile, 0, len(visible))
 	for offset, file := range visible {
 		detail := ""
@@ -976,30 +1075,16 @@ func reviewChangesView(screen workspace.ReviewScreen, visible []workspace.Review
 		files = append(files, hosttui.ChangeFile{ActionID: fmt.Sprintf("file.%d", start+offset), Status: file.Status, Path: file.Path, Detail: detail})
 	}
 	model := &hosttui.ChangesView{
-		Summary: reviewSummary(screen.Files), Layout: string(screen.Layout), Page: page, Pages: pages,
-		SelectedActionID: fmt.Sprintf("file.%d", screen.Selected), Files: files,
-		Unified: make([]hosttui.UnifiedDiffRow, 0, len(screen.Unified)), SideBySide: make([]hosttui.SideBySideDiffRow, 0, len(screen.SideBySide)),
+		Summary: reviewSummary(screen.Files), Layout: "side-by-side", Page: page, Pages: pages,
+		SelectedActionID: fmt.Sprintf("file.%d", screen.Selected), InitialFocus: "files", InitialDiffPosition: "start", Files: files,
+		DiffStart: diffStart, DiffTotal: diffTotal, DiffPage: diffPage, DiffPages: diffPages,
+		Rows: append([]hosttui.DiffRow{}, rows...),
 	}
-	for _, row := range screen.Unified {
-		kind := map[byte]string{'@': "hunk", ' ': "context", '-': "delete", '+': "add"}[row.Kind]
-		model.Unified = append(model.Unified, hosttui.UnifiedDiffRow{Kind: kind, OldLine: row.OldLine, NewLine: row.NewLine, Text: row.Text})
+	if initialDiffFocus {
+		model.InitialFocus = "diff"
 	}
-	for _, row := range screen.SideBySide {
-		if row.BeforeKind == '@' && row.AfterKind == '@' {
-			empty := hosttui.DiffCell{Kind: "empty"}
-			model.SideBySide = append(model.SideBySide, hosttui.SideBySideDiffRow{Kind: "hunk", Header: row.Before + " " + row.After, Before: empty, After: empty})
-			continue
-		}
-		model.SideBySide = append(model.SideBySide, hosttui.SideBySideDiffRow{
-			Kind:   "content",
-			Before: hosttui.DiffCell{Kind: reviewCellKind(row.BeforeKind), Line: row.BeforeLine, Text: row.Before},
-			After:  hosttui.DiffCell{Kind: reviewCellKind(row.AfterKind), Line: row.AfterLine, Text: row.After},
-		})
-	}
-	if screen.Item.OpaqueReason != "" && len(model.Unified) == 0 && len(model.SideBySide) == 0 {
-		model.Unified = append(model.Unified, hosttui.UnifiedDiffRow{Kind: "hunk", Text: "Content not rendered: " + screen.Item.OpaqueReason})
-		empty := hosttui.DiffCell{Kind: "empty"}
-		model.SideBySide = append(model.SideBySide, hosttui.SideBySideDiffRow{Kind: "hunk", Header: "Content not rendered: " + screen.Item.OpaqueReason, Before: empty, After: empty})
+	if initialDiffEnd {
+		model.InitialDiffPosition = "end"
 	}
 	return model
 }

@@ -49,7 +49,7 @@ sunaba
 
 通常画面はHome、Changes、Settingsの3つです。Homeの`Start`または`Resume`でsunaba TUIが完全に終了してOpenCodeへterminalを渡し、OpenCode終了後は新しいsunaba TUIでHomeへ戻ります。VM内の編集状態は自動apply・destroyされません。
 
-Changesは左の変更file一覧と右のscroll可能なdiffを表示し、wide terminalではline番号付きside-by-side、narrow terminalではunified diffを使います。`Tab`でFiles・Diff・Actionsを移動し、diffでは矢印またはPageUp/PageDownを使います。`Apply all N files`の選択後に全体適用の確認を行い、一回限りの内部承認へ束縛して反映します。digestやnonceの手入力は不要です。
+Changesは左の変更file一覧と右のscroll可能なdiffを表示し、wide terminalではline番号付きside-by-side、narrow terminalではunified diffを使います。`Tab`でFiles・Diff・Actionsを移動します。Diffでは`↑`/`↓`またはPageUp/PageDownで全rowをページ越しに移動し、`←`/`→`で長い行を横scroll、`n`/`p`でhunk間を移動できます。`Apply all N files`の選択後に全体適用の確認を行い、一回限りの内部承認へ束縛して反映します。digestやnonceの手入力は不要です。
 
 自動化・高度な設定・復旧では従来のサブコマンドも使用できます。API keyへ切り替える例:
 

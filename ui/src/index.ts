@@ -222,10 +222,37 @@ async function run(transport: Extract<Transport, { kind: "view" }>): Promise<voi
         if (changesState.focus === "diff") {
           const display = renderChanges(transport.view, changesState, renderer!.width, renderer!.height)
           const currentOffset = Math.min(display.maxDiffOffset, changesState.diffOffset)
-          if (key.name === "down") changesState.diffOffset = Math.min(display.maxDiffOffset, currentOffset + 1)
-          else if (key.name === "up") changesState.diffOffset = Math.max(0, currentOffset - 1)
-          else if (key.name === "pagedown") changesState.diffOffset = Math.min(display.maxDiffOffset, currentOffset + display.diffPageSize)
-          else if (key.name === "pageup") changesState.diffOffset = Math.max(0, currentOffset - display.diffPageSize)
+          const navigatePage = (actionID: "diff.prev" | "diff.next"): boolean => {
+            const action = transport.view.actions.find((candidate) => candidate.id === actionID)
+            if (!action) return false
+            finish(makeEvent(transport.view, "action", action.id))
+            return true
+          }
+          if (key.name === "down") {
+            if (currentOffset < display.maxDiffOffset) changesState.diffOffset = currentOffset + 1
+            else if (navigatePage("diff.next")) return
+          } else if (key.name === "up") {
+            if (currentOffset > 0) changesState.diffOffset = currentOffset - 1
+            else if (navigatePage("diff.prev")) return
+          } else if (key.name === "pagedown") {
+            if (currentOffset < display.maxDiffOffset) changesState.diffOffset = Math.min(display.maxDiffOffset, currentOffset + display.diffPageSize)
+            else if (navigatePage("diff.next")) return
+          } else if (key.name === "pageup") {
+            if (currentOffset > 0) changesState.diffOffset = Math.max(0, currentOffset - display.diffPageSize)
+            else if (navigatePage("diff.prev")) return
+          } else if (key.name === "right") changesState.diffColumnOffset = Math.min(display.maxHorizontalOffset, changesState.diffColumnOffset + 8)
+          else if (key.name === "left") changesState.diffColumnOffset = Math.max(0, changesState.diffColumnOffset - 8)
+          else if (key.name === "home") changesState.diffColumnOffset = 0
+          else if (key.name === "end") changesState.diffColumnOffset = display.maxHorizontalOffset
+          else if (!key.ctrl && !key.meta && key.sequence?.toLowerCase() === "n") {
+            const next = display.hunkOffsets.find((offset) => offset > currentOffset)
+            if (next !== undefined) changesState.diffOffset = Math.min(display.maxDiffOffset, next)
+            else if (navigatePage("diff.next")) return
+          } else if (!key.ctrl && !key.meta && key.sequence?.toLowerCase() === "p") {
+            const previous = display.hunkOffsets.filter((offset) => offset < currentOffset).at(-1)
+            if (previous !== undefined) changesState.diffOffset = previous
+            else if (navigatePage("diff.prev")) return
+          }
           else if (key.name === "return" || key.name === "enter") changesState.focus = "files"
           redraw()
           return

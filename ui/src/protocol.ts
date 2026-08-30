@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 export const MAX_FRAME_BYTES = 256 << 10
 export const MAX_TEXT_BYTES = 64 << 10
 export const MAX_INPUT_BYTES = 4 << 10
@@ -12,18 +12,22 @@ export type TextField = { id: string; label: string; text: string }
 export type InputSpec = { allowed: boolean; masked: boolean; max_bytes: number }
 export type Action = { id: string; label: string; input: InputSpec }
 export type ChangeFile = { action_id: string; status: "A" | "M" | "D" | "R"; path: string; detail: string }
-export type UnifiedDiffRow = { kind: "hunk" | "context" | "add" | "delete"; old_line: number; new_line: number; text: string }
 export type DiffCell = { kind: "empty" | "context" | "add" | "delete"; line: number; text: string }
-export type SideBySideDiffRow = { kind: "hunk" | "content"; header: string; before: DiffCell; after: DiffCell }
+export type DiffRow = { kind: "hunk" | "content"; header: string; before: DiffCell; after: DiffCell }
 export type ChangesView = {
   summary: string
   layout: "unified" | "side-by-side"
   page: number
   pages: number
   selected_action_id: string
+  initial_focus: "files" | "diff"
+  initial_diff_position: "start" | "end"
+  diff_start: number
+  diff_total: number
+  diff_page: number
+  diff_pages: number
   files: ChangeFile[]
-  unified: UnifiedDiffRow[]
-  side_by_side: SideBySideDiffRow[]
+  rows: DiffRow[]
 }
 export type View = {
   version: number
@@ -87,25 +91,20 @@ function validateDiffCell(value: unknown, allowed: readonly string[]): value is 
 }
 
 function validateChanges(value: unknown, actions: Set<string>): value is ChangesView {
-  if (!record(value) || !exactKeys(value, ["summary", "layout", "page", "pages", "selected_action_id", "files", "unified", "side_by_side"]) ||
-    !safeText(value.summary, MAX_TEXT_BYTES) || !["unified", "side-by-side"].includes(String(value.layout)) ||
+  if (!record(value) || !exactKeys(value, ["summary", "layout", "page", "pages", "selected_action_id", "initial_focus", "initial_diff_position", "diff_start", "diff_total", "diff_page", "diff_pages", "files", "rows"]) ||
+    !safeText(value.summary, MAX_TEXT_BYTES) || value.layout !== "side-by-side" || !["files", "diff"].includes(String(value.initial_focus)) || !["start", "end"].includes(String(value.initial_diff_position)) ||
     !Number.isSafeInteger(value.page) || !Number.isSafeInteger(value.pages) || Number(value.page) <= 0 || Number(value.pages) < Number(value.page) ||
-    !safeText(value.selected_action_id, 64) || !Array.isArray(value.files) || value.files.length === 0 || value.files.length > 28 ||
-    !Array.isArray(value.unified) || value.unified.length > 1024 || !Array.isArray(value.side_by_side) || value.side_by_side.length > 1024) return false
+    !Number.isSafeInteger(value.diff_start) || !Number.isSafeInteger(value.diff_total) || !Number.isSafeInteger(value.diff_page) || !Number.isSafeInteger(value.diff_pages) || Number(value.diff_start) < 0 || Number(value.diff_total) < 0 || Number(value.diff_total) > 8192 || Number(value.diff_page) <= 0 || Number(value.diff_pages) < Number(value.diff_page) ||
+    !safeText(value.selected_action_id, 64) || !Array.isArray(value.files) || value.files.length === 0 || value.files.length > 26 ||
+    !Array.isArray(value.rows) || value.rows.length > 256) return false
+  if (value.diff_total === 0 ? value.diff_start !== 0 || value.rows.length !== 0 || value.diff_page !== 1 || value.diff_pages !== 1 : value.rows.length === 0 || Number(value.diff_start) >= Number(value.diff_total) || Number(value.diff_start) + value.rows.length > Number(value.diff_total)) return false
   const fileActions = new Set<string>()
   for (const file of value.files) {
     if (!record(file) || !exactKeys(file, ["action_id", "status", "path", "detail"]) || !idPattern.test(String(file.action_id)) || !["A", "M", "D", "R"].includes(String(file.status)) || !safeText(file.path, MAX_TEXT_BYTES) || file.path === "" || !safeText(file.detail, MAX_TEXT_BYTES) || !actions.has(String(file.action_id)) || fileActions.has(String(file.action_id))) return false
     fileActions.add(String(file.action_id))
   }
   if (!fileActions.has(String(value.selected_action_id))) return false
-  for (const row of value.unified) {
-    if (!record(row) || !exactKeys(row, ["kind", "old_line", "new_line", "text"]) || !safeText(row.kind, 16) || !safeText(row.text, MAX_TEXT_BYTES) || !Number.isSafeInteger(row.old_line) || !Number.isSafeInteger(row.new_line)) return false
-    if (row.kind === "hunk" ? row.text === "" || row.old_line !== 0 || row.new_line !== 0 :
-      row.kind === "context" ? Number(row.old_line) <= 0 || Number(row.new_line) <= 0 :
-      row.kind === "delete" ? Number(row.old_line) <= 0 || row.new_line !== 0 :
-      row.kind === "add" ? row.old_line !== 0 || Number(row.new_line) <= 0 : true) return false
-  }
-  for (const row of value.side_by_side) {
+  for (const row of value.rows) {
     if (!record(row) || !exactKeys(row, ["kind", "header", "before", "after"]) || !safeText(row.kind, 16) || !safeText(row.header, MAX_TEXT_BYTES)) return false
     if (row.kind === "hunk") {
       if (row.header === "" || !validateDiffCell(row.before, []) || !validateDiffCell(row.after, [])) return false

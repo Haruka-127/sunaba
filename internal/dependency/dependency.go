@@ -23,11 +23,13 @@ const (
 	OpenTUIVersion          = "0.5.9"
 	OpenTUISHA256           = "d9c9b952ff39a79ed52a7f2cb364977d9859b55cdc346bdbfa55b3d4bff77940"
 	OpenTUIIntegrity        = "sha512-d0EWYyp6djitu1N1R0o75NrLl4TxY3oJEmRNrX9vSKKC5/jriGQdSV6lJmwiB77O0cxtBnPzWztAV79vA1J2fA=="
-	SunabaUIVersion         = "2"
-	SunabaUISHA256          = "bda47df068d6b187399b8aaa3efd1fbc3155cb8957a17e2e8a63bec4e9277f7a"
-	PreviousSunabaUISHA256  = "97c224d92c992415014742908a71400c5500233e63aff4e543ee2be29e19f1e2"
-	EarlierSunabaUIV2SHA256 = "454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509"
-	OlderSunabaUIV2SHA256   = "2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2"
+	SunabaUIVersion         = "3"
+	SunabaUISHA256          = "24d6451d295b836cda3258ff283d900d009b174c402e4b4f4f263835ab9d95ed"
+	ProtocolV2UIVersion     = "2"
+	PreviousSunabaUISHA256  = "bda47df068d6b187399b8aaa3efd1fbc3155cb8957a17e2e8a63bec4e9277f7a"
+	EarlierSunabaUIV2SHA256 = "97c224d92c992415014742908a71400c5500233e63aff4e543ee2be29e19f1e2"
+	OlderSunabaUIV2SHA256   = "454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509"
+	OldestSunabaUIV2SHA256  = "2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2"
 	InitialSunabaUIV2SHA256 = "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
 	LegacySunabaUIVersion   = "1"
 	LegacySunabaUISHA256    = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
@@ -357,6 +359,7 @@ func LegacySunabaUIV1Manifest(pinned Manifest) Manifest {
 // bootstrap manifest. Exact full-manifest comparison is required before setup
 // may migrate its lock and Project policy.
 func PreviousSunabaUIV2Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.Version = ProtocolV2UIVersion
 	pinned.SunabaUI.SHA256 = PreviousSunabaUISHA256
 	return pinned
 }
@@ -364,6 +367,7 @@ func PreviousSunabaUIV2Manifest(pinned Manifest) Manifest {
 // EarlierSunabaUIV2Manifest retains the older exact protocol-v2 artifact so a
 // user who has not run the intervening setup migration can still upgrade.
 func EarlierSunabaUIV2Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.Version = ProtocolV2UIVersion
 	pinned.SunabaUI.SHA256 = EarlierSunabaUIV2SHA256
 	return pinned
 }
@@ -371,13 +375,23 @@ func EarlierSunabaUIV2Manifest(pinned Manifest) Manifest {
 // OlderSunabaUIV2Manifest retains an older exact protocol-v2 artifact for
 // users upgrading across multiple helper-only releases.
 func OlderSunabaUIV2Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.Version = ProtocolV2UIVersion
 	pinned.SunabaUI.SHA256 = OlderSunabaUIV2SHA256
+	return pinned
+}
+
+// OldestSunabaUIV2Manifest retains the oldest post-launch exact protocol-v2
+// artifact for users upgrading across multiple helper-only releases.
+func OldestSunabaUIV2Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.Version = ProtocolV2UIVersion
+	pinned.SunabaUI.SHA256 = OldestSunabaUIV2SHA256
 	return pinned
 }
 
 // InitialSunabaUIV2Manifest retains the first exact protocol-v2 artifact for
 // users upgrading across multiple helper-only releases.
 func InitialSunabaUIV2Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.Version = ProtocolV2UIVersion
 	pinned.SunabaUI.SHA256 = InitialSunabaUIV2SHA256
 	return pinned
 }
@@ -390,6 +404,7 @@ func MigratableBootstrapUIManifests(pinned Manifest) []Manifest {
 		PreviousSunabaUIV2Manifest(pinned),
 		EarlierSunabaUIV2Manifest(pinned),
 		OlderSunabaUIV2Manifest(pinned),
+		OldestSunabaUIV2Manifest(pinned),
 		InitialSunabaUIV2Manifest(pinned),
 	}
 }
