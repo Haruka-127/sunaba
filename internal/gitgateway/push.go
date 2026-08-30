@@ -129,9 +129,9 @@ func (e PushExecutor) runGit(ctx context.Context, operationArgs []string) error 
 	defer cancel()
 	command := exec.CommandContext(operationContext, gitPath, args...)
 	command.Dir = e.Resolver.RepositoryPath
-	configCount := "1"
+	configCount := "2"
 	if e.TLSCAInfoPath != "" {
-		configCount = "2"
+		configCount = "3"
 	}
 	command.Env = []string{
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -140,8 +140,10 @@ func (e PushExecutor) runGit(ctx context.Context, operationArgs []string) error 
 		"LC_ALL=C",
 		"PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
 		"GIT_CONFIG_COUNT=" + configCount,
-		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0=Authorization: " + e.AuthorizationHeader,
+		"GIT_CONFIG_KEY_0=http.followRedirects",
+		"GIT_CONFIG_VALUE_0=false",
+		"GIT_CONFIG_KEY_1=http.extraHeader",
+		"GIT_CONFIG_VALUE_1=Authorization: " + e.AuthorizationHeader,
 	}
 	if e.Resolver.ObjectDirectory != "" {
 		command.Env = append(command.Env,
@@ -151,8 +153,8 @@ func (e PushExecutor) runGit(ctx context.Context, operationArgs []string) error 
 	}
 	if e.TLSCAInfoPath != "" {
 		command.Env = append(command.Env,
-			"GIT_CONFIG_KEY_1=http.sslCAInfo",
-			"GIT_CONFIG_VALUE_1="+e.TLSCAInfoPath,
+			"GIT_CONFIG_KEY_2=http.sslCAInfo",
+			"GIT_CONFIG_VALUE_2="+e.TLSCAInfoPath,
 		)
 	}
 	command.Stdin = nil

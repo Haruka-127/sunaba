@@ -12,11 +12,55 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"sunaba/internal/audit"
 )
+
+func TestPushExecutorRejectsFixedUpstreamRedirect(t *testing.T) {
+	quarantine, _, _, _ := testBareRepository(t)
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var redirectedRequests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/approved.git/") {
+			http.Redirect(response, request, "/different.git/info/refs?service=git-upload-pack", http.StatusFound)
+			return
+		}
+		redirectedRequests.Add(1)
+		http.Error(response, "redirect target reached", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := PushExecutor{
+		Resolver: RepositoryResolver{
+			GitPath: gitPath, RepositoryPath: quarantine, ProjectID: "project", Repository: "repository",
+			RemoteName: "origin", RemoteURL: server.URL + "/approved.git",
+		},
+		AuthorizationHeader: "Bearer redirect-secret",
+		TLSCAInfoPath:       writeTestCertificate(t, root, server.Certificate()),
+		Audit:               recorder,
+		VMID:                "vm",
+		SessionID:           "session",
+	}
+	if err := executor.Sync(context.Background()); err == nil {
+		t.Fatal("fixed upstream redirect was accepted")
+	}
+	if reached := redirectedRequests.Load(); reached != 0 {
+		t.Fatalf("fixed upstream redirect target received %d request(s)", reached)
+	}
+}
 
 func TestPushExecutorTerminatesCredentialAndUsesExactObjectLease(t *testing.T) {
 	quarantine, first, second, _ := testBareRepository(t)
