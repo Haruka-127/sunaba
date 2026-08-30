@@ -3,9 +3,58 @@ package tui
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestPrepareViewNormalizesRequiredArrayFields(t *testing.T) {
+	view := View{
+		Version: ProtocolVersion, Type: "view", ScreenID: "home", Revision: 1,
+		Binding: Binding{ProcessID: 123, ProjectID: "project-1", Nonce: strings.Repeat("a", 64)}, Title: "Home",
+	}
+	if err := view.Validate(); err == nil {
+		t.Fatal("nil fields and actions passed the protocol contract")
+	}
+	prepared, err := PrepareView(view)
+	if err != nil || prepared.Fields == nil || prepared.Actions == nil {
+		t.Fatalf("prepared=%+v error=%v", prepared, err)
+	}
+	encoded, err := json.Marshal(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"fields":[]`)) || !bytes.Contains(encoded, []byte(`"actions":[]`)) {
+		t.Fatalf("required arrays were not encoded as arrays: %s", encoded)
+	}
+}
+
+func TestPrepareViewNormalizesStructuredChangesArrays(t *testing.T) {
+	view := View{
+		Version: ProtocolVersion, Type: "view", ScreenID: "changes", Revision: 1,
+		Binding: Binding{ProcessID: 123, ProjectID: "project-1", Nonce: strings.Repeat("a", 64)}, Title: "Changes",
+		Fields:  []TextField{},
+		Actions: []Action{{ID: "file.0", Label: "A test.txt"}},
+		Changes: &ChangesView{
+			Summary: "1 file", Layout: "unified", Page: 1, Pages: 1, SelectedActionID: "file.0",
+			Files: []ChangeFile{{ActionID: "file.0", Status: "A", Path: "test.txt"}},
+		},
+	}
+	if err := view.Validate(); err == nil {
+		t.Fatal("nil structured Changes arrays passed the protocol contract")
+	}
+	prepared, err := PrepareView(view)
+	if err != nil || prepared.Changes.Unified == nil || prepared.Changes.SideBySide == nil {
+		t.Fatalf("prepared=%+v error=%v", prepared, err)
+	}
+	encoded, err := json.Marshal(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"unified":[]`)) || !bytes.Contains(encoded, []byte(`"side_by_side":[]`)) {
+		t.Fatalf("structured Changes arrays were not encoded as arrays: %s", encoded)
+	}
+}
 
 func testView(t *testing.T) View {
 	t.Helper()

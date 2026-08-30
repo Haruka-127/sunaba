@@ -97,6 +97,12 @@ func (a *app) hasInteractiveTerminal() bool {
 }
 
 func (c *tuiCoordinator) view(screen, title string, fields []hosttui.TextField, actions []hosttui.Action) hosttui.View {
+	if fields == nil {
+		fields = []hosttui.TextField{}
+	}
+	if actions == nil {
+		actions = []hosttui.Action{}
+	}
 	revision := c.revision.Add(1)
 	return hosttui.View{Version: hosttui.ProtocolVersion, Type: "view", ScreenID: screen, Revision: revision, Title: title, Fields: fields, Actions: actions}
 }
@@ -166,20 +172,37 @@ func (a *app) exchangeUIView(ctx context.Context, projectID string, view hosttui
 		_ = endpoint.Close()
 	}()
 	event, eventErr := endpoint.ServeOnce(ctx, view)
-	if eventErr != nil {
-		_ = command.Process.Kill()
-	}
-	waitErr := <-wait
-	if eventErr != nil {
-		if waitErr != nil {
-			return hosttui.Event{}, errors.Join(fmt.Errorf("sunaba-ui did not return a complete event: %w", eventErr), fmt.Errorf("sunaba-ui exited unsuccessfully: %w", waitErr))
+	var waitErr error
+	killedByAuthority := false
+	if eventErr == nil {
+		waitErr = <-wait
+	} else {
+		select {
+		case waitErr = <-wait:
+		case <-time.After(250 * time.Millisecond):
+			if killErr := command.Process.Kill(); killErr == nil {
+				killedByAuthority = true
+			}
+			waitErr = <-wait
 		}
-		return hosttui.Event{}, fmt.Errorf("sunaba-ui did not return a complete event: %w", eventErr)
 	}
-	if waitErr != nil {
-		return hosttui.Event{}, fmt.Errorf("sunaba-ui exited unsuccessfully: %w", waitErr)
+	if err := uiExchangeResultError(eventErr, waitErr, killedByAuthority); err != nil {
+		return hosttui.Event{}, err
 	}
 	return event, nil
+}
+
+func uiExchangeResultError(eventErr, waitErr error, killedByAuthority bool) error {
+	if eventErr != nil {
+		if waitErr != nil && !killedByAuthority {
+			return errors.Join(fmt.Errorf("sunaba-ui did not return a complete event: %w", eventErr), fmt.Errorf("sunaba-ui exited unsuccessfully: %w", waitErr))
+		}
+		return fmt.Errorf("sunaba-ui did not return a complete event: %w", eventErr)
+	}
+	if waitErr != nil {
+		return fmt.Errorf("sunaba-ui exited unsuccessfully: %w", waitErr)
+	}
+	return nil
 }
 
 func uiHelperEnvironment(environment []string) []string {

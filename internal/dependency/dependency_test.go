@@ -74,6 +74,7 @@ func TestBootstrapAndUpdateGateBindExactUIArtifact(t *testing.T) {
 func TestCompiledUIContractRejectsPreviousAndSubstitutedArtifacts(t *testing.T) {
 	for name, manifest := range map[string]Manifest{
 		"previous protocol-v2 artifact": PreviousSunabaUIV2Manifest(MustPinned()),
+		"earlier protocol-v2 artifact":  EarlierSunabaUIV2Manifest(MustPinned()),
 		"substituted artifact": func() Manifest {
 			manifest := MustPinned()
 			manifest.SunabaUI.SHA256 = strings.Repeat("f", 64)
@@ -88,6 +89,20 @@ func TestCompiledUIContractRejectsPreviousAndSubstitutedArtifacts(t *testing.T) 
 	}
 	if err := ValidateCompiledUIContract(MustPinned()); err != nil {
 		t.Fatalf("current UI artifact was rejected: %v", err)
+	}
+}
+
+func TestMigratableBootstrapUIManifestsAreExactAndDistinct(t *testing.T) {
+	pinned := MustPinned()
+	seen := map[StandaloneArtifact]bool{pinned.SunabaUI: true}
+	for _, previous := range MigratableBootstrapUIManifests(pinned) {
+		if seen[previous.SunabaUI] {
+			t.Fatalf("duplicate migratable UI artifact: %+v", previous.SunabaUI)
+		}
+		seen[previous.SunabaUI] = true
+		if err := ValidateCompiledUIContract(previous); err == nil {
+			t.Fatalf("old UI artifact passed the current compiled contract: %+v", previous.SunabaUI)
+		}
 	}
 }
 

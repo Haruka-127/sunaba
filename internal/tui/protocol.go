@@ -163,7 +163,7 @@ func (v View) Validate() error {
 	if err := v.Binding.validate(); err != nil {
 		return err
 	}
-	if len(v.Fields) > MaxFields || len(v.Actions) > MaxActions || len(v.Title) > MaxTextBytes || SanitizeDisplayText(v.Title) != v.Title {
+	if v.Fields == nil || v.Actions == nil || len(v.Fields) > MaxFields || len(v.Actions) > MaxActions || len(v.Title) > MaxTextBytes || SanitizeDisplayText(v.Title) != v.Title {
 		return errors.New("invalid or unsanitized UI view content")
 	}
 	totalBytes := len(v.Title)
@@ -209,7 +209,7 @@ func (v View) Validate() error {
 }
 
 func (c ChangesView) validate(actions map[string]struct{}) (int, error) {
-	if c.Summary == "" || len(c.Summary) > MaxTextBytes || SanitizeDisplayText(c.Summary) != c.Summary || (c.Layout != "unified" && c.Layout != "side-by-side") || c.Page <= 0 || c.Pages < c.Page || len(c.Files) == 0 || len(c.Files) > MaxChangeFiles || len(c.Unified) > MaxDiffRows || len(c.SideBySide) > MaxDiffRows {
+	if c.Files == nil || c.Unified == nil || c.SideBySide == nil || c.Summary == "" || len(c.Summary) > MaxTextBytes || SanitizeDisplayText(c.Summary) != c.Summary || (c.Layout != "unified" && c.Layout != "side-by-side") || c.Page <= 0 || c.Pages < c.Page || len(c.Files) == 0 || len(c.Files) > MaxChangeFiles || len(c.Unified) > MaxDiffRows || len(c.SideBySide) > MaxDiffRows {
 		return 0, errors.New("structured Changes summary or bounds are invalid")
 	}
 	total := len(c.Summary) + len(c.Layout) + len(c.SelectedActionID)
@@ -299,6 +299,12 @@ func validSideBySideDiffRow(row SideBySideDiffRow) bool {
 // PrepareView is the mandatory sanitization seam for data that may originate
 // from a guest, repository, diff, or external error.
 func PrepareView(view View) (View, error) {
+	if view.Fields == nil {
+		view.Fields = []TextField{}
+	}
+	if view.Actions == nil {
+		view.Actions = []Action{}
+	}
 	view.Title = SanitizeDisplayText(view.Title)
 	for index := range view.Fields {
 		view.Fields[index].Label = SanitizeDisplayText(view.Fields[index].Label)
@@ -308,6 +314,15 @@ func PrepareView(view View) (View, error) {
 		view.Actions[index].Label = SanitizeDisplayText(view.Actions[index].Label)
 	}
 	if view.Changes != nil {
+		if view.Changes.Files == nil {
+			view.Changes.Files = []ChangeFile{}
+		}
+		if view.Changes.Unified == nil {
+			view.Changes.Unified = []UnifiedDiffRow{}
+		}
+		if view.Changes.SideBySide == nil {
+			view.Changes.SideBySide = []SideBySideDiffRow{}
+		}
 		view.Changes.Summary = SanitizeDisplayText(view.Changes.Summary)
 		for index := range view.Changes.Files {
 			view.Changes.Files[index].Path = SanitizeDisplayText(view.Changes.Files[index].Path)

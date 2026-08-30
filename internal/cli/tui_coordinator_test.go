@@ -38,11 +38,24 @@ func TestTUIChangesUsesStructuredRowsWithoutLayoutNewlines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(prepared.Fields) != 0 || prepared.Changes.SelectedActionID != "file.0" || prepared.Changes.Unified[1].Text != "test" || prepared.Changes.SideBySide[1].After.Line != 1 || strings.Contains(prepared.Changes.Unified[1].Text, "\n") {
+	if prepared.Fields == nil || len(prepared.Fields) != 0 || prepared.Changes.SelectedActionID != "file.0" || prepared.Changes.Unified[1].Text != "test" || prepared.Changes.SideBySide[1].After.Line != 1 || strings.Contains(prepared.Changes.Unified[1].Text, "\n") {
 		t.Fatalf("structured Changes view=%+v", prepared.Changes)
 	}
 	if summary := reviewSummary(screen.Files); !strings.Contains(summary, "1 file") || !strings.Contains(summary, "1 added") {
 		t.Fatalf("summary=%q", summary)
+	}
+}
+
+func TestUIExchangeDoesNotReportAuthorityInitiatedKillAsHelperFailure(t *testing.T) {
+	eventErr := errors.New("read UI frame header: EOF")
+	waitErr := errors.New("signal: killed")
+	err := uiExchangeResultError(eventErr, waitErr, true)
+	if err == nil || !strings.Contains(err.Error(), eventErr.Error()) || strings.Contains(err.Error(), waitErr.Error()) {
+		t.Fatalf("authority-initiated kill error=%v", err)
+	}
+	err = uiExchangeResultError(eventErr, waitErr, false)
+	if err == nil || !strings.Contains(err.Error(), eventErr.Error()) || !strings.Contains(err.Error(), waitErr.Error()) {
+		t.Fatalf("natural helper failure error=%v", err)
 	}
 }
 

@@ -175,3 +175,37 @@ export function makeEvent(view: View, kind: EventKind, actionID = "", input = ""
     error,
   }
 }
+
+function boundedErrorText(value: string): string {
+  let result = value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "?")
+  while (new TextEncoder().encode(result).byteLength > MAX_INPUT_BYTES) result = result.slice(0, -1)
+  return result
+}
+
+// A rejected authority view cannot authorize an action, but if its immutable
+// envelope is still bound to this helper process we can return a bounded
+// terminal_error instead of closing the socket with an opaque EOF.
+export function makeRejectedViewEvent(payload: Uint8Array, expected: { projectID: string; nonce: string }, message: string): UIEvent | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload))
+  } catch {
+    return undefined
+  }
+  if (!record(value) || value.version !== PROTOCOL_VERSION || value.type !== "view" || !screenIDs.has(String(value.screen_id)) || !Number.isSafeInteger(value.revision) || Number(value.revision) <= 0 || !validateBinding(value.binding)) return undefined
+  if (value.binding.project_id !== expected.projectID || value.binding.nonce !== expected.nonce) return undefined
+  const safeError = boundedErrorText(`sunaba-ui rejected the authority view: ${message}`)
+  return {
+    version: PROTOCOL_VERSION,
+    type: "event",
+    screen_id: String(value.screen_id),
+    revision: Number(value.revision),
+    binding: value.binding,
+    kind: "terminal_error",
+    action_id: "",
+    input: "",
+    capability: { color: process.env.NO_COLOR === undefined, unicode: true },
+    size: { width: Math.max(1, Math.min(1000, process.stdout.columns || 80)), height: Math.max(1, Math.min(1000, process.stdout.rows || 24)) },
+    error: safeError,
+  }
+}

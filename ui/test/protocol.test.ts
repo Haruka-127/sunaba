@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { MAX_FRAME_BYTES, PROTOCOL_VERSION, decodeFrame, encodeFrame, makeEvent, parseView, type View } from "../src/protocol"
+import { MAX_FRAME_BYTES, PROTOCOL_VERSION, decodeFrame, encodeFrame, makeEvent, makeRejectedViewEvent, parseView, type View } from "../src/protocol"
 
 const nonce = "a".repeat(64)
 const view: View = {
@@ -35,6 +35,16 @@ describe("bounded protocol", () => {
     const trailing = new Uint8Array(event.length + 1)
     trailing.set(event)
     expect(() => decodeFrame(trailing)).toThrow()
+  })
+
+  test("returns only a terminal error for a bound rejected view", () => {
+    const rejectedPayload = new TextEncoder().encode(JSON.stringify({ ...view, fields: null }))
+    expect(() => parseView(rejectedPayload, { projectID: "project-1", nonce })).toThrow()
+    const event = makeRejectedViewEvent(rejectedPayload, { projectID: "project-1", nonce }, "invalid view field")
+    expect(event?.kind).toBe("terminal_error")
+    expect(event?.action_id).toBe("")
+    expect(event?.error).toContain("rejected the authority view")
+    expect(makeRejectedViewEvent(rejectedPayload, { projectID: "project-1", nonce: "b".repeat(64) }, "invalid")).toBeUndefined()
   })
 
   test("rejects oversize frame before allocation", () => {

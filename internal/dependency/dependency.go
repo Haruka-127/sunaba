@@ -13,22 +13,23 @@ import (
 )
 
 const (
-	AppleContainerVersion    = "1.2.2"
-	AppleContainerCommit     = "0190097d06df0b9065f4c2d2c7873c649d81d493"
-	OpenCodeVersion          = "1.18.18"
-	OpenCodeCommit           = "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
-	BunVersion               = "1.3.14"
-	BunArchiveSHA256         = "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620"
-	BunExecutableSHA256      = "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233"
-	OpenTUIVersion           = "0.5.9"
-	OpenTUISHA256            = "d9c9b952ff39a79ed52a7f2cb364977d9859b55cdc346bdbfa55b3d4bff77940"
-	OpenTUIIntegrity         = "sha512-d0EWYyp6djitu1N1R0o75NrLl4TxY3oJEmRNrX9vSKKC5/jriGQdSV6lJmwiB77O0cxtBnPzWztAV79vA1J2fA=="
-	SunabaUIVersion          = "2"
-	SunabaUISHA256           = "2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2"
-	PreviousSunabaUIV2SHA256 = "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
-	LegacySunabaUIVersion    = "1"
-	LegacySunabaUISHA256     = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
-	UrfaveCLIVersion         = "v3.10.1"
+	AppleContainerVersion   = "1.2.2"
+	AppleContainerCommit    = "0190097d06df0b9065f4c2d2c7873c649d81d493"
+	OpenCodeVersion         = "1.18.18"
+	OpenCodeCommit          = "31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d"
+	BunVersion              = "1.3.14"
+	BunArchiveSHA256        = "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620"
+	BunExecutableSHA256     = "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233"
+	OpenTUIVersion          = "0.5.9"
+	OpenTUISHA256           = "d9c9b952ff39a79ed52a7f2cb364977d9859b55cdc346bdbfa55b3d4bff77940"
+	OpenTUIIntegrity        = "sha512-d0EWYyp6djitu1N1R0o75NrLl4TxY3oJEmRNrX9vSKKC5/jriGQdSV6lJmwiB77O0cxtBnPzWztAV79vA1J2fA=="
+	SunabaUIVersion         = "2"
+	SunabaUISHA256          = "454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509"
+	PreviousSunabaUISHA256  = "2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2"
+	EarlierSunabaUIV2SHA256 = "e1e1e266d2e079d20cd10d1787ab2b869109bcc6ca2dcae639acf977cc8d7176"
+	LegacySunabaUIVersion   = "1"
+	LegacySunabaUISHA256    = "27ee3bc850a2bb9d822d9b9c3af977aec148c40e1250acf9199736b2eb8521c6"
+	UrfaveCLIVersion        = "v3.10.1"
 )
 
 //go:embed manifest.json
@@ -350,12 +351,29 @@ func LegacySunabaUIV1Manifest(pinned Manifest) Manifest {
 	return pinned
 }
 
-// PreviousSunabaUIV2Manifest returns the only protocol-v2 bootstrap manifest
-// built before response transport completion was awaited. Exact full-manifest
-// comparison is required before setup may migrate its lock and Project policy.
+// PreviousSunabaUIV2Manifest returns the immediately previous protocol-v2
+// bootstrap manifest. Exact full-manifest comparison is required before setup
+// may migrate its lock and Project policy.
 func PreviousSunabaUIV2Manifest(pinned Manifest) Manifest {
-	pinned.SunabaUI.SHA256 = PreviousSunabaUIV2SHA256
+	pinned.SunabaUI.SHA256 = PreviousSunabaUISHA256
 	return pinned
+}
+
+// EarlierSunabaUIV2Manifest retains the older exact protocol-v2 artifact so a
+// user who has not run the intervening setup migration can still upgrade.
+func EarlierSunabaUIV2Manifest(pinned Manifest) Manifest {
+	pinned.SunabaUI.SHA256 = EarlierSunabaUIV2SHA256
+	return pinned
+}
+
+// MigratableBootstrapUIManifests returns only known exact bootstrap manifests.
+// Digest-only matches are intentionally insufficient for setup migration.
+func MigratableBootstrapUIManifests(pinned Manifest) []Manifest {
+	return []Manifest{
+		LegacySunabaUIV1Manifest(pinned),
+		PreviousSunabaUIV2Manifest(pinned),
+		EarlierSunabaUIV2Manifest(pinned),
+	}
 }
 
 func validateCandidateSyntax(m Manifest) error {

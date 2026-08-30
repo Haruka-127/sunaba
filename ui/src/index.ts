@@ -1,10 +1,11 @@
 import { CliRenderEvents, StyledText, TextRenderable, createCliRenderer, green, red, stringToStyledText, type CliRenderer, type KeyEvent, type TextChunk } from "@opentui/core"
-import { MAX_FRAME_BYTES, decodeFrame, encodeFrame, makeEvent, parseView, type UIEvent, type View } from "./protocol"
+import { MAX_FRAME_BYTES, decodeFrame, encodeFrame, makeEvent, makeRejectedViewEvent, parseView, type UIEvent, type View } from "./protocol"
 import { createFinisher } from "./lifecycle"
 import { changesActionIndexes, initialChangesState, renderChanges, type ChangesFocus, type ChangesState, type Segment } from "./changes"
 
 type Launch = { socket: string; projectID: string; nonce: string }
-type Transport = { socket: Bun.Socket<undefined>; view: View; closed: Promise<Error | undefined> }
+type TransportBase = { socket: Bun.Socket<undefined>; closed: Promise<Error | undefined> }
+type Transport = TransportBase & ({ kind: "view"; view: View } | { kind: "rejected"; event: UIEvent })
 
 function launchArguments(args: string[]): Launch {
   const values = new Map<string, string>()
@@ -44,17 +45,32 @@ async function connect(launch: Launch): Promise<Transport> {
           combined.set(received)
           combined.set(chunk, received.byteLength)
           received = combined
+          let decoded: ReturnType<typeof decodeFrame>
           try {
-            const decoded = decodeFrame(received)
-            if (!decoded.payload) return
-            const view = parseView(decoded.payload, launch)
-            settled = true
-            socket.ref()
-            resolve({ socket, view, closed })
+            decoded = decodeFrame(received)
           } catch (error) {
             settled = true
             socket.end()
             reject(error)
+            return
+          }
+          if (!decoded.payload) return
+          try {
+            const view = parseView(decoded.payload, launch)
+            settled = true
+            socket.ref()
+            resolve({ kind: "view", socket, view, closed })
+          } catch (error) {
+            settled = true
+            const message = error instanceof Error ? error.message : "invalid authority view"
+            const event = makeRejectedViewEvent(decoded.payload, launch, message)
+            if (event) {
+              socket.ref()
+              resolve({ kind: "rejected", socket, event, closed })
+            } else {
+              socket.end()
+              reject(error)
+            }
           }
         },
         error(_socket, error) {
@@ -126,7 +142,7 @@ function renderText(view: View, selected: number, inputMode: boolean, input: str
   return new StyledText(chunks)
 }
 
-async function run(transport: Transport): Promise<void> {
+async function run(transport: Extract<Transport, { kind: "view" }>): Promise<void> {
   let renderer: CliRenderer | undefined
   let finished = false
   let selected = 0
@@ -140,13 +156,7 @@ async function run(transport: Transport): Promise<void> {
     rejectCompletion = reject
   })
 
-  const finishOnce = createFinisher<UIEvent>(() => renderer?.destroy(), async (event) => {
-    const frame = encodeFrame(event)
-    const written = transport.socket.end(frame)
-    if (written !== frame.byteLength) throw new Error("failed to write the complete UI response")
-    const closeError = await transport.closed
-    if (closeError) throw closeError
-  })
+  const finishOnce = createFinisher<UIEvent>(() => renderer?.destroy(), (event) => sendEventAndWaitForClose(transport, event))
   const finish = (event: UIEvent) => {
     if (finished) return
     finished = true
@@ -267,9 +277,22 @@ async function run(transport: Transport): Promise<void> {
   await completion
 }
 
+async function sendEventAndWaitForClose(transport: TransportBase, event: UIEvent): Promise<void> {
+  const frame = encodeFrame(event)
+  const written = transport.socket.end(frame)
+  if (written !== frame.byteLength) throw new Error("failed to write the complete UI response")
+  const closeError = await transport.closed
+  if (closeError) throw closeError
+}
+
 async function main(): Promise<void> {
   const launch = launchArguments(Bun.argv.slice(2))
-  await run(await connect(launch))
+  const transport = await connect(launch)
+  if (transport.kind === "rejected") {
+    await sendEventAndWaitForClose(transport, transport.event)
+    return
+  }
+  await run(transport)
 }
 
 await main()

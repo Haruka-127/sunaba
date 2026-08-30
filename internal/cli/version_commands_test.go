@@ -354,6 +354,33 @@ func TestPreviousProtocolV2ArtifactRequiresExactSetupMigration(t *testing.T) {
 	}
 }
 
+func TestEarlierProtocolV2ArtifactRemainsEligibleForExactSetupMigration(t *testing.T) {
+	pinned := dependency.MustPinned()
+	previous := versionconfig.Lock{
+		SchemaVersion: versionconfig.SchemaVersion,
+		Generation:    8,
+		ResolvedAt:    time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC),
+		Manifest:      dependency.EarlierSunabaUIV2Manifest(pinned),
+	}
+	encoded, err := json.Marshal(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, previousDigest, err := decodeLegacyBootstrapLock(encoded, pinned)
+	if err != nil || previousDigest == "" || migrated.Generation != previous.Generation || !reflect.DeepEqual(migrated.Manifest, pinned) {
+		t.Fatalf("migrated=%+v digest=%q error=%v", migrated, previousDigest, err)
+	}
+
+	previous.Manifest.SunabaUI.SHA256 = strings.Repeat("f", 64)
+	encoded, err = json.Marshal(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := decodeLegacyBootstrapLock(encoded, pinned); err == nil {
+		t.Fatal("unknown protocol-v2 artifact was accepted for migration")
+	}
+}
+
 func TestLegacyBootstrapLockMigrationRollsBackPreparedFailure(t *testing.T) {
 	base, _ := filepath.EvalSymlinks(t.TempDir())
 	a := &app{

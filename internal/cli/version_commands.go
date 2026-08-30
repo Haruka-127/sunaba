@@ -722,7 +722,7 @@ func loadLegacyBootstrapLock(store *versionconfig.Store, pinned dependency.Manif
 func decodeLegacyBootstrapLock(data []byte, pinned dependency.Manifest) (versionconfig.Lock, string, error) {
 	var previous versionconfig.Lock
 	if err := securefs.DecodeStrictJSON(data, &previous); err == nil && previous.SchemaVersion == versionconfig.SchemaVersion && previous.Generation > 0 && !previous.ResolvedAt.IsZero() && previous.ResolvedAt.Location() == time.UTC {
-		for _, exactPreviousManifest := range []dependency.Manifest{dependency.LegacySunabaUIV1Manifest(pinned), dependency.PreviousSunabaUIV2Manifest(pinned)} {
+		for _, exactPreviousManifest := range dependency.MigratableBootstrapUIManifests(pinned) {
 			if !reflect.DeepEqual(previous.Manifest, exactPreviousManifest) {
 				continue
 			}

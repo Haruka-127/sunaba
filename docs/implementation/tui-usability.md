@@ -23,7 +23,7 @@
 ./scripts/build-ui.sh
 ```
 
-2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 15件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v2生成物SHA-256は`2a1670a64c2883458128fb85e9d9d26e77b16f29417205630c49c0ead8adc8a2`である。helperはterminal restore後もresponse frameのtransport closeまでmainを生存させる。利用者環境へのglobal installは行っていない。
+2026-08-30にproject-local Bunで再実行し、OpenTUI helper test 16件、TypeScript typecheck、standalone build、SHA-256照合、Mach-O/owner/mode/architecture検証がPASSした。protocol v2生成物SHA-256は`454e8f844e0ecb71d8d538e7b3c543b51fa51f8989dbff7e8054a1f60bd5e509`である。helperはterminal restore後もresponse frameのtransport closeまでmainを生存させ、authority viewの配列契約違反はbinding検証済みの`terminal_error`としてfail closedで返す。利用者環境へのglobal installは行っていない。
 
 ## 自動gate
 
