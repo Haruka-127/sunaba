@@ -87,7 +87,8 @@ func TestCleanupKeepsExactStoppedDevRecoveryWithoutProcessGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const projectID, vmID, sessionID = "0123456789ab", "vm123456", "session1"
+	const projectID, sessionID = "0123456789ab", "session1"
+	vmID := "v" + state.ProjectID(t.TempDir())
 	projectState := filepath.Join(root, "projects", projectID)
 	if err := os.MkdirAll(projectState, 0700); err != nil {
 		t.Fatal(err)
@@ -100,6 +101,7 @@ func TestCleanupKeepsExactStoppedDevRecoveryWithoutProcessGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
 	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "snapshot"), 0700); err != nil {
 		t.Fatal(err)

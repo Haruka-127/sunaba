@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"sunaba/internal/unixsocket"
 )
 
 const (
@@ -152,6 +154,9 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 		return fmt.Errorf("secure session Gateway socket mount count does not match policy")
 	}
 	gatewayPath := filepath.Join(canonical.SessionRoot, "model-gateway.sock")
+	if err := unixsocket.ValidatePath(gatewayPath); err != nil {
+		return fmt.Errorf("secure Gateway socket path: %w", err)
+	}
 	mount := spec.Mounts[0]
 	if mount.Type != "socket" || mount.Source != gatewayPath || mount.Target != SecureGatewayGuestPath || mount.ReadOnly {
 		return fmt.Errorf("secure session Gateway mount does not match Project/session policy")
@@ -161,6 +166,9 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	}
 	if canonical.GitGateway {
 		gitGatewayPath := filepath.Join(canonical.SessionRoot, "git-gateway.sock")
+		if err := unixsocket.ValidatePath(gitGatewayPath); err != nil {
+			return fmt.Errorf("secure Git Gateway socket path: %w", err)
+		}
 		gitMount := spec.Mounts[1]
 		if gitMount.Type != "socket" || gitMount.Source != gitGatewayPath || gitMount.Target != SecureGitGatewayGuestPath || gitMount.ReadOnly {
 			return fmt.Errorf("secure session Git Gateway mount does not match Project/session policy")
@@ -171,6 +179,9 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 	}
 	if canonical.WebGateway {
 		webGatewayPath := filepath.Join(canonical.SessionRoot, "web-gateway.sock")
+		if err := unixsocket.ValidatePath(webGatewayPath); err != nil {
+			return fmt.Errorf("secure Web Gateway socket path: %w", err)
+		}
 		webMount := spec.Mounts[wantMounts-1]
 		if webMount.Type != "socket" || webMount.Source != webGatewayPath || webMount.Target != SecureWebGatewayGuestPath || webMount.ReadOnly {
 			return fmt.Errorf("secure session Web Gateway mount does not match Project/session policy")
@@ -183,6 +194,9 @@ func ValidateSecureSessionSpec(spec ContainerSpec, policy SecureSessionPolicy) e
 		return fmt.Errorf("secure session requires exactly one Project-bound attach socket")
 	}
 	attachPath := filepath.Join(canonical.SessionRoot, "attach.sock")
+	if err := unixsocket.ValidatePath(attachPath); err != nil {
+		return fmt.Errorf("secure attach socket path: %w", err)
+	}
 	if spec.Sockets[0].HostPath != attachPath || spec.Sockets[0].GuestPath != SecureAttachGuestPath {
 		return fmt.Errorf("secure session attach socket does not match Project/session policy")
 	}

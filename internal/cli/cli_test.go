@@ -33,6 +33,16 @@ import (
 	"sunaba/internal/workspace"
 )
 
+func uniqueTestVMID(t *testing.T) string {
+	t.Helper()
+	return "v" + state.ProjectID(t.TempDir())
+}
+
+func cleanupTestRuntime(t *testing.T, runtimeBase string) {
+	t.Helper()
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+}
+
 func prepareTestSetup(t *testing.T, a *app) {
 	t.Helper()
 	if err := a.store.Init(); err != nil {
@@ -1171,7 +1181,8 @@ func TestExplicitDevRecoveryDiscardRequiresExactStoppedVMOwnership(t *testing.T)
 		t.Fatal(err)
 	}
 	projectRoot, _ := filepath.EvalSymlinks(t.TempDir())
-	const projectID, vmID, sessionID = "0123456789ab", "vm123456", "session1"
+	const projectID, sessionID = "0123456789ab", "session1"
+	vmID := uniqueTestVMID(t)
 	projectState := filepath.Join(storeRoot, "projects", projectID)
 	if err := os.MkdirAll(projectState, 0700); err != nil {
 		t.Fatal(err)
@@ -1181,6 +1192,7 @@ func TestExplicitDevRecoveryDiscardRequiresExactStoppedVMOwnership(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestRuntime(t, runtimeBase)
 	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
 	if err := os.MkdirAll(filepath.Join(runtimeRoot, "snapshot"), 0700); err != nil {
 		t.Fatal(err)
@@ -1231,7 +1243,7 @@ func TestExplicitDiscardRemovesUnrecordedStoppedSecureVM(t *testing.T) {
 	if err := store.Init(); err != nil {
 		t.Fatal(err)
 	}
-	const vmID = "vm123456"
+	vmID := uniqueTestVMID(t)
 	projectID := state.ProjectID(storeRoot)
 	projectState := filepath.Join(storeRoot, "projects", projectID)
 	if err := os.MkdirAll(projectState, 0700); err != nil {
@@ -1241,6 +1253,7 @@ func TestExplicitDiscardRemovesUnrecordedStoppedSecureVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestRuntime(t, runtimeBase)
 	if err := os.Mkdir(filepath.Join(runtimeBase, "sunaba-vm-"+vmID), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -1276,7 +1289,8 @@ func TestFrozenSecureExportRecoveryRetriesTheSameChangeSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const vmID, sessionID = "vm123456", "session1"
+	const sessionID = "session1"
+	vmID := uniqueTestVMID(t)
 	projectID := state.ProjectID(projectRoot)
 	projectState := filepath.Join(storeRoot, "projects", projectID)
 	if err := os.MkdirAll(projectState, 0700); err != nil {
@@ -1286,6 +1300,7 @@ func TestFrozenSecureExportRecoveryRetriesTheSameChangeSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestRuntime(t, runtimeBase)
 	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
 	snapshotRoot := filepath.Join(runtimeRoot, "snapshot")
 	mergedRoot := filepath.Join(runtimeRoot, "sunaba-quarantine-"+sessionID, "sunaba-merged-"+sessionID)
@@ -1363,6 +1378,7 @@ func TestFrozenSecureExportRecoveryRetriesTheSameChangeSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestRuntime(t, runtimeBase)
 	runtimeRoot = filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
 	mergedRoot = filepath.Join(runtimeRoot, "sunaba-quarantine-"+sessionID, "sunaba-merged-"+sessionID)
 	for _, directory := range []string{filepath.Join(runtimeRoot, "snapshot"), mergedRoot} {
@@ -1432,10 +1448,12 @@ func TestStaleSupervisorRecoveryRemovesOnlyBoundPrivateRuntime(t *testing.T) {
 	if err := os.Chmod(projectState, 0700); err != nil {
 		t.Fatal(err)
 	}
-	runtimeBase, err := recovery.NewRuntimeBase(projectState, "vm123456")
+	vmID := uniqueTestVMID(t)
+	runtimeBase, err := recovery.NewRuntimeBase(projectState, vmID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupTestRuntime(t, runtimeBase)
 	locator := filepath.Join(projectState, approvalControlLocator)
 	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
 		t.Fatal(err)
@@ -1450,32 +1468,48 @@ func TestStaleSupervisorRecoveryRemovesOnlyBoundPrivateRuntime(t *testing.T) {
 	}
 }
 
-func TestStaleSecureSupervisorRecoveryAcceptsOnlyBoundShortRuntime(t *testing.T) {
+func TestStaleSecureSupervisorRecoveryAcceptsBoundCurrentAndLegacyRuntime(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	const projectID, vmID = "0123456789ab", "vm123456"
+	const projectID = "0123456789ab"
 	projectState := filepath.Join(root, projectID)
 	if err := os.Mkdir(projectState, 0700); err != nil {
 		t.Fatal(err)
 	}
-	runtimeBase, err := recovery.NewSecureRuntimeBase(projectID, vmID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
-	locator := filepath.Join(projectState, approvalControlLocator)
-	if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := removeStaleSupervisor(projectState); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{locator, runtimeBase} {
-		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("stale secure path remained %s: %v", path, err)
+	for _, legacy := range []bool{false, true} {
+		name := "current"
+		if legacy {
+			name = "legacy"
 		}
+		t.Run(name, func(t *testing.T) {
+			vmID := uniqueTestVMID(t)
+			var runtimeBase string
+			var runtimeErr error
+			if legacy {
+				runtimeBase = recovery.LegacySecureRuntimeBase(projectID, vmID)
+				runtimeErr = os.Mkdir(runtimeBase, 0700)
+			} else {
+				runtimeBase, runtimeErr = recovery.NewSecureRuntimeBase(projectID, vmID)
+			}
+			if runtimeErr != nil {
+				t.Fatal(runtimeErr)
+			}
+			cleanupTestRuntime(t, runtimeBase)
+			locator := filepath.Join(projectState, approvalControlLocator)
+			if err := writePrivateJSON(locator, approvalLocator{Version: 1, Socket: filepath.Join(runtimeBase, approvalControlSocket)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := removeStaleSupervisor(projectState); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{locator, runtimeBase} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("stale secure path remained %s: %v", path, err)
+				}
+			}
+		})
 	}
 }
 
@@ -1484,7 +1518,8 @@ func TestClosedSupervisorSocketIsRecognizedAsStale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const projectID, vmID = "0123456789ab", "vm123456"
+	const projectID = "0123456789ab"
+	vmID := uniqueTestVMID(t)
 	projectState := filepath.Join(root, projectID)
 	if err := os.Mkdir(projectState, 0700); err != nil {
 		t.Fatal(err)
@@ -1493,7 +1528,7 @@ func TestClosedSupervisorSocketIsRecognizedAsStale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+	cleanupTestRuntime(t, runtimeBase)
 	socket := filepath.Join(runtimeBase, approvalControlSocket)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
 	if err != nil {
@@ -1529,7 +1564,8 @@ func TestStaleSupervisorRecoveryRefusesExactHeldVMGuard(t *testing.T) {
 	if err := store.Init(); err != nil {
 		t.Fatal(err)
 	}
-	const projectID, vmID = "0123456789ab", "vm123456"
+	const projectID = "0123456789ab"
+	vmID := uniqueTestVMID(t)
 	projectState := filepath.Join(storeRoot, "projects", projectID)
 	if err := os.MkdirAll(projectState, 0700); err != nil {
 		t.Fatal(err)
@@ -1538,7 +1574,7 @@ func TestStaleSupervisorRecoveryRefusesExactHeldVMGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeBase) })
+	cleanupTestRuntime(t, runtimeBase)
 	socket := filepath.Join(runtimeBase, approvalControlSocket)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
 	if err != nil {

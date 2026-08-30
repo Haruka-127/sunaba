@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"sunaba/internal/securefs"
+	"sunaba/internal/unixsocket"
 	"sunaba/internal/workspace"
 )
 
@@ -61,16 +63,30 @@ type PendingExport struct {
 	ChangeSetDigest string `json:"change_set_digest"`
 }
 
-func RuntimeBase(projectState, vmID string) string {
+func RuntimeBase(_ string, vmID string) string {
+	return filepath.Join(shortRuntimeRoot(), "sunaba-d-"+vmID)
+}
+
+func SecureRuntimeBase(_ string, vmID string) string {
+	return filepath.Join(shortRuntimeRoot(), "sunaba-s-"+vmID)
+}
+
+// LegacyRuntimeBase and LegacySecureRuntimeBase preserve exact validation for
+// recovery records created before runtime paths were shortened for sun_path.
+func LegacyRuntimeBase(projectState, vmID string) string {
 	return filepath.Join(projectState, "dev-recovery-"+vmID)
 }
 
-func SecureRuntimeBase(projectID, vmID string) string {
+func LegacySecureRuntimeBase(projectID, vmID string) string {
+	return filepath.Join(shortRuntimeRoot(), "sunaba-recovery-"+projectID+"-"+vmID)
+}
+
+func shortRuntimeRoot() string {
 	base := os.TempDir()
 	if info, err := os.Lstat("/private/tmp"); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 		base = "/private/tmp"
 	}
-	return filepath.Join(base, "sunaba-recovery-"+projectID+"-"+vmID)
+	return filepath.Clean(base)
 }
 
 func Path(projectState string) string { return filepath.Join(projectState, FileName) }
@@ -80,6 +96,9 @@ func NewRuntimeBase(projectState, vmID string) (string, error) {
 		return "", fmt.Errorf("invalid dev recovery runtime identity")
 	}
 	base := RuntimeBase(projectState, vmID)
+	if err := validateRuntimeSocketPaths(base, vmID); err != nil {
+		return "", err
+	}
 	if err := os.Mkdir(base, 0700); err != nil {
 		return "", err
 	}
@@ -91,10 +110,30 @@ func NewSecureRuntimeBase(projectID, vmID string) (string, error) {
 		return "", fmt.Errorf("invalid secure recovery runtime identity")
 	}
 	base := SecureRuntimeBase(projectID, vmID)
+	if err := validateRuntimeSocketPaths(base, vmID); err != nil {
+		return "", err
+	}
 	if err := os.Mkdir(base, 0700); err != nil {
 		return "", err
 	}
 	return base, nil
+}
+
+func validateRuntimeSocketPaths(base, vmID string) error {
+	root := filepath.Join(base, "sunaba-vm-"+vmID)
+	for _, path := range []string{
+		filepath.Join(root, "model-gateway.sock"),
+		filepath.Join(root, "git-gateway.sock"),
+		filepath.Join(root, "web-gateway.sock"),
+		filepath.Join(root, "attach.sock"),
+		filepath.Join(base, "approval-control.sock"),
+		filepath.Join(base, "git-hook-"+strings.Repeat("r", 32)+".sock"),
+	} {
+		if err := unixsocket.ValidatePath(path); err != nil {
+			return fmt.Errorf("runtime Unix socket path: %w", err)
+		}
+	}
+	return nil
 }
 
 func Save(projectState string, state State) error {
@@ -157,11 +196,15 @@ func validate(projectState string, state State) error {
 	if state.Version != Version || !identityPattern.MatchString(state.ProjectID) || !identityPattern.MatchString(state.VMID) || !identityPattern.MatchString(state.SessionID) || state.ProjectRoot == "" || !filepath.IsAbs(state.ProjectRoot) || state.CreatedAt.IsZero() || state.Reason == "" || (state.RuntimeMode() != "dev" && state.RuntimeMode() != "secure") {
 		return fmt.Errorf("dev recovery identity or schema is invalid")
 	}
-	expectedRuntimeBase := RuntimeBase(projectState, state.VMID)
+	expectedRuntimeBases := []string{RuntimeBase(projectState, state.VMID), LegacyRuntimeBase(projectState, state.VMID)}
 	if state.RuntimeMode() == "secure" {
-		expectedRuntimeBase = SecureRuntimeBase(state.ProjectID, state.VMID)
+		expectedRuntimeBases = []string{SecureRuntimeBase(state.ProjectID, state.VMID), LegacySecureRuntimeBase(state.ProjectID, state.VMID)}
 	}
-	if state.Container != "sunaba-"+state.ProjectID+"-"+state.VMID || state.RuntimeBase != expectedRuntimeBase || state.RuntimeRoot != filepath.Join(state.RuntimeBase, "sunaba-vm-"+state.VMID) || state.WorkspacePath != "/workspace/sunaba-"+state.VMID || state.Baseline.Root != state.ProjectRoot {
+	matchesRuntimeBase := false
+	for _, expected := range expectedRuntimeBases {
+		matchesRuntimeBase = matchesRuntimeBase || state.RuntimeBase == expected
+	}
+	if state.Container != "sunaba-"+state.ProjectID+"-"+state.VMID || !matchesRuntimeBase || state.RuntimeRoot != filepath.Join(state.RuntimeBase, "sunaba-vm-"+state.VMID) || state.WorkspacePath != "/workspace/sunaba-"+state.VMID || state.Baseline.Root != state.ProjectRoot {
 		return fmt.Errorf("dev recovery paths do not match its Project and VM identity")
 	}
 	if len(state.ExportPolicyDigest) != 64 || len(state.Baseline.Digest) != 64 {

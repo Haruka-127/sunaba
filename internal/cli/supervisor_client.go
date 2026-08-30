@@ -23,6 +23,7 @@ import (
 	"sunaba/internal/lease"
 	"sunaba/internal/recovery"
 	"sunaba/internal/trustedui"
+	"sunaba/internal/unixsocket"
 )
 
 var errNoSupervisor = errors.New("no active Project supervisor")
@@ -45,7 +46,7 @@ func openSupervisorClient(projectState string) (*supervisorClient, error) {
 	var locator approvalLocator
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&locator) != nil || decoder.Decode(&struct{}{}) != io.EOF || locator.Version != 1 || filepath.Base(locator.Socket) != approvalControlSocket || !filepath.IsAbs(locator.Socket) || filepath.Clean(locator.Socket) != locator.Socket || verifyPrivateDirectory(filepath.Dir(locator.Socket)) != nil {
+	if decoder.Decode(&locator) != nil || decoder.Decode(&struct{}{}) != io.EOF || locator.Version != 1 || filepath.Base(locator.Socket) != approvalControlSocket || unixsocket.ValidatePath(locator.Socket) != nil || verifyPrivateDirectory(filepath.Dir(locator.Socket)) != nil {
 		return nil, fmt.Errorf("active supervisor locator is unsafe")
 	}
 	info, err := os.Lstat(locator.Socket)
@@ -315,16 +316,27 @@ func staleSupervisorPaths(projectState string) (locatorPath, runtimeBase, vmID s
 	}
 	runtimeBase = filepath.Dir(locator.Socket)
 	projectID := filepath.Base(projectState)
-	devPrefix := "dev-recovery-"
-	securePrefix := "sunaba-recovery-" + projectID + "-"
 	baseName := filepath.Base(runtimeBase)
-	vmID = strings.TrimPrefix(baseName, devPrefix)
-	expected := recovery.RuntimeBase(projectState, vmID)
-	if vmID == baseName {
-		vmID = strings.TrimPrefix(baseName, securePrefix)
-		expected = recovery.SecureRuntimeBase(projectID, vmID)
+	type runtimeCandidate struct {
+		prefix   string
+		expected func(string) string
 	}
-	if vmID == baseName || vmID == "" || runtimeBase != expected || verifyPrivateDirectory(runtimeBase) != nil {
+	candidates := []runtimeCandidate{
+		{prefix: "sunaba-d-", expected: func(candidate string) string { return recovery.RuntimeBase(projectState, candidate) }},
+		{prefix: "dev-recovery-", expected: func(candidate string) string { return recovery.LegacyRuntimeBase(projectState, candidate) }},
+		{prefix: "sunaba-s-", expected: func(candidate string) string { return recovery.SecureRuntimeBase(projectID, candidate) }},
+		{prefix: "sunaba-recovery-" + projectID + "-", expected: func(candidate string) string { return recovery.LegacySecureRuntimeBase(projectID, candidate) }},
+	}
+	expected := ""
+	for _, candidate := range candidates {
+		if !strings.HasPrefix(baseName, candidate.prefix) {
+			continue
+		}
+		vmID = strings.TrimPrefix(baseName, candidate.prefix)
+		expected = candidate.expected(vmID)
+		break
+	}
+	if vmID == "" || expected == "" || runtimeBase != expected || verifyPrivateDirectory(runtimeBase) != nil {
 		return "", "", "", fmt.Errorf("stale supervisor runtime directory is unsafe")
 	}
 	return locatorPath, runtimeBase, vmID, nil

@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	corecapability "sunaba/internal/capability"
+	"sunaba/internal/unixsocket"
 )
 
 type ReceiveConfig struct {
@@ -59,7 +60,7 @@ func NewReceiveGateway(config ReceiveConfig) (*ReceiveGateway, error) {
 	if config.GuestRepositoryPath != "/"+filepath.Base(repository) || !strings.HasSuffix(config.GuestRepositoryPath, ".git") {
 		return nil, fmt.Errorf("Git receive guest path must exactly identify the host quarantine")
 	}
-	if len(config.HookToken) < 32 || !filepathIsPrivateSocketParent(config.HookSocketPath) || config.MaxRequestBytes <= 0 || config.MaxResponseBytes <= 0 || config.MaxConcurrent <= 0 || config.BeforeAdvertise == nil || config.Audit == nil {
+	if len(config.HookToken) < 32 || !filepathIsPrivateSocketParent(config.HookSocketPath) || unixsocket.ValidatePath(config.HookSocketPath) != nil || config.MaxRequestBytes <= 0 || config.MaxResponseBytes <= 0 || config.MaxConcurrent <= 0 || config.BeforeAdvertise == nil || config.Audit == nil {
 		return nil, fmt.Errorf("Git receive gateway limits and hook channel are invalid")
 	}
 	capability := config.Capability

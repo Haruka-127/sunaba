@@ -22,6 +22,7 @@ import (
 	"sunaba/internal/runtime"
 	"sunaba/internal/session"
 	"sunaba/internal/trustedui"
+	"sunaba/internal/unixsocket"
 )
 
 const approvalControlSocket = "approval-control.sock"
@@ -458,6 +459,9 @@ func startApprovalControl(projectState, runtimeBase string, broker pushApprovalB
 		return nil, err
 	}
 	path := filepath.Join(runtimeBase, approvalControlSocket)
+	if err := unixsocket.ValidatePath(path); err != nil {
+		return nil, fmt.Errorf("approval control socket path: %w", err)
+	}
 	if info, err := os.Lstat(path); err == nil {
 		var stat unix.Stat_t
 		if unix.Lstat(path, &stat) != nil || info.Mode()&os.ModeSocket == 0 || stat.Uid != uint32(os.Geteuid()) {
@@ -665,7 +669,7 @@ func (a *app) approveActivePushes(ctx context.Context, projectState string) (int
 	var locator approvalLocator
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&locator) != nil || decoder.Decode(&struct{}{}) != io.EOF || locator.Version != 1 || filepath.Base(locator.Socket) != approvalControlSocket || !filepath.IsAbs(locator.Socket) || filepath.Clean(locator.Socket) != locator.Socket || verifyPrivateDirectory(filepath.Dir(locator.Socket)) != nil {
+	if decoder.Decode(&locator) != nil || decoder.Decode(&struct{}{}) != io.EOF || locator.Version != 1 || filepath.Base(locator.Socket) != approvalControlSocket || unixsocket.ValidatePath(locator.Socket) != nil || verifyPrivateDirectory(filepath.Dir(locator.Socket)) != nil {
 		return 0, fmt.Errorf("active approval control locator is unsafe")
 	}
 	path := locator.Socket

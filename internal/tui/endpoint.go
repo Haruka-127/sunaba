@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"sunaba/internal/unixsocket"
 )
 
 const (
@@ -87,6 +89,10 @@ func NewEndpoint(tempRoot, projectID string) (*Endpoint, error) {
 		return nil, err
 	}
 	socket := filepath.Join(directory, "ui.sock")
+	if err := unixsocket.ValidatePath(socket); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("UI socket path: %w", err)
+	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
 	if err != nil {
 		cleanup()

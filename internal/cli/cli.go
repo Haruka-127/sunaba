@@ -1100,18 +1100,24 @@ func (a *app) discardUnrecordedStoppedVMs(ctx context.Context, projectID string)
 		}
 		removeErr := a.runtime.Remove(ctx, info.Name)
 		if removeErr == nil {
-			runtimeBase := recovery.RuntimeBase(filepath.Join(a.store.Root, "projects", projectID), vmID)
+			projectState := filepath.Join(a.store.Root, "projects", projectID)
+			runtimeBases := []string{recovery.RuntimeBase(projectState, vmID), recovery.LegacyRuntimeBase(projectState, vmID)}
 			if mode == "secure" {
-				runtimeBase = recovery.SecureRuntimeBase(projectID, vmID)
+				runtimeBases = []string{recovery.SecureRuntimeBase(projectID, vmID), recovery.LegacySecureRuntimeBase(projectID, vmID)}
 			}
-			if _, statErr := os.Lstat(runtimeBase); statErr == nil {
-				if verifyPrivateDirectory(runtimeBase) != nil {
-					removeErr = fmt.Errorf("refusing to remove unsafe stopped VM runtime: %s", runtimeBase)
-				} else {
-					removeErr = os.RemoveAll(runtimeBase)
+			for _, runtimeBase := range runtimeBases {
+				if _, statErr := os.Lstat(runtimeBase); statErr == nil {
+					if verifyPrivateDirectory(runtimeBase) != nil {
+						removeErr = fmt.Errorf("refusing to remove unsafe stopped VM runtime: %s", runtimeBase)
+					} else {
+						removeErr = os.RemoveAll(runtimeBase)
+					}
+				} else if !errors.Is(statErr, os.ErrNotExist) {
+					removeErr = statErr
 				}
-			} else if !errors.Is(statErr, os.ErrNotExist) {
-				removeErr = statErr
+				if removeErr != nil {
+					break
+				}
 			}
 		}
 		event.Outcome = "allowed"

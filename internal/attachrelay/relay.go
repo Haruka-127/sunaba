@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"sunaba/internal/terminal"
+	"sunaba/internal/unixsocket"
 )
 
 const maximumJSONResponse = 16 << 20
@@ -40,6 +41,9 @@ type Relay struct {
 func (r Relay) ListenAndServe(ctx context.Context) (string, <-chan error, error) {
 	if r.UnixSocketPath == "" || r.Username != "opencode" || len(r.Password) < 32 {
 		return "", nil, fmt.Errorf("attach relay requires the session Unix socket and Basic authentication")
+	}
+	if err := unixsocket.ValidatePath(r.UnixSocketPath); err != nil {
+		return "", nil, fmt.Errorf("attach relay socket path: %w", err)
 	}
 	info, err := os.Lstat(r.UnixSocketPath)
 	if err != nil {

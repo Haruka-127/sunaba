@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"sunaba/internal/terminal"
+	"sunaba/internal/unixsocket"
 )
 
 const maxHookMessageBytes = 256 << 10
@@ -54,6 +55,9 @@ type HookBroker struct {
 func StartHookBroker(ctx context.Context, socketPath, token string, approvals *PushApprovalManager, executor PushExecutor, lifetime time.Duration, now func() time.Time) (*HookBroker, error) {
 	if !filepathIsPrivateSocketParent(socketPath) {
 		return nil, fmt.Errorf("Git hook broker requires a private canonical socket parent")
+	}
+	if err := unixsocket.ValidatePath(socketPath); err != nil {
+		return nil, fmt.Errorf("Git hook broker socket path: %w", err)
 	}
 	if len(token) < 32 || approvals == nil || executor.Approvals != approvals || lifetime <= 0 || lifetime > 5*time.Minute {
 		return nil, fmt.Errorf("Git hook broker identity, approval manager, or lifetime is invalid")

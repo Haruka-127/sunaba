@@ -9,6 +9,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"sunaba/internal/unixsocket"
 )
 
 const (
@@ -41,6 +43,9 @@ func (r TCPToUnixRelay) Serve(ctx context.Context) error {
 	if err != nil || host != "127.0.0.1" || r.SocketPath == "" {
 		return fmt.Errorf("TCP-to-Unix relay requires an explicit guest 127.0.0.1 listener and Unix socket target")
 	}
+	if err := unixsocket.ValidatePath(r.SocketPath); err != nil {
+		return fmt.Errorf("TCP-to-Unix target path: %w", err)
+	}
 	info, err := os.Lstat(r.SocketPath)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
 		return fmt.Errorf("TCP-to-Unix target is not a Unix socket")
@@ -64,6 +69,9 @@ func (r TCPToUnixRelay) Serve(ctx context.Context) error {
 func (r Relay) Serve(ctx context.Context) error {
 	if r.SocketPath == "" || r.Target == "" {
 		return fmt.Errorf("socket path and target are required")
+	}
+	if err := unixsocket.ValidatePath(r.SocketPath); err != nil {
+		return fmt.Errorf("relay socket path: %w", err)
 	}
 	settings, err := relaySettingsFor(r.MaxConnections, r.DialTimeout, r.IdleTimeout)
 	if err != nil {

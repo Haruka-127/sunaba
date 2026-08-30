@@ -29,6 +29,7 @@ import (
 	"sunaba/internal/recovery"
 	"sunaba/internal/runtime"
 	"sunaba/internal/state"
+	"sunaba/internal/unixsocket"
 	"sunaba/internal/workspace"
 )
 
@@ -599,6 +600,9 @@ func (s *Session) startGateway() error {
 
 func (s *Session) startUnixGateway(name string, handler http.Handler) (*http.Server, chan error, error) {
 	path := filepath.Join(s.Root, name)
+	if err := unixsocket.ValidatePath(path); err != nil {
+		return nil, nil, fmt.Errorf("Gateway socket path: %w", err)
+	}
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, nil, fmt.Errorf("Gateway path was replaced with a non-socket")
