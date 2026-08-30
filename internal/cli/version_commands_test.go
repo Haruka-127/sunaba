@@ -202,7 +202,7 @@ func TestProtocolV1UIFullLockRequiresExactSetupMigration(t *testing.T) {
 	base, _ := filepath.EvalSymlinks(t.TempDir())
 	a := &app{
 		store: &state.Store{Root: filepath.Join(base, "data", "sunaba")}, configs: &projectconfig.Store{Root: filepath.Join(base, "config", "sunaba")},
-		output: io.Discard, errors: io.Discard,
+		runtime: &projectListRuntime{}, output: io.Discard, errors: io.Discard,
 	}
 	if err := a.store.Init(); err != nil {
 		t.Fatal(err)
@@ -232,6 +232,36 @@ func TestProtocolV1UIFullLockRequiresExactSetupMigration(t *testing.T) {
 	migrated, previousDigest, _, err := loadLegacyBootstrapLock(versions, pinned)
 	if err != nil || previousDigest == "" || migrated.Generation != previous.Generation || !reflect.DeepEqual(migrated.Manifest, pinned) {
 		t.Fatalf("migrated=%+v digest=%q error=%v", migrated, previousDigest, err)
+	}
+	projectRoot := filepath.Join(base, "project")
+	if err := os.Mkdir(projectRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectPolicy, err := policy.New(projectRoot, previousDigest, pinned.OpenCode.Version, pinned.AppleContainer.Version, pinned.AgentImage.Tag, "secure", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectState := filepath.Join(a.store.Root, "projects", projectPolicy.ProjectID)
+	if err := os.Mkdir(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(projectState, "policy.json")
+	if err := policy.Save(policyPath, projectPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.inventoryBootstrapProjectsForSetup(context.Background(), pinned, ""); err == nil {
+		t.Fatal("protocol-v1 Project dependency passed without its verified migration source digest")
+	}
+	projects, migrationNeeded, err := a.inventoryBootstrapProjectsForSetup(context.Background(), pinned, previousDigest)
+	if err != nil || len(projects) != 1 || !migrationNeeded {
+		t.Fatalf("projects=%+v migrationNeeded=%t error=%v", projects, migrationNeeded, err)
+	}
+	projectPolicy.Dependency.ManifestSHA256 = strings.Repeat("f", 64)
+	if err := policy.Save(policyPath, projectPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.inventoryBootstrapProjectsForSetup(context.Background(), pinned, previousDigest); err == nil {
+		t.Fatal("modified protocol-v1 Project dependency was accepted for migration")
 	}
 	previous.Manifest.OpenTUI.Version = "0.5.8"
 	if encoded, err := json.Marshal(previous); err != nil {

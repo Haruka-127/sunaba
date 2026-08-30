@@ -623,7 +623,7 @@ func (a *app) setup(ctx context.Context, configOnly bool) error {
 		generation = lock.Generation
 	}
 	newLock := versionconfig.Lock{SchemaVersion: versionconfig.SchemaVersion, Generation: generation, ResolvedAt: time.Now().UTC(), Manifest: manifest}
-	projects, migrationNeeded, err := a.inventoryBootstrapProjectsForSetup(ctx, manifest)
+	projects, migrationNeeded, err := a.inventoryBootstrapProjectsForSetup(ctx, manifest, legacyManifestDigest)
 	if err != nil {
 		return err
 	}
@@ -738,7 +738,7 @@ func legacyBootstrapManifestDigest(manifest dependency.Manifest) (string, error)
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func (a *app) inventoryBootstrapProjectsForSetup(ctx context.Context, manifest dependency.Manifest) ([]updateProject, bool, error) {
+func (a *app) inventoryBootstrapProjectsForSetup(ctx context.Context, manifest dependency.Manifest, migrationSourceDigest string) ([]updateProject, bool, error) {
 	items, err := a.runtime.List(ctx)
 	if err != nil {
 		return nil, false, err
@@ -764,6 +764,18 @@ func (a *app) inventoryBootstrapProjectsForSetup(ctx context.Context, manifest d
 	if err != nil {
 		return nil, false, err
 	}
+	allowedDigests := map[string]struct{}{
+		canonicalDigest:       {},
+		legacyDigest:          {},
+		legacyCanonicalDigest: {},
+	}
+	if migrationSourceDigest != "" {
+		decoded, err := hex.DecodeString(migrationSourceDigest)
+		if err != nil || len(decoded) != sha256.Size {
+			return nil, false, fmt.Errorf("invalid setup migration source digest")
+		}
+		allowedDigests[migrationSourceDigest] = struct{}{}
+	}
 	projects := make([]updateProject, 0, len(states))
 	migrationNeeded := false
 	for _, projectState := range states {
@@ -777,7 +789,8 @@ func (a *app) inventoryBootstrapProjectsForSetup(ctx context.Context, manifest d
 		}
 		path := filepath.Join(projectState.Path, "policy.json")
 		loaded, _, err := policy.LoadReadOnly(path, time.Now())
-		if err != nil || loaded.ProjectID != projectState.ProjectID || loaded.Dependency.OpenCode != manifest.OpenCode.Version || loaded.Dependency.AppleContainer != manifest.AppleContainer.Version || loaded.Dependency.AgentImage != manifest.AgentImage.Tag || (loaded.Dependency.ManifestSHA256 != canonicalDigest && loaded.Dependency.ManifestSHA256 != legacyDigest && loaded.Dependency.ManifestSHA256 != legacyCanonicalDigest) {
+		_, digestAllowed := allowedDigests[loaded.Dependency.ManifestSHA256]
+		if err != nil || loaded.ProjectID != projectState.ProjectID || loaded.Dependency.OpenCode != manifest.OpenCode.Version || loaded.Dependency.AppleContainer != manifest.AppleContainer.Version || loaded.Dependency.AgentImage != manifest.AgentImage.Tag || !digestAllowed {
 			return nil, false, fmt.Errorf("Project %s does not match the bootstrap dependency contract", projectState.ProjectID)
 		}
 		migrationNeeded = migrationNeeded || loaded.Dependency.ManifestSHA256 != canonicalDigest
