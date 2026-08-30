@@ -58,39 +58,44 @@ sudo ./bin/sunaba firewall status
 - `/sbin/pfctl -s info` でpfの有効状態を確認する
 - `/sbin/pfctl -a sunaba -sr` で sunaba anchor のルール状態を確認する
 
-## 許可するmacOS Keychain操作
+## 許可するOpenAI認証情報file操作
 
-Host Model Gateway用OpenAI API keyは固定service `dev.sunaba.openai`、固定account `openai-api-key`、Codex OAuth credentialは同じserviceの固定account `codex-oauth`のgeneric passwordとしてlogin Keychainへ保存する。許可する入口はsunabaの次のサブコマンドに限定する。
+Host Model Gateway用OpenAI API keyとCodex OAuth credentialは、次のhost-only fileへ保存する。
+
+```text
+${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/credentials/openai.json
+```
+
+activeな認証方式だけは、secretを含まない次のglobal設定へ保存する。
+
+```text
+${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/settings.json
+```
+
+許可する入口はsunaba TUIのSetupと`Settings > AI connection`、および次のサブコマンドに限定する。
 
 ```sh
-sunaba credentials openai set
-sunaba credentials openai status
-sunaba credentials openai delete
 sunaba credentials openai api-key set
 sunaba credentials openai api-key status
 sunaba credentials openai api-key delete
 sunaba credentials openai oauth login
 sunaba credentials openai oauth status
 sunaba credentials openai oauth delete
+sunaba model auth api-key
+sunaba model auth oauth
 ```
 
-内部では固定パス`/usr/bin/security`の次の操作だけを使う。
-
-```sh
-/usr/bin/security login-keychain
-/usr/bin/security add-generic-password -U -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path> -w
-/usr/bin/security find-generic-password -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path>
-/usr/bin/security find-generic-password -a openai-api-key -s dev.sunaba.openai -w <verified-login-keychain-path>
-/usr/bin/security delete-generic-password -a openai-api-key -s dev.sunaba.openai <verified-login-keychain-path>
-```
-
-- `add-generic-password`の`-w`は必ず最後の引数とし、API keyはKeychain自身の対話promptから入力する。OAuth credentialは`security -w`の対話入力上限を超え得るため、このコマンドでは保存しない
-- OAuth credentialの保存・読取・存在確認・rotation・削除に限り、Security.frameworkの`SecKeychainOpen`、`SecKeychainFindGenericPassword`、`SecKeychainAddGenericPassword`、`SecKeychainItemModifyAttributesAndData`、`SecKeychainItemFreeContent`、`SecKeychainItemDelete`を使って、検証済みlogin Keychainのservice `dev.sunaba.openai`、account `codex-oauth`だけを操作してよい。bounded JSONはsunaba process memoryとAPIの間だけで受け渡し、argv、environment、file、auditへ載せない
-- OAuth device flowとrefreshでは固定OpenAI endpointへのHTTPS通信だけを行う。verification URLを表示するがブラウザやGUI applicationを自動起動しない
-- `login-keychain`のbounded outputからquoted absolute clean pathだけを受理し、同じ操作内の明示的なkeychain引数として使う
-- service/account、security executable、native Keychain API、Keychain search listをguestまたはProject policyから変更させない
-- `-A`、password値付き`-w`、任意itemの列挙・削除、login Keychain以外の作成、Keychain設定変更を行わない
-- 実Keychainを変更するintegration testは自動実行しない。固定command pathとnative storeをtest seamで差し替えたfakeだけを使う
+- credential directoryとglobal設定directoryはcurrent user所有、mode `0700`、canonical absolute path、symlinkを含まない場合だけ作成・利用する
+- credential file、global設定file、固定lock file、一時fileはcurrent user所有のmode `0600` regular fileに限定し、symlink、hardlink、別owner、別mode、上限超過を拒否する
+- credential fileとglobal設定はstrictなversion付きJSONとし、unknown field、trailing data、control文字、不正なcredential、上限超過をfile全体として拒否する
+- 読取は`O_NOFOLLOW`相当で行い、open後にもtype、owner、mode、link count、sizeを検証する
+- 更新は同一directoryの新規一時fileへ完全に書き込み、file `fsync`、atomic rename、directory `fsync`の順で行う。既存のunsafe fileを置換しない
+- owner-onlyの固定lock fileでAPI key更新、OAuth login、OAuth refresh rotation、削除をprocess間で直列化する。一方のcredentialだけを変更し、他方を保持する
+- API keyとOAuth credentialをargv、environment、Project file、global設定、VM input、Host/OpenCode TUI、log、error、auditへ載せない
+- API keyはTUIではmaskし、CLIの対話TTYでもechoしない。boundedな1入力として扱い、履歴へ残さない
+- OAuth device flowとrefreshでは固定OpenAI endpointへのHTTPS通信だけを行う。verification URLを表示するがbrowserやGUI applicationを自動起動しない
+- macOS Keychain、`/usr/bin/security`、Security.frameworkをread、write、enumerate、deleteに使用しない。既存の`dev.sunaba.openai` itemを移行または自動削除しない
+- unit testはOS temp内の`XDG_DATA_HOME`と`XDG_CONFIG_HOME`へ隔離する。実OpenAI認証と実credential fileを使うtestは外部認証・課金を伴うlive gateとして個別承認なしに実行しない
 
 ## 許可する container 操作
 

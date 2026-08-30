@@ -6,6 +6,7 @@ OpenCodeをProject専用のApple Container VMで安全に実行する基盤、su
 
 - 作業前に[`docs/plan/README.md`](docs/plan/README.md)を読み、そこから参照される現在の正本文書に従う
 - 製品仕様とセキュリティ判断の正本は[`docs/plan/sunaba-secure-agent-platform.md`](docs/plan/sunaba-secure-agent-platform.md)
+- TUI・UX変更は[`docs/plan/tui-usability-implementation-plan.md`](docs/plan/tui-usability-implementation-plan.md)の実装順序と受け入れ条件に従う
 - 実装・検証で許可されるsudo、pf、Apple Container操作は[`docs/plan/allowed-host-operations.md`](docs/plan/allowed-host-operations.md)だけで定義する
 - 利用者向けの導入と機能説明は[`README.md`](README.md)と[`docs/user-guide.md`](docs/user-guide.md)、目的別手順は[`docs/workflows.md`](docs/workflows.md)
 - Phaseごとの証拠と検証履歴は[`docs/implementation/`](docs/implementation/README.md)
@@ -24,7 +25,7 @@ OpenCodeをProject専用のApple Container VMで安全に実行する基盤、su
 
 - 通常変更は`./scripts/verify.sh`と`./scripts/verify-race.sh`で確認する
 - integration build-tagのコンパイルは`go test -tags=integration -run '^$' ./test/integration`で確認できるが、Apple Container実機gateの通過とは扱わない
-- live Apple Container、外部service、Keychain、sudo、pfを使う検証は、許可文書の範囲とユーザーの個別承認を確認してから実行する
+- live Apple Container、外部service、実credential、sudo、pfを使う検証は、許可文書の範囲とユーザーの個別承認を確認してから実行する
 - docs変更では`git diff --check`、相対link、記載したCLIと`sunaba ... --help`の一致を確認する
 
 ## 環境衛生

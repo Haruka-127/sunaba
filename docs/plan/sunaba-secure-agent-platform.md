@@ -103,6 +103,9 @@ sunabaの目的は、AIエージェントを単に制限することではない
 | SD-20 | OpenCode server/TUIを同じv1系のexact versionへlockする | client/server protocolと設定schemaのずれを防ぎ、利用者が明示更新するまで再現可能にするため |
 | SD-21 | sunabaの承認はOpenCode TUI内で完結させない | 侵害済みVMによる偽承認画面とtrusted UIを分離するため |
 | SD-22 | Web Gatewayは組み込み`common-development` origin presetとProject固有追加ruleを分離する | 一般的な依存導入を容易にしつつ、preset不使用とProject単位の追加を明示選択でき、更新をpolicy適用時に固定するため |
+| SD-23 | 通常操作はbundled OpenTUI helperによる英語TUIへ集約し、Go側を唯一のauthorityとする | コマンド暗記を減らしつつ、UI processへpolicy判断やhost mutationを移さないため |
+| SD-24 | OpenAI credentialはhost-only private fileへ保存し、認証方式はsunaba global設定とする | Keychain password promptをなくし、Projectごとの反復選択を避けるため。同一macOS userの別processから読まれ得る残余リスクは受容する |
+| SD-25 | Setupで確認する推奨設定はsecure、OAuth、`common-development` Web accessとする | 利用者の一括確認後だけ、安全な通常開発に必要な既定経路を有効にするため |
 
 ---
 
@@ -115,6 +118,7 @@ sunabaの目的は、AIエージェントを単に制限することではない
 | Agent Session | Gateway capabilityを発行し、VM内OpenCode serverとホストTUIを接続してから、server、relay、capabilityを終了するまでの論理セッション。VMの寿命とは異なる |
 | Host Supervisor | Project、VM、Snapshot、Gateway、承認、監査を管理するホスト側sunabaプロセス |
 | Host TUI | ホストで動く固定バージョンのOpenCode TUI client。agent runtimeやprovider credentialは持たない |
+| sunaba TUI | 引数なしの`sunaba`から起動するbundled OpenTUI UI。Go authorityから受け取ったbounded viewを表示し、選択actionを返すだけで、Project file、credential、VM、Gatewayを直接操作しない |
 | Local Attach Relay | ホストloopbackでTUIからの接続を受け、Project/VM専用transportを通じてVM内OpenCode serverへ転送するSupervisor管理relay |
 | Trusted Approval UI | guest由来の表示と区別でき、pushやChange Set applyをホスト側だけで確定する操作面 |
 | Runtime Adapter | Apple ContainerのCLIまたはSwift APIを安全なsunaba内部インターフェースへ変換する薄い層 |
@@ -137,7 +141,7 @@ sunabaの目的は、AIエージェントを単に制限することではない
 - Apple silicon、Virtualization.framework、採用・固定したApple Containerのバージョン
 - Host SupervisorとRuntime Adapter
 - ホスト側Gateway、Secret Store、Local Attach Relay、Trusted Approval UI、監査ログ
-- 公式artifactとdigestを固定したホスト側OpenCode TUI binary
+- 公式artifactとdigestを固定したホスト側OpenCode TUI binaryと、exact dependencyからbuildしてdigestを固定したbundled `sunaba-ui`
 - 承認を行う人間
 
 ### 5.2 信頼しないもの
@@ -169,7 +173,7 @@ sunabaの目的は、AIエージェントを単に制限することではない
 ### 5.4 保護対象
 
 - ホストのファイルシステムと作業ツリー
-- Keychain、SSH鍵、Git/LLM認証情報、agent socket、環境変数
+- host-only認証情報file、Keychain、SSH鍵、Git/LLM認証情報、agent socket、環境変数
 - 他のProject、VM、そのキャッシュと成果物
 - ホスト上の一般サービス、LAN、private/link-local/metadata相当の宛先
 - 外部Gitリポジトリと、利用者名義で行われる書き込み
@@ -212,6 +216,8 @@ sunabaの目的は、AIエージェントを単に制限することではない
 21. `.git`とsunaba管理領域をChange Setでhostへ適用しない。
 22. canonicalなhost Project rootを一意に登録し、snapshot、export、apply、recreateをProject lockで直列化する。
 23. Gateway capabilityはbearer tokenだけでなく、Project/VM専用transport上のpeer identityへ束縛する。
+24. `sunaba-ui`はProject、credential、policy、Change Set materialization、VM socketを直接開かず、Go authorityが許可したversion付きbounded protocolのactionだけを返す。
+25. OpenAI credential fileとglobal設定はProject、Snapshot、VM、Change Set、Host/OpenCode TUI、監査へcopyまたはmountしない。
 
 ---
 
@@ -328,7 +334,7 @@ OpenCodeの設定情報や短命tokenはVM内プロセスから観測可能で�
 3. OpenCode server password、Gateway capability、永続lease、各Gateway handlerを即時かつ不可逆に失効させる。listenerを閉じ、同じSessionをactiveへ戻さない。
 4. devモードでは直接外向き通信を無効化するか、無効化を確認してからVMを停止する。
 5. セッション後のバックグラウンドプロセスによるGateway操作を拒否し、直接インターネットへも到達できないことを保証する。
-6. Project lockはProject VMを管理するSupervisorが保持する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。次の`agent`、`shell`またはsecure modeの`exec`は同じVM/upperに対して新しいAgent Sessionを開始する。
+6. Project lockはProject VMを管理するSupervisorが保持する。VMはポリシーに応じて停止またはネットワークなしで稼働継続するが、active session用capabilityは保持しない。次の`agent`、`console`/`shell`またはsecure modeの`exec`は同じVM/upperに対して新しいAgent Sessionを開始する。
 
 host CLIの`exec`はcommandと各argumentを別々のJSON fieldとしてSupervisorへ渡し、host shellへ再解釈させない。Supervisorは固定したguest wrapperとargvをApple Containerのexec境界へ直接渡し、stdout、stderr、exit code、timeout、各streamのtruncationを分離したbounded resultとして返す。cwdはProject workspaceからの正規化済み相対pathだけを受理する。対話TTY、raw `container exec`、host command実行へのfallbackは行わない。dev modeでは既存のforeground shell/agent以外に直接egress可能な入口を増やさず、`exec`を拒否する。
 
@@ -669,9 +675,9 @@ runtime、Project policy、Agent image buildは`versions.lock.json`に記録さ�
 
 #### 12.1.2 初回setup
 
-fresh hostでは、利用者が`sunaba setup`を明示実行する。`project init`、`up`、`agent`、`shell`はsetup完了前にfail closedで拒否する。`help`、`setup`、`versions`、`update`、`credentials`は利用できる。
+fresh hostでは、TTYの引数なし`sunaba`がSetupを開き、CLIでは`sunaba setup`を明示実行できる。`project init`、`up`、`agent`、`console`/`shell`はsetup完了前にfail closedで拒否する。`help`、`setup`、`versions`、`update`、`credentials`は利用できる。
 
-`setup`はbinaryへ埋め込んだbootstrap dependency contractから既定の`versions.json`を作り、macOS、Apple Container、host OpenCode version/digestを検証し、guest artifactのSHA-256を検証してAgent imageをbuildする。成功後だけ`versions.lock.json`とhost-only global active dependencyを原子的に確定する。初回から別versionを使う場合は`setup --config-only`の後に`versions set|track`、`update check`、`update apply`を使う。
+`setup`はbinaryへ埋め込んだbootstrap dependency contractから既定の`versions.json`を作り、macOSとApple Containerを検証する。exactなhost OpenCode artifactとbundled `sunaba-ui`をsunaba管理quarantineへ取得してdigestを検証し、guest artifactのSHA-256を検証してAgent imageをbuildする。利用者が既に導入したOpenCodeやglobal設定は参照・変更せず、Bun、Node.js、OpenTUI、OpenCodeのglobal installを要求しない。成功後だけmanaged artifact、`versions.lock.json`、host-only global active dependencyを原子的に確定する。初回から別versionを使う場合は`setup --config-only`の後に`versions set|track`、`update check`、`update apply`を使う。
 
 既存global stateまたはProject stateがある場合はfresh setupとして上書きしない。legacy dependencyと既存Projectをinventoryし、同一bootstrap contractだと検証できる場合だけ明示的なmigrationを行う。VM、pending Change Set、Project fileを暗黙に削除しない。
 
@@ -681,7 +687,7 @@ version更新は`sunaba update check`と`sunaba update apply`の二段階に分�
 
 `update check`は`versions.json`を検証し、exactまたは`v1-stable`をexact versionへ解決し、公式host/guest artifactとsource provenanceをhost quarantineへ取得してdigestを計算する。active lockやProject policyは変更せず、設定digest、current lock digest、target manifest、artifact digest、期限へ束縛したcandidate planをhost-only stateへ保存して表示する。
 
-`update apply`は直前のcandidateだけを使い、`latest`を再解決しない。macOSへインストールされたhost OpenCodeのversion/executable digest、candidate artifact、Apple Container、既存VM/Supervisor、Project policy identityを再検証する。runningまたはpaused VMとunexported変更がある場合は拒否し、利用者へ`changes export`または明示破棄を要求する。host quarantineにあるpending Change Setは保持でき、更新後も通常の`changes apply`で処理できる。
+`update apply`は直前のcandidateだけを使い、`latest`を再解決しない。sunaba管理領域のhost OpenCodeと`sunaba-ui`のversion/executable digest、candidate artifact、Apple Container、既存VM/Supervisor、Project policy identityを再検証する。runningまたはpaused VMとunexported変更がある場合は拒否し、利用者へ`changes export`または明示破棄を要求する。host quarantineにあるpending Change Setは保持でき、更新後も通常の`changes apply`で処理できる。
 
 applyはcandidate Agent imageをno-cache buildしてversionとidentityを検証した後、journaled transactionで全Projectのdependency binding、global active dependency、`versions.lock.json`を更新する。commit decision前はrollbackでき、commit decision後のcrashはsource/target以外のstateが混入していないことを確認してroll-forwardする。旧Agent imageと旧managed Host TUIはupdate transaction中に削除しない。
 
@@ -715,17 +721,29 @@ Host TUIは固定した公式macOS artifactをSupervisorが起動し、`opencode
 
 Host TUIはTCBに含まれるため、server応答によるcrash、任意file access、ANSI/OSC sequence、clipboard操作、外部editor起動をattack testする。必要な安全性をHost TUIだけで保証できない場合はSupervisor側relayで危険なeventを拒否し、`sunaba agent`を一般提供しない。
 
-pushとChange Set applyの承認はOpenCode TUIへ表示された文字列やserver eventだけでは成立しない。Supervisorがhost側で生成したnonce、Project、対象digest/object IDをTrusted Approval UIへ表示し、host側の明示操作で確定する。guestは承認requestを開始できるが、承認結果を生成・変更できない。
+pushとChange Set applyの承認はOpenCode TUIへ表示された文字列やserver eventだけでは成立しない。SupervisorはProject、対象digest/object ID、host側で生成したnonceを内部で束縛し、Trusted Approval UIには利用者が判断する対象とactionを表示してhost側の明示操作で確定する。利用者へdigestやnonceを手入力させない。guestは承認requestを開始できるが、承認結果を生成・変更できない。
+
+### 12.2.1 sunaba TUI
+
+通常操作のsunaba TUIは`@opentui/core`からstandalone executableとしてbuildしたbundled `sunaba-ui`を使う。利用者へBun、Node.js、OpenTUIのinstallを要求しない。build時のOpenTUIとBunはexact versionへ固定し、`sunaba-ui` artifactのdigestをhost-only dependency lockへ含め、Go側が起動直前にowner、mode、regular file、architecture、digestを検証する。auto updateは行わず、既存の`update check`と`update apply`へ統合する。
+
+Go側sunabaを唯一のauthorityとし、`sunaba-ui`はOS tempのowner-only directoryに作るProject/process専用Unix socket上のversion付きbounded JSON protocolだけで接続する。Go側はProject/VM/Session状態、policy、credential、Snapshot、Change Set、Gateway、apply、recovery、監査を所有し、sanitizedなview modelと現在許可する固定action IDだけを送る。helperはProject、credential、policy、Change Set materialization、VM socketを直接開かず、network、shell、browser、clipboard、通知、plugin、外部editorを起動しない。古いview revision、未知action、複数接続、unknown field、trailing data、oversize、timeoutを拒否する。
+
+sunaba TUIとOpenCode TUIは同時に同じterminalを所有しない。Agent開始時はsunaba TUIがterminalをrestoreして終了した後にGo側がOpenCode TUIを起動し、OpenCode終了後にSession authorityを失効して新しいsunaba TUIを起動する。helperの終了、crash、signal、protocol違反ではterminalをrestoreし、未確定mutationを行わずfail closedに戻る。
 
 ### 12.3 Model providerと認証方式
 
-利用者はProject policyで`api_key`または`oauth`を選ぶ。`api_key`はOpenAI APIの従量課金credential、`oauth`はChatGPTのCodex subscription credentialを使う。認証方式はAgent Session開始時にsnapshotし、実行中にguest requestで切り替えない。
+利用者はsunaba global設定で`api_key`または`oauth`を選ぶ。`api_key`はOpenAI APIの従量課金credential、`oauth`はChatGPTのCodex subscription credentialを使う。Projectごとの認証方式は持たず、通常起動時に選択を繰り返さない。変更はSettingsまたはglobalな`sunaba model auth api-key|oauth`を明示実行した場合だけ行う。Agent Session開始時にglobal設定をsnapshotし、active Sessionは終了まで同じ方式を使う。登録済みの別方式へ自動fallbackしない。
 
 LLMアクセスは、エージェントへ公開する明示的なtool callではない。OpenCode runtime自身がprovider通信としてModel Gatewayを呼び、エージェントは通常どおりモデル上で動作する。Agent VMからModel Gatewayのupstream設定や実credentialを参照・変更する経路は設けない。
 
-実API keyはmacOS login Keychainの固定generic password（service `dev.sunaba.openai`、account `openai-api-key`）へ保存する。OAuth credentialは同じserviceの固定account `codex-oauth`へ、access token、refresh token、ID token、account ID、有効期限だけをbounded JSONとして保存する。Model Gatewayだけが選択されたcredentialを読む。login Keychain pathは固定`/usr/bin/security login-keychain`から取得し、quoted absolute clean pathとして検証して各item操作へ明示する。API keyの登録・読取・削除は固定`security` commandとKeychain自身の対話promptを使う。OAuth credentialの保存・読取・存在確認・更新・削除はSecurity.frameworkの固定APIだけを使い、検証済みlogin Keychainの固定service/accountとの間でsecret JSONをprocess memoryから直接受け渡す。どちらもsecretをargv、environment、Project file、設定、監査へ載せない。
+実API keyとOAuth credentialは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/credentials/openai.json`へ別fieldとして保存し、両方を同時に保持できる。OAuthはaccess token、refresh token、ID token、account ID、有効期限だけをbounded strict JSONへ保存する。directoryはcurrent user所有のmode `0700`、fileはcurrent user所有のmode `0600`のregular fileに限定し、canonical path、symlink、hardlink、owner、mode、sizeをopen前後に検証する。更新はowner-only lockで直列化し、同一directoryの新規fileへの完全書込、file `fsync`、atomic rename、directory `fsync`で行う。一方のcredential更新・削除で他方を変更しない。
 
-OAuthログインはCodex public clientのdevice authorization flowを使う。sunabaは固定したOpenAI auth endpointへだけ接続し、verification URLとuser codeをterminalへ表示する。ブラウザを自動起動せず、15分以内に得たauthorization codeをPKCE verifierと交換する。token refreshは有効期限直前にホスト側で直列化し、rotated refresh tokenを同じKeychain itemへ原子的に更新する。JWT claimはaccount IDの抽出にだけ使い、sunabaによるtoken検証や認可判断には使わない。upstreamがBearer token自体を検証する。
+Model Gatewayだけがglobal設定で選択されたcredentialを読む。secretをargv、environment、Project file、global設定、VM、Host/OpenCode TUI、log、error、監査へ載せない。API keyのTUI入力はmaskし、OAuth device flowとrefresh token rotationを含むread-modify-writeを同じfile lockで直列化する。Keychain、`/usr/bin/security`、Security.frameworkを使用せず、旧Keychain itemを読取、移行、自動削除しない。更新後は再認証を要求する。同じmacOS user権限の別processがprivate fileを読める残余リスクは受容し、Keychainまたは利用者passwordを使った暗号化を追加しない。
+
+activeな認証方式だけは`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/settings.json`へsecretを含まないglobal設定として保存する。既定は`oauth`とする。OAuthとAPI keyの両方が登録済みでも、利用者が明示変更するまで方式を変えない。credential欠如、invalid、期限切れ、refresh失敗ではfail closedとし、別方式へ切り替えない。global方式とProject model allowlistが両立しない場合はSession開始前に対象modelと修正actionを示して拒否し、modelを暗黙に置換しない。
+
+OAuthログインはCodex public clientのdevice authorization flowを使う。sunabaは固定したOpenAI auth endpointへだけ接続し、verification URLとuser codeをterminalへ表示する。ブラウザを自動起動せず、15分以内に得たauthorization codeをPKCE verifierと交換する。token refreshは有効期限直前にホスト側で直列化し、rotated refresh tokenを認証情報fileへ原子的に更新する。JWT claimはaccount IDの抽出にだけ使い、sunabaによるtoken検証や認可判断には使わない。upstreamがBearer token自体を検証する。
 
 Agent VMへは次だけを渡す。
 
@@ -855,7 +873,7 @@ HTTP absolute-form requestはGET/HEAD、bodyなし、allowlist originだけを�
 
 公開blocklistはallowlistを置き換えず補助denyとして使う。pinned source、digest、取得時刻、有効期限をpolicyへ記録し、期限切れまたは検証失敗時はblocklist依存ruleをfail closedにする。同一origin内のmalicious path、CDN tenant、許可先自身の侵害はblocklistで防げると主張しない。
 
-sunaba本体は、source control、OS/package repository、language registry、container registry、browser/toolchain download、開発文書に使うoriginをまとめた、名前付き組み込みpreset `common-development`を持つ。新規Projectはこのpresetを選択済みにするが、Web Gateway自体は既定で無効のままとし、preset選択だけで通信を開始しない。Project設定はpresetを空配列にして不使用にでき、`web-origins.txt`のProject固有ruleだけを使うことも、presetと追加ruleを和集合にすることもできる。
+sunaba本体は、source control、OS/package repository、language registry、container registry、browser/toolchain download、開発文書に使うoriginをまとめた、名前付き組み込みpreset `common-development`を持つ。Setupの推奨設定ではWeb Gatewayとこのpresetを選択済みにするが、利用者が推奨設定全体を確認して`Continue`を選ぶまでは通信を有効にしない。通常表示はorigin数ではなく`Access to standard sites needed for development`とし、exact originとHTTPS CONNECTの制限はDetailsへ置く。Project設定はpresetを空配列にして不使用にでき、`web-origins.txt`のProject固有ruleだけを使うことも、presetと追加ruleを和集合にすることもできる。
 
 presetはsunabaのversion管理対象であり、Project固有設定directoryや外部URLを実行時の正本として参照しない。`config apply`は選択presetを展開し、Project固有ruleとの正規化済み和集合、preset source digest、blocklist digestを実効Project policyへ固定する。sunaba更新で組み込みpresetが変わった場合、既存policyへ黙って反映せず、`config diff`で差分を示して再度`config apply`を要求する。旧policyの明示ruleはmigration時にProject固有ruleとして保持し、新presetを自動追加して許可範囲を広げない。
 
@@ -922,19 +940,19 @@ Phase 0のprobeで既存許可範囲にない操作が必要になった場合�
 
 ## 16. ポリシーとリソース制御
 
-利用者共通のversion宣言と適用済みlockは`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/versions.json`と`versions.lock.json`、Projectの利用者設定は同directoryの`projects/<ProjectID>/`を正本とし、Project worktree外のhost-only領域へ保存する。Project directory、Snapshot、VM、session input、exportへこの設定directoryをmountまたはcopyせず、VMから参照・変更できる経路を作らない。directoryはcurrent user所有のmode `0700`、設定とlockはmode `0600`の通常fileに限定し、symlink、未知field、trailing data、上限超過を拒否する。
+利用者共通のversion宣言と適用済みlockは`${XDG_CONFIG_HOME:-$HOME/.config}/sunaba/versions.json`と`versions.lock.json`、globalなModel認証方式は同directoryの`settings.json`、Projectの利用者設定は同directoryの`projects/<ProjectID>/`を正本とし、Project worktree外のhost-only領域へ保存する。Project directory、Snapshot、VM、session input、exportへこの設定directoryをmountまたはcopyせず、VMから参照・変更できる経路を作らない。directoryはcurrent user所有のmode `0700`、設定とlockはmode `0600`の通常fileに限定し、symlink、hardlink、未知field、trailing data、上限超過を拒否する。
 
-`project.json`にはmode、resource、session、Model、Git remote、Webの有効状態・`origin_presets`・quota、Snapshot除外、export、audit retentionなど利用者が選択する起動設定だけを置く。dependency version/digest、agent image、組み込みpreset内容/digest、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialは利用者設定へ置かず、sunabaが固定値または検証済みhost artifactから実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
+`project.json`にはmode、resource、session、Model allowlist/quota、Git remote、Webの有効状態・`origin_presets`・quota、Snapshot除外、export、audit retentionなど利用者が選択するProject設定だけを置く。Model認証方式、dependency version/digest、agent image、組み込みpreset内容/digest、blocklist manifest/digest、push承認必須、Protected Path、runtime identity、capability、credentialはProject設定へ置かず、sunabaがglobal設定、固定値、検証済みhost artifactからSession authorityまたは実効Project policyへcompileする。実効Project policyは`${XDG_DATA_HOME:-$HOME/.local/share}/sunaba/projects/<ProjectID>/policy.json`へ内部stateとして保存し、手作業で編集しない。
 
 Project固有のWeb allowlist追加分は同じhost-only directoryの固定名`web-origins.txt`で管理する。組み込みpresetの内容をこのfileへ複製しない。空行と`#`で始まるcommentを除き、各行は`http://host`または`https://host`と、任意の第2token `include-subdomains`だけを受け付ける。path、query、fragment、userinfo、非標準port、IP literal、重複rule、未知optionを1件でも含む場合はfile全体を拒否する。sizeは64 KiB、Project固有ruleは1024件、preset展開後の実効ruleも1024件を上限とする。Web Gateway無効時もpreset選択とProject固有追加分はinactiveな宣言として保持できる。
 
 設定変更は`config validate`と`config diff`で検査し、`config apply`により実効policyへ明示適用する。CLIは差分を次の適用classへ分類し、対象fieldと必要操作を表示する。
 
 - **即時反映**: audit retention等のhost-only運用policy。保存transaction完了後に直ちに実行する
-- **次Agent Sessionから反映**: Model allowlist/auth/quota、Git/Web Gateway、session TTL/idle、blocklist等。active Sessionのauthorityは不変とし、pause後の新しいSession ID/token/handler発行時にcurrent policyを再読込する。paused VMやpending Change Setがあっても安全に適用できる
+- **次Agent Sessionから反映**: ProjectのModel allowlist/quota、Git/Web Gateway、session TTL/idle、blocklist、およびglobalなModel認証方式。active Sessionのauthorityは不変とし、pause後の新しいSession ID/token/handler発行時にcurrent policyとglobal設定を再読込する。paused VMやpending Change Setがあっても安全に適用できる
 - **VM再作成が必要**: mode、dependency/image、resource、Snapshot除外、export上限、Protected Path等。既存VMへ暗黙反映せず、VMが存在する間はapplyを拒否して`changes export`と`recreate`を案内する
 
-host-only設定writerはProject VMが保持する長寿命Project lockとは別のProject設定lockで直列化し、宣言設定と実効policyをcrash-safe transactionで更新する。未適用または不正な設定がある場合、`up`、`agent`、`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
+host-only設定writerはProject VMが保持する長寿命Project lockとは別のProject設定lockで直列化し、宣言設定と実効policyをcrash-safe transactionで更新する。未適用または不正な設定がある場合、`up`、`agent`、`console`/`shell`とSupervisor起動はfail closedで拒否する。`status`、`down`、`changes export`、`recreate`、`destroy`など停止・回収経路は利用可能なままにする。apply時にWeb Gatewayを新規有効化するか有効なblocklist snapshotがない場合だけ、固定sourceからblocklistを取得・検証する。
 
 `config edit`は同じhost-only宣言設定とcompile経路に対する対話frontendとする。候補は最終確認までmemoryだけに保持し、確定時に上記apply条件を再検証して宣言設定と実効policyを同期更新する。別schema、VM内設定、credential入力、生成fieldの上書き経路を作らない。
 
@@ -970,7 +988,7 @@ Gateway用capabilityはProject policyから狭めて発行できるが、広げ�
 - session開始・終了、capability発行・失効
 - Gatewayごとのrequest metadata、許可・拒否、利用量、error
 - Git push承認の対象object IDと結果
-- Trusted Approval UIが表示した対象digest/object ID、内部で束縛したnonce、承認・拒否。Git pushは番号またはdigest IDで対象とdecisionを選び、内部nonceを手入力しない。Change Set applyは表示されたhost生成nonceの完全一致入力を要求する。guest由来の自由形式文字列はescapeする
+- Trusted Approval UIが表示した対象、内部で束縛したdigest/object IDと一回限りのnonce、承認・拒否。Git pushとChange Set applyのどちらも利用者へdigestやnonceを手入力させず、表示中の対象に対する明示actionをhost側identityへ束縛する。guest由来の自由形式文字列はescapeする
 - workspace freeze/exportとChange Set digest
 - Change Set承認・拒否・適用結果
 - resource limit超過と強制停止
@@ -1124,6 +1142,9 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 - OpenCodeからCodex系モデルへResponses互換で接続できる。
 - API keyとCodex OAuthの両方でhost側がcredentialを終端し、認証方式ごとのmodel input上限がOpenCode設定へ反映される。
 - OAuth access token、refresh token、account IDがVM、Host TUI、Project file、監査へ出ない。
+- credential fileとglobal設定がowner/mode/type/path/size/JSON検証を通り、symlink、hardlink、unknown field、trailing data、並行rotation、途中失敗でfail closedになる。
+- Keychain、`/usr/bin/security`、Security.frameworkを使用せず、既存Keychain itemがあっても自動移行または削除しない。
+- 認証方式の明示変更が全Projectの次Agent Sessionへ反映され、active Sessionを変更せず、credential欠如時に別方式へfallbackしない。
 - streaming、tool call、error、cancelが期待どおり動く。
 - VM filesystem、process environment、OpenCode configに実upstream API keyがない。
 - 許可外model、quota超過、期限切れtoken、別VM tokenが拒否される。
@@ -1158,6 +1179,10 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 - file名、diff、log、server message内のANSI/OSC、改行、双方向文字が承認UIと監査表示で安全にescapeされる。
 - clipboard、file transfer、外部editor等のhost作用を持つterminal sequenceが拒否される。
 - Change Set reviewは外部diff、pager、editor、preview helperを自動起動せず、boundedなhost実装だけで表示される。
+- `sunaba-ui`がowner-only socketのversion付きbounded protocol以外からhost mutationを要求できず、Project、credential、policy、Change Set materializationを直接開かない。
+- 引数なしTTYではsunaba TUI、non-TTYでは非対話CLIとなり、terminal終了、cancel、crash、signalの全経路でterminal stateが復元される。
+- Changes画面は変更fileだけを一覧にし、選択fileをwide terminalではside-by-side、narrow terminalではunified diffとして表示する。
+- applyは表示中のChange Set全体だけを対象にし、digestやnonceの手入力なしでhost側の一回限りの承認へ束縛される。
 
 ---
 
@@ -1166,6 +1191,7 @@ MVPはPhase 0からPhase 2までを指す。次が自動テストまたは再現
 基本操作は次のような責務を持つ。CLI名は実装時に既存CLIとの整合を確認する。
 
 ```text
+sunaba                             TTYではProject選択またはHomeを開く。non-TTYでは対話を開始しない
 sunaba setup                       bootstrap版で前提条件を検証し、初回Agent imageとversion lockを作成
 sunaba setup --config-only         version宣言だけを作成し、初回から別のv1版を選ぶ準備をする
 sunaba versions path/show          host-only version設定pathまたは宣言・適用済みlockを表示
@@ -1173,10 +1199,10 @@ sunaba versions set <version>      更新対象をv1系exact versionへ設定
 sunaba versions track v1-stable    明示check時だけ解決するv1 stable channelを設定
 sunaba update check                対象を解決・検証し、適用前candidateを保存
 sunaba update apply                保存済みcandidateを明示適用
-sunaba credentials openai ...     login Keychainの固定OpenAI credentialを登録・確認・削除
-sunaba model auth api-key|oauth   ProjectのModel Gateway認証方式を選択
+sunaba credentials openai ...     host-only private fileのOpenAI credentialを登録・確認・削除
+sunaba model auth api-key|oauth   sunaba globalのModel Gateway認証方式を選択
 sunaba model list/set             認証方式別catalogの表示とProject model allowlistの設定
-sunaba project init [path]       Project登録。path省略時はcurrent directory、Model認証はOAuthが既定
+sunaba project init [path]       Project登録。path省略時はcurrent directory
 sunaba snapshot preview          Snapshot対象の件数、size、警告、digestを内容非表示で確認
 sunaba snapshot approve          previewのexact digestを次のVM作成へ束縛して承認
 sunaba snapshot exclude import-gitignore  literalな.gitignore entryをhost-only除外候補へ明示import
@@ -1188,7 +1214,8 @@ sunaba config apply              差分を即時・次Session・要再作成へ�
 sunaba config show [--effective] declarative設定または内部の実効policyを表示
 sunaba up [--mode secure|dev]    secure VMを作成してpause、devはforeground session用artifactだけ準備
 sunaba agent                     server、relay、Host TUIを起動してAgent Session開始
-sunaba shell                     bounded line commandをterminal sanitizer経由で実行
+sunaba console                   bounded line commandをterminal sanitizer経由で実行
+sunaba shell                     `console`の互換alias
 sunaba status                    mode、VM、session、quota、未export変更を表示
 sunaba changes export [--discard-external-git] freeze/exportとChange Set作成。flagはguard対象のExternal Git状態だけを明示破棄
 sunaba changes review            保存済みbaselineとMerged Viewから安全な内容差分を表示
@@ -1203,28 +1230,35 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 
 期待する通常体験は次である。
 
+- TTYで引数なしの`sunaba`を実行すると英語TUIを開く。Project内なら自動選択し、Project外なら登録済み一覧を表示する。恒常画面はHome、Changes、Settingsだけとし、SetupとRecoveryは必要時だけ表示する。non-TTYではTUIを開始しない。
+- Homeは内部digest、nonce、capability、schemaを通常表示せず、Project、VM/Session状態、作業保持状態、pending changes、警告、次の推奨actionだけを示す。現在状態で不要または実行不能なactionを常時並べない。
 - Agent VM内ではOpenCodeとshellを通常どおり使える。
-- fresh hostでは最初に`sunaba setup`を実行する。初回からbootstrap以外を使う場合は`setup --config-only`、`versions set|track`、`update check`、macOS側OpenCodeの同一版への更新、`update apply`の順に行う。`project init`はsetup未完了ならProject stateを作らず拒否する。
+- fresh hostの引数なし`sunaba`はSetupを開く。secure、OAuth、`common-development`によるWeb accessを推奨設定として表示し、利用者が`Continue`を選んだ後だけまとめて適用する。Git remoteを安全に検出できた場合は候補として表示し、利用者が選択したものだけを登録する。Webの通常表示はorigin数ではなく`Access to standard sites needed for development`とする。
+- SetupはexactなHost OpenCodeとbundled `sunaba-ui`をsunaba管理領域へ取得してdigestを検証し、利用者の既存OpenCodeやglobal設定を変更しない。Bun、Node.js、OpenTUI、OpenCodeのglobal installを要求しない。Apple Containerがなければ公式導入手順を表示する。
+- OAuthはverification URLとcodeを表示し、browserを自動起動しない。認証を中断してもSetupを破損させず、Homeで未設定と表示し、Agent Session開始時に認証を要求する。Setupにはcredential file pathや保存方式の説明を表示しない。
 - `versions set|track`は宣言だけを変更し、VM、Project policy、active lockを変更しない。`update check`もcandidate作成までとし、`update apply`だけが停止済みProjectを新しいexact lockへ切り替える。channel追跡を選んでもsession開始時の自動更新は行わない。
-- `sunaba project init`はpathを省略した場合にcurrent directoryを登録し、相対pathも受け付ける。入力pathはsymlinkを解決したcanonical absolute pathへ変換してidentityを固定する。新規ProjectのModel認証はOAuthを既定とし、API keyを使う場合だけ`--model-auth api-key`を指定する。credentialの登録有無から認証方式を推測せず、既存Projectの認証方式は変更しない。
+- `sunaba project init`はpathを省略した場合にcurrent directoryを登録し、相対pathも受け付ける。入力pathはsymlinkを解決したcanonical absolute pathへ変換してidentityを固定する。Model認証はglobal設定だけを使い、Project登録時やSession開始時に選択を繰り返さない。
 - `project init`後およびhost Project変更後に新しいVMを作る前は、`snapshot preview`で対象を確認し、表示されたexact digestを`snapshot approve`へ渡す。digest不一致、除外policy変更、preview後のProject変更ではVMを作らない。
 - `sunaba project list`はhost-only stateの直接の子だけをboundedに列挙し、Project policy、owner-only Supervisor locator、sunaba所有labelが完全一致するVMから状態を判定する。一覧取得はpolicy migration、stale locator回収、orphan cleanup、VM lifecycle操作を行わない。`--active`は到達可能なSupervisorまたはrunning状態のowned VMがあるProjectだけを表示し、VMがpause中でもSupervisorがactiveなら除外しない。
-- 公開Project操作の`config`、`model`、`up`、`agent`、`git`、`web`、`shell`、`status`、`changes`、`approvals`、`recreate`、`down`、`destroy`は、`--dir <path>`または`--project-id <id>`で対象を選択できる。両方の同時指定を拒否し、どちらも未指定ならcurrent directoryを使う。Project IDは`project list`が表示した12桁の小文字16進IDとの完全一致だけを受け付け、prefix、部分一致、aliasを使わない。通常操作のID指定は、owner-only stateとpolicyをread-onlyで検証し、policyのProject IDが一致し、保存されたcanonical Project rootが現存する場合だけそのrootへ解決する。`project init`、`project list`、利用者共通の`credentials`、内部ホスト操作の`firewall`と`_supervisor`はこのselectorの対象外とする。
+- 公開Project操作の`config`、`model list/set`、`up`、`agent`、`git`、`web`、`console`/`shell`、`status`、`changes`、`approvals`、`recreate`、`down`、`destroy`は、`--dir <path>`または`--project-id <id>`で対象を選択できる。両方の同時指定を拒否し、どちらも未指定ならcurrent directoryを使う。Project IDは`project list`が表示した12桁の小文字16進IDとの完全一致だけを受け付け、prefix、部分一致、aliasを使わない。通常操作のID指定は、owner-only stateとpolicyをread-onlyで検証し、policyのProject IDが一致し、保存されたcanonical Project rootが現存する場合だけそのrootへ解決する。`project init`、`project list`、globalな`model auth`、利用者共通の`credentials`、内部ホスト操作の`firewall`と`_supervisor`はこのselectorの対象外とする。
 - `down`と`destroy`のID指定は、元Project rootやpolicyを失った隔離stateを安全に回収する復旧経路とする。policy内のProject pathを対象解決の根拠にせず、host-only state直下にあるcurrent-user所有、mode `0700`、非symlinkの同名directoryだけを対象とし、到達可能なSupervisorがあればそのProject IDとの一致も要求する。`down`は隔離stateを保持し、`destroy`だけが隔離stateとhost-only Project設定を削除する。host Project fileは削除せず、`--yes`と、pendingまたは未export変更に対する`--discard-pending`の要件はpath指定時と同じとする。
 - secureの`sunaba up`はowner-only Supervisorを起動し、VM作成とhealth/resource検証後に初期Sessionを完全失効してVMを停止して返す。返却時はLocal Attach Relay、Gateway listener、activeな永続lease、server passwordがなく、一般session channelは到達不能である。
 - secureの`sunaba agent`はVM内serverとhostの固定TUIを同時に管理し、TUI終了時にrelay、Gateway handler、lease、server passwordを不可逆に失効して同じVMをpauseする。active TUIはowner-only heartbeatを送り、client消失後のidle deadlineや絶対TTLでも同じfail-closed pauseを行う。次回は同じVM/upperへ新しいSession ID、token、password、TTLを発行するため、TTL到達後も作業状態を保持したまま継続できる。
+- sunaba TUIからAgentを開始するときは、terminalをrestoreしてsunaba TUIを終了してからOpenCode TUIを起動する。OpenCode終了後はVMとworkspaceを保持し、Session authorityを失効して新しいsunaba TUIのHomeへ戻す。自動export、apply、destroyは行わない。
 - VM再開時はtmpfsであるguestの`/run/sunaba`が空になることを前提とし、relay、provider設定、新規session capabilityをmode `0700`の単一directoryへ生成し、1回のcopyで復元してからserverを起動する。終了済みSessionの入力を再利用せず、session capabilityをVMの永続root filesystemへ退避しない。copyに使うHost runtime内一時directoryは成功・失敗を問わず直後に削除する。
-- devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`shell`中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。export拒否時だけ、capability、pf、networkを全て失効した停止VMをhost-only recovery recordへ束縛して保持し、通常cleanupから保護する。background supervisorやdirect egressは残さない。
-- `sunaba shell`はraw execや未検証PTYではなく、bounded line commandの全出力をhost terminal sanitizerへ通す。
+- devの`sunaba up`は固定artifactだけを準備する。direct-egress VMは可視foregroundの`agent`/`console`（`shell` aliasを含む）中だけ作成し、終了時にpfをdeny-allへquiesceしてからVMを停止、export、destroyする。export拒否時だけ、capability、pf、networkを全て失効した停止VMをhost-only recovery recordへ束縛して保持し、通常cleanupから保護する。background supervisorやdirect egressは残さない。
+- `sunaba console`はraw execや未検証PTYではなく、bounded line commandの全出力をhost terminal sanitizerへ通す。既存script向けに`shell` aliasを残す。
 - Model Gatewayの存在を会話やツール選択で意識する必要はない。
-- `sunaba config edit`はHost CLIだけで動くboundedな行入力式ウィザードとし、VM、OpenCode server、Host TUIへ設定入力を委ねない。既存のhost-only宣言設定を候補としてmemory上で編集し、最終確認まではfileや実効policyを変更しない。cancel、EOF、入力上限超過では変更を残さない。
+- Settingsと`sunaba config edit`は同じGo側validatorとcompile経路を使い、VM、OpenCode server、OpenCode TUIへ設定判断を委ねない。候補は最終確認までmemoryだけに保持し、cancel、EOF、入力上限超過では変更を残さない。
 - 対話設定も手編集と同じ厳格validatorとcompile経路を使い、dependency、credential、capability、blocklist binding、push承認必須、Protected Pathを入力項目にしない。Projectのlocal Git configはinclude、system/global config、promptを無効にしたboundedなread-only probeだけで候補を得て、検証済み固定HTTPS remoteを人間が明示選択した場合だけ登録する。dev modeとWeb Gatewayの残余リスクを選択時に表示し、固定catalog外model、credential付きGit URL、曖昧なWeb origin、上限外quotaを保存前に拒否する。
 - 対話設定の適用は既存の`config apply`と同じ三分類、owned VM、blocklist条件を使う。次Session/即時classはpaused VMやpending Change Setを保持したまま適用でき、VM再作成classだけは既存VMがある間拒否する。対話中に宣言設定または実効policyが変化した場合は競合として拒否し、別processの変更を上書きしない。
 - secureで一般Webが未提供なら、コマンドが明確なnetwork policy errorで失敗する。
 - devへ切り替える場合は、情報流出防止を保証しない旨を明示する。
 - Git Gateway実装後も通常のGitコマンドを使う。push requestはhost側のpending approvalとなり、OpenCode TUIと分離したTrusted Approval UIで確認する。
-- Web Gatewayを有効にすると、新規Projectでは`common-development` presetを利用する。`origin_presets`を空にすればpresetを使わず、`web-origins.txt`だけ、またはpresetへのProject固有追加として構成できる。
-- hostへ反映する前に`changes review`でChange Setの内容、mode、symlink、binary/巨大fileの未表示警告を確認する。`changes apply`も同じdigestのreviewを再表示してからTrusted Approval UIへ進む。
+- Setupの推奨設定を確認すると、新規ProjectではWeb Gatewayと`common-development` presetを利用する。`origin_presets`を空にすればpresetを使わず、`web-origins.txt`だけ、またはpresetへのProject固有追加として構成できる。
+- Changesは変更fileだけを左paneへ表示し、選択fileのdiffを右paneへ表示する。wide terminalはbefore/after、narrow terminalはunified diffとし、初期実装はsyntax highlight、閲覧済み追跡、部分applyを行わない。binary、巨大file、symlink、実行mode等は内容を無理に表示せずriskとmetadataを示す。
+- applyはChanges画面からChange Set全体にだけ実行できる。digestやnonceを手入力させず、表示中のChange Set identityと一回限りのhost承認を内部で束縛する。reviewを終了してもpending Change Setを保持し、再開できる。
+- SettingsのAI connectionはactiveな方式と状態だけを通常表示し、未使用側は`Change authentication method`内だけで表示する。TUIに`Sign out`は設けず、再認証とglobal方式変更だけを提供する。credential完全削除はCLIに残す。
 
 ---
 
@@ -1234,7 +1268,11 @@ sunaba web enable/refresh/disable    組み込みpresetとProject固有originの
 
 ```text
 cmd/sunaba/                 CLI
+cmd/sunaba-ui/              bundled OpenTUI helper source/build entry
 internal/project/           Project registry and policy
+internal/tui/               Go-side TUI coordinator and bounded protocol
+internal/usersettings/      global non-secret settings
+internal/secretstore/       host-only private credential file
 internal/supervisor/        lifecycle and session orchestration
 internal/runtime/           runtime-neutral contract
 internal/runtime/container/ Apple Container CLI adapter
@@ -1345,18 +1383,18 @@ Go依存は`go.mod`/`go.sum`、Swift Adapterを追加する場合は`Package.swi
 
 ## 25. 実装開始判断
 
-本方針を基にPhase 0の実装と技術probeを開始してよい。Phase 1は、secure network、Local Attach Relay、Host TUI境界、safe Snapshot/exportのDecision Gateを満たした後に進む。直ちに全Gatewayや全UXを作らない。
+Phase 0〜5のsecurity boundary実装後に行う次の作業は、[`tui-usability-implementation-plan.md`](./tui-usability-implementation-plan.md)に定義したTUI・UX実装とcredential/global auth変更である。同計画の順序と受け入れ条件に従い、toolchain/cache永続化や部分applyを同時に実装しない。
 
 開始時点での明確な境界は次である。
 
 - 確定: 単一Agent VM、Project単位、OverlayFS、Change Set、secure/dev、Model Gatewayの最小構成
-- 固定dependency: OpenCode `v1.18.18`のhost TUI / guest server同一version
+- 固定dependency: OpenCode `v1.18.18`のhost TUI / guest server同一version。OpenTUI、Bun、bundled `sunaba-ui`は実装前probeでexact versionとartifact digestをmanifestへ追加する
 - 完了段階: Phase 0〜5の実装、Decision Gate、mock/実VM contract gate
 - 最終統合: CLI/README/通常verifyを現行境界へ更新済み。dev pf実機gateと全resource cleanupを最終確認する
-- 明示的live gate: `SUNABA_LIVE_OPENAI=1`の場合だけlogin Keychainのcredentialで実Agent VMから従量課金Responses requestを送る。通常verifyは実行しない
+- 明示的live gate: `SUNABA_LIVE_OPENAI=1`の場合だけhost-only credential fileのcredentialで実Agent VMから従量課金Responses requestを送る。通常verifyは実行しない
 - 別承認: `allowed-host-operations.md`の範囲外となるホスト操作
 
-Phase 0でsecure networkまたはOverlayFS/exportの中核不変条件を実現できないと判明した場合は、見かけ上の実装を続けず、アーキテクチャ判断を更新する。
+TUI実装中にGo authority、trusted terminal、credential、Snapshot/export/applyの中核不変条件を維持できないと判明した場合は、見かけ上の利便性実装を続けず、アーキテクチャ判断を更新する。
 
 ---
 

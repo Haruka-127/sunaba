@@ -6,6 +6,8 @@
 
 `legacy-implementation-notes.md`も旧プロトタイプを検証した時点の記録であり、現在の環境要件や設計判断を表さない。
 
+`usability-static-analysis.md`は2026-08-19時点の旧UX調査であり、現在のTUI・UX実装計画には使用しない。
+
 現在の文書は次を参照する。
 
 - [計画文書の索引](../README.md)
