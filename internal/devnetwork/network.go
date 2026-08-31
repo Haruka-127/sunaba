@@ -16,11 +16,17 @@ import (
 	"golang.org/x/sys/unix"
 
 	"sunaba/internal/firewall"
+	"sunaba/internal/securefs"
 )
 
-const ownerLabel = "sunaba-supervisor"
+const (
+	ownerLabel       = "sunaba-supervisor"
+	ownerJournalFile = "dev-network-owner.json"
+)
 
 var identityPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+
+var networkNamePattern = regexp.MustCompile(`^sunaba-[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}-[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}-net$`)
 
 type Network struct {
 	Name        string
@@ -38,20 +44,21 @@ type Manager struct {
 }
 
 type Boundary struct {
-	Network Network
-	manager *Manager
-	lock    *os.File
-	closed  bool
+	Network   Network
+	manager   *Manager
+	lock      *os.File
+	stateRoot string
+	closed    bool
 }
 
 func Activate(ctx context.Context, stateRoot, projectID, sessionID string) (_ *Boundary, err error) {
-	return activate(ctx, stateRoot, projectID, sessionID, false)
+	return activateWithManager(ctx, NewManager(), stateRoot, projectID, sessionID, false)
 }
 
 // ActivateQuiesced recreates an owned network while the retained VM is
 // stopped, then installs deny-all rules before returning it to the caller.
 func ActivateQuiesced(ctx context.Context, stateRoot, projectID, sessionID string) (_ *Boundary, err error) {
-	return activate(ctx, stateRoot, projectID, sessionID, true)
+	return activateWithManager(ctx, NewManager(), stateRoot, projectID, sessionID, true)
 }
 
 // RecoverQuiesced adopts an exact previously-owned boundary after a process
@@ -62,7 +69,7 @@ func RecoverQuiesced(ctx context.Context, stateRoot, projectID, sessionID string
 	if err != nil {
 		return nil, err
 	}
-	boundary := &Boundary{manager: NewManager(), lock: lock}
+	boundary := &Boundary{manager: NewManager(), lock: lock, stateRoot: stateRoot}
 	defer func() {
 		if err != nil {
 			_ = boundary.Close(context.Background())
@@ -70,6 +77,12 @@ func RecoverQuiesced(ctx context.Context, stateRoot, projectID, sessionID string
 	}()
 	name, err := networkName(projectID, sessionID)
 	if err != nil {
+		return nil, err
+	}
+	if err := reclaimStaleNetwork(ctx, boundary.manager, stateRoot, name); err != nil {
+		return nil, err
+	}
+	if err := writeOwnerJournal(stateRoot, name); err != nil {
 		return nil, err
 	}
 	boundary.Network, err = boundary.manager.inspect(ctx, name)
@@ -88,18 +101,34 @@ func RecoverQuiesced(ctx context.Context, stateRoot, projectID, sessionID string
 	return boundary, nil
 }
 
-func activate(ctx context.Context, stateRoot, projectID, sessionID string, quiesced bool) (_ *Boundary, err error) {
+func activateWithManager(ctx context.Context, manager *Manager, stateRoot, projectID, sessionID string, quiesced bool) (_ *Boundary, err error) {
 	lock, err := acquireExclusiveLock(stateRoot)
 	if err != nil {
 		return nil, err
 	}
-	boundary := &Boundary{manager: NewManager(), lock: lock}
+	boundary := &Boundary{manager: manager, lock: lock, stateRoot: stateRoot}
 	defer func() {
 		if err != nil {
 			_ = boundary.Close(context.Background())
 		}
 	}()
-	boundary.Network, err = boundary.manager.Create(ctx, projectID, sessionID)
+	name, err := networkName(projectID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	// The exclusive flock proves no other dev boundary is live, so every
+	// journaled network other than the target is an orphan from a partial
+	// create or a crashed supervisor and must be reclaimed before a new
+	// network permanently consumes another vmnet subnet.
+	if err := reclaimStaleNetwork(ctx, manager, stateRoot, name); err != nil {
+		return nil, err
+	}
+	// Journal the intended owner before creating so a crash between create
+	// and use still leaves a durable reference for the next activate.
+	if err := writeOwnerJournal(stateRoot, name); err != nil {
+		return nil, err
+	}
+	boundary.Network, err = manager.Create(ctx, projectID, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +171,16 @@ func (b *Boundary) Close(ctx context.Context) error {
 	b.closed = true
 	var closeErr error
 	if b.Network.Name != "" {
-		closeErr = errors.Join(closeErr, firewall.Disable(ctx))
-		closeErr = errors.Join(closeErr, b.manager.Delete(ctx, b.Network))
+		var networkErr error
+		if err := b.manager.Delete(ctx, b.Network); err != nil && !errors.Is(err, errNotFound) {
+			networkErr = err
+		}
+		// The owner journal is only cleared once nothing references the
+		// network anymore; otherwise the next activate reclaims it.
+		if networkErr == nil && b.stateRoot != "" {
+			networkErr = clearOwnerJournal(b.stateRoot)
+		}
+		closeErr = errors.Join(closeErr, firewall.Disable(ctx), networkErr)
 	}
 	if b.lock != nil {
 		closeErr = errors.Join(closeErr, unix.Flock(int(b.lock.Fd()), unix.LOCK_UN), b.lock.Close())
@@ -211,12 +248,77 @@ func (m *Manager) Create(ctx context.Context, projectID, sessionID string) (Netw
 	}
 	network, err := m.inspect(ctx, name)
 	if err != nil {
-		return Network{}, fmt.Errorf("verify newly created dev network %q: %w", name, err)
+		return Network{}, errors.Join(fmt.Errorf("verify newly created dev network %q: %w", name, err), m.removeCreatedNetwork(ctx, name))
 	}
 	if network.ProjectID != projectID || network.SessionID != sessionID {
-		return Network{}, fmt.Errorf("new dev network ownership labels do not match")
+		return Network{}, errors.Join(fmt.Errorf("new dev network ownership labels do not match"), m.removeCreatedNetwork(ctx, name))
 	}
 	return network, nil
+}
+
+// removeCreatedNetwork deletes a network this process just created after its
+// verification failed, so a partial create cannot leak the vmnet subnet.
+func (m *Manager) removeCreatedNetwork(ctx context.Context, name string) error {
+	if _, err := m.run(ctx, "container", "network", "delete", name); err != nil {
+		return fmt.Errorf("remove failed dev network %q: %w", name, err)
+	}
+	return nil
+}
+
+// ownerJournal durably records the one dev network the current global-lock
+// owner created so a later activate can reclaim it after a crash.
+type ownerJournal struct {
+	Name string `json:"name"`
+}
+
+func writeOwnerJournal(stateRoot, name string) error {
+	if !filepath.IsAbs(stateRoot) || filepath.Clean(stateRoot) != stateRoot || !networkNamePattern.MatchString(name) || len(name) > 127 {
+		return fmt.Errorf("dev network ownership journal path is invalid")
+	}
+	data, err := json.Marshal(ownerJournal{Name: name})
+	if err != nil {
+		return err
+	}
+	return securefs.AtomicWriteOwned(filepath.Join(stateRoot, ownerJournalFile), append(data, '\n'))
+}
+
+func clearOwnerJournal(stateRoot string) error {
+	if err := os.Remove(filepath.Join(stateRoot, ownerJournalFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// reclaimStaleNetwork deletes the network recorded in the owner journal when
+// it is not the exact network the caller is about to own. Deletion is guarded
+// by inspect's ownership-label checks and Delete's full identity validation.
+func reclaimStaleNetwork(ctx context.Context, manager *Manager, stateRoot, keep string) error {
+	journalPath := filepath.Join(stateRoot, ownerJournalFile)
+	data, err := securefs.ReadOwnedRegular(journalPath, 4096)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read dev network ownership journal: %w", err)
+	}
+	var journal ownerJournal
+	if securefs.DecodeStrictJSON(data, &journal) != nil || !networkNamePattern.MatchString(journal.Name) || len(journal.Name) > 127 {
+		return fmt.Errorf("dev network ownership journal is invalid")
+	}
+	if journal.Name == keep {
+		return nil
+	}
+	network, err := manager.inspect(ctx, journal.Name)
+	if errors.Is(err, errNotFound) {
+		return os.Remove(journalPath)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect stale dev network %q: %w", journal.Name, err)
+	}
+	if err := manager.Delete(ctx, network); err != nil && !errors.Is(err, errNotFound) {
+		return fmt.Errorf("reclaim stale dev network %q: %w", journal.Name, err)
+	}
+	return os.Remove(journalPath)
 }
 
 func networkName(projectID, sessionID string) (string, error) {
