@@ -14,6 +14,10 @@ fail() { printf 'FAIL %s - %s\n' "$1" "$2" >&2; exit 1; }
 
 cd "$ROOT"
 
+for REQUIRED_TOOL in go gofmt rg file git; do
+  command -v "$REQUIRED_TOOL" >/dev/null || fail tools "$REQUIRED_TOOL is required but not installed; static checks must not silently pass without it"
+done
+
 UNFORMATTED="$(gofmt -l -- $(rg --files -g '*.go' -g '!bin/**'))"
 [[ -z "$UNFORMATTED" ]] || fail format "$UNFORMATTED"
 git diff --check
