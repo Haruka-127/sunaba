@@ -307,8 +307,12 @@ func (a *app) firewallCommand() *urfavecli.Command {
 		})})
 	}
 	commands = append(commands,
-		&urfavecli.Command{Name: "disable", Usage: "Disable sunaba's firewall anchor", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error { return a.firewall(ctx, "disable", "", "", "", "") })},
-		&urfavecli.Command{Name: "status", Usage: "Show firewall status", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error { return a.firewall(ctx, "status", "", "", "", "") })},
+		&urfavecli.Command{Name: "disable", Usage: "Disable sunaba's firewall anchor", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error {
+			return a.firewall(ctx, "disable", "", "", "", "")
+		})},
+		&urfavecli.Command{Name: "status", Usage: "Show firewall status", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error {
+			return a.firewall(ctx, "status", "", "", "", "")
+		})},
 	)
 	return &urfavecli.Command{Name: "firewall", Usage: "Manage sunaba's host firewall", Commands: commands}
 }
