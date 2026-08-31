@@ -1992,6 +1992,123 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	}
 }
 
+func TestExportDevRecoverySkipsReexportWhenPendingCommitted(t *testing.T) {
+	storeRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: storeRoot}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "session1"
+	vmID := uniqueTestVMID(t)
+	projectID := state.ProjectID(projectRoot)
+	projectState := filepath.Join(storeRoot, "projects", projectID)
+	if err := os.MkdirAll(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := recovery.NewSecureRuntimeBase(projectID, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestRuntime(t, runtimeBase)
+	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
+	snapshotRoot := filepath.Join(runtimeRoot, "snapshot")
+	mergedRoot := filepath.Join(runtimeRoot, "sunaba-quarantine-"+sessionID, "sunaba-merged-"+sessionID)
+	for _, directory := range []string{snapshotRoot, mergedRoot} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(mergedRoot, "result.txt"), []byte("retained\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	projectPolicy := policy.ProjectPolicy{
+		ProjectID: projectID, ProjectRoot: projectRoot,
+		Export:         policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30},
+		ProtectedPaths: []string{".git", ".sunaba"},
+		Bulk:           workspace.DefaultBulkPolicyV1(),
+	}
+	compiled, err := policy.CompileWorkspacePolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, nil, projectPolicy.Bulk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partitioned, baselineBulk, err := workspace.BuildPartitionedSnapshotManifest(projectRoot, compiled.Core.Snapshot, compiled.Bulk, compiled.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := partitioned.Core
+	baseline.Root = snapshotRoot
+	merged, err := workspace.BuildSnapshotManifest(mergedRoot, compiled.Core.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workSet, err := workspace.BuildPendingWorkSet(projectID, projectRoot, vmID, sessionID, compiled.Digest, partitioned.Core, merged, compiled.Core.Snapshot, compiled.Bulk, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := "sunaba-" + projectID + "-" + vmID
+	record := recovery.State{
+		Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID,
+		Container: container, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID,
+		Mode: "secure", Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: baselineBulk, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled,
+		Reason: "destroy failed after export", CreatedAt: time.Now().UTC(),
+	}
+	if err := recovery.Save(projectState, record); err != nil {
+		t.Fatal(err)
+	}
+	active := &session.Session{
+		ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: container,
+		Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: baselineBulk, SnapshotRoot: snapshotRoot, SnapshotPolicy: compiled.Core.Snapshot,
+		ExportPolicy: compiled.Core.Export, ExportPolicyDigest: compiled.Core.Digest, BulkPolicy: compiled.Bulk, WorkspacePolicyDigest: compiled.Digest,
+	}
+	if _, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedRoot, Merged: merged, ChangeSet: workSet.CoreChangeSet, WorkSet: workSet}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &discardRecoveryRuntime{info: runtime.Info{Name: container, State: runtime.StateStopped, Labels: map[string]string{
+		"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": vmID, "dev.sunaba.mode": "secure",
+	}}}
+	a := &app{store: store, runtime: fake, output: io.Discard, errors: io.Discard}
+	if err := a.exportDevRecovery(context.Background(), projectPolicy, projectState, false); err != nil {
+		t.Fatalf("committed pending re-export failed: %v", err)
+	}
+	if !fake.removed {
+		t.Fatal("retained VM was not destroyed after the committed export")
+	}
+	if _, err := os.Lstat(recovery.Path(projectState)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery record remained: %v", err)
+	}
+	if _, err := loadPending(projectState, projectPolicy); err != nil {
+		t.Fatalf("committed pending was disturbed: %v", err)
+	}
+
+	// A pending from a different Agent Session must fail closed without
+	// destroying the retained VM.
+	record2 := record
+	record2.Reason = "second failure"
+	record2.SessionID = "session2"
+	record2.Container = "sunaba-" + projectID + "-" + vmID
+	if err := recovery.Save(projectState, record2); err != nil {
+		t.Fatal(err)
+	}
+	fake2 := &discardRecoveryRuntime{info: fake.info}
+	a2 := &app{store: store, runtime: fake2, output: io.Discard, errors: io.Discard}
+	if err := a2.exportDevRecovery(context.Background(), projectPolicy, projectState, false); err == nil || !strings.Contains(err.Error(), "different Agent Session") {
+		t.Fatalf("foreign pending error=%v", err)
+	}
+	if fake2.removed {
+		t.Fatal("foreign pending authorized VM destruction")
+	}
+}
+
 func TestPersistPendingSelfHealsStalePartialRoot(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

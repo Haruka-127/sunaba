@@ -41,6 +41,20 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 	if record.PendingExport != nil {
 		return a.persistFrozenRecovery(ctx, projectState, record, compiled, recorder)
 	}
+	// A pending Work Set already committed by this session's export means the
+	// frozen export is host-validated. Re-running the export would recapture
+	// every Bulk object under fresh random identities and leak the previous
+	// copies on each retry; finish the retained VM teardown instead.
+	if pendingCommitted, pendingErr := loadPending(projectState, projectPolicy); pendingErr == nil {
+		if pendingCommitted.ProjectID != record.ProjectID || pendingCommitted.VMID != record.VMID || pendingCommitted.SessionID != record.SessionID {
+			return fmt.Errorf("existing pending Work Set belongs to a different Agent Session; apply or discard it before exporting")
+		}
+		return a.finishRecoveryAfterExport(ctx, projectState, record)
+	} else if _, statErr := os.Lstat(filepath.Join(projectState, "pending", "change.json")); statErr == nil {
+		return pendingErr
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
 	// A destroy that removed the VM but crashed before removing the record
 	// leaves nothing to export; finish removing the record instead of failing
 	// every later command on a missing container.
@@ -85,6 +99,32 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 		return err
 	}
 	return nil
+}
+
+// finishRecoveryAfterExport destroys the retained VM and removes its recovery
+// record after the export outcome is already committed to a pending Work Set.
+func (a *app) finishRecoveryAfterExport(ctx context.Context, projectState string, record recovery.State) error {
+	containerState, err := a.runtime.ContainerState(ctx, record.Container)
+	if err != nil {
+		return err
+	}
+	if containerState == runtime.StateNotFound {
+		return recovery.Remove(projectState, record)
+	}
+	if containerState != runtime.StateStopped {
+		return fmt.Errorf("retained recovery VM has unexpected state %s", containerState)
+	}
+	info, err := a.runtime.Inspect(ctx, record.Container)
+	if err != nil {
+		return err
+	}
+	if info.Name != record.Container || info.State != runtime.StateStopped || info.Labels["dev.sunaba.owner"] != "sunaba-supervisor" || info.Labels["dev.sunaba.project"] != record.ProjectID || info.Labels["dev.sunaba.vm"] != record.VMID || info.Labels["dev.sunaba.mode"] != record.RuntimeMode() {
+		return fmt.Errorf("refusing to finish a VM whose runtime ownership does not match recovery metadata")
+	}
+	if err := a.runtime.Remove(ctx, record.Container); err != nil {
+		return err
+	}
+	return recovery.Remove(projectState, record)
 }
 
 func (a *app) persistFrozenRecovery(ctx context.Context, projectState string, record recovery.State, compiled policy.CompiledWorkspacePolicy, recorder *audit.Recorder) error {
