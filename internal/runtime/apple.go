@@ -340,6 +340,11 @@ func (r *AppleContainer) output(ctx context.Context, name string, args ...string
 	cmd := exec.CommandContext(ctx, name, args...)
 	result, err := boundedexec.Capture(cmd, boundedexec.Limits{StdoutBytes: 16 << 20, StderrBytes: 1 << 20})
 	if err != nil {
+		// The CLI reports "not found" style refusals on stderr; keep that text
+		// in the error so isNotFound can classify missing containers.
+		if len(result.Stderr) > 0 {
+			return string(result.Stdout), fmt.Errorf("%s operation failed: %w: %s", name, err, strings.TrimSpace(string(result.Stderr)))
+		}
 		return string(result.Stdout), fmt.Errorf("%s operation failed: %w", name, err)
 	}
 	return string(result.Stdout), nil

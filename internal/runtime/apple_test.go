@@ -142,3 +142,18 @@ func TestExportRejectsSymlinkQuarantineBeforeRuntimeAccess(t *testing.T) {
 		t.Fatal("symlink quarantine was accepted")
 	}
 }
+
+func TestOutputErrorKeepsStderrForNotFoundClassification(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "container-fake")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'Error: container not found: sunaba-test\\n' >&2\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewAppleContainer(false).output(context.Background(), script)
+	if err == nil || !isNotFound(err) {
+		t.Fatalf("stderr classification of a missing container was lost: %v", err)
+	}
+	if !strings.Contains(err.Error(), "container not found") {
+		t.Fatalf("error omits the CLI refusal text: %v", err)
+	}
+}
