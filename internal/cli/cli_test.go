@@ -1992,6 +1992,63 @@ func TestPendingChangePersistsVerifiedMergedViewAndDetectsTampering(t *testing.T
 	}
 }
 
+func TestPersistPendingSelfHealsStalePartialRoot(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(root, "project")
+	mergedSource := filepath.Join(root, "merged-source")
+	projectState := filepath.Join(root, "state", "projects", "project")
+	for _, directory := range []string{project, mergedSource, projectState} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(project, "file.txt"), []byte("before\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mergedSource, "file.txt"), []byte("after\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := workspace.BuildSnapshotManifest(project, workspace.DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := workspace.BuildSnapshotManifest(mergedSource, workspace.DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := workspace.BuildChangeSet(baseline, merged, workspace.DefaultSnapshotPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	testPolicy := policy.ProjectPolicy{ProjectID: "project", ProjectRoot: project, Export: policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30}, Bulk: workspace.DisabledBulkPolicy(), ProtectedPaths: []string{".git"}}
+	compiledWorkspace, err := policy.CompileWorkspacePolicy(testPolicy.Export, testPolicy.ProtectedPaths, nil, testPolicy.Bulk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled := compiledWorkspace.Core
+	active := &session.Session{ProjectID: "project", ProjectRoot: project, VMID: "vm", SessionID: "session", Container: "sunaba-project-session", Baseline: baseline, SnapshotRoot: project, SnapshotPolicy: compiled.Snapshot, ExportPolicy: compiled.Export, ExportPolicyDigest: compiled.Digest, BulkPolicy: compiledWorkspace.Bulk, WorkspacePolicyDigest: compiledWorkspace.Digest}
+	// Simulate an interrupted persist: a partial pending root without
+	// committed metadata used to fail every retry with EEXIST.
+	partial := filepath.Join(projectState, "pending", "baseline")
+	if err := os.MkdirAll(partial, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, "file.txt"), []byte("partial copy\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := persistPending(projectState, active, session.ExportResult{MergedRoot: mergedSource, Merged: merged, ChangeSet: changes})
+	if err != nil {
+		t.Fatalf("retry after interrupted persist failed: %v", err)
+	}
+	loaded, err := loadPending(projectState, testPolicy)
+	if err != nil || loaded.ChangeSet.Digest != persisted.ChangeSet.Digest {
+		t.Fatalf("loaded=%+v error=%v", loaded, err)
+	}
+}
+
 func TestPruneProjectAuditUsesOnlyCurrentProjectRetentionAndRecordsResult(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "audit")
 	recorder, err := audit.NewRecorder(root)

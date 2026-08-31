@@ -43,7 +43,7 @@ type pendingChange struct {
 	CreatedAt          time.Time                  `json:"-"`
 }
 
-func persistPending(projectState string, active *session.Session, result session.ExportResult) (pendingChange, error) {
+func persistPending(projectState string, active *session.Session, result session.ExportResult) (pending pendingChange, returnErr error) {
 	if active == nil || !filepath.IsAbs(projectState) {
 		return pendingChange{}, fmt.Errorf("cannot persist an incomplete Work Set")
 	}
@@ -68,6 +68,12 @@ func persistPending(projectState string, active *session.Session, result session
 		return pendingChange{}, fmt.Errorf("Work Set saved workspace policy is invalid: %w", err)
 	}
 	pendingRoot := filepath.Join(projectState, "pending")
+	// A previously interrupted persist can leave a partial pending root
+	// without committed metadata; reset it so retry stays idempotent instead
+	// of failing every later export with EEXIST.
+	if err := resetStalePendingRoot(projectState); err != nil {
+		return pendingChange{}, err
+	}
 	if _, err := os.Lstat(filepath.Join(pendingRoot, "change.json")); err == nil {
 		return pendingChange{}, fmt.Errorf("a pending Work Set already exists; apply or discard it before another Agent Session")
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -79,7 +85,9 @@ func persistPending(projectState string, active *session.Session, result session
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.RemoveAll(pendingRoot)
+			if removeErr := os.RemoveAll(pendingRoot); removeErr != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("remove incomplete pending Work Set: %w", removeErr))
+			}
 		}
 	}()
 	baselineRoot := filepath.Join(pendingRoot, "baseline")
@@ -107,15 +115,48 @@ func persistPending(projectState string, active *session.Session, result session
 	if err != nil {
 		return pendingChange{}, err
 	}
-	pending := hydratePending(pendingChange{Version: pendingChangeVersion, WorkSet: workSet, Resolution: resolution, WorkspacePolicy: workspacePolicy})
-	if err := writePrivateJSON(filepath.Join(pendingRoot, "resolution.json"), resolution); err != nil {
+	pending = hydratePending(pendingChange{Version: pendingChangeVersion, WorkSet: workSet, Resolution: resolution, WorkspacePolicy: workspacePolicy})
+	changeData, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
 		return pendingChange{}, err
 	}
-	if err := writePrivateJSON(filepath.Join(pendingRoot, "change.json"), pending); err != nil {
+	resolutionData, err := json.MarshalIndent(resolution, "", "  ")
+	if err != nil {
+		return pendingChange{}, err
+	}
+	changeData, resolutionData = append(changeData, '\n'), append(resolutionData, '\n')
+	if err := securefs.WriteTransaction(filepath.Join(pendingRoot, "metadata-transaction.json"), []securefs.Replacement{
+		{Path: filepath.Join(pendingRoot, "resolution.json"), Data: resolutionData, MaximumBytes: 1 << 20},
+		{Path: filepath.Join(pendingRoot, "change.json"), Data: changeData, MaximumBytes: 16 << 20},
+	}, securefs.TransactionOptions{}); err != nil {
 		return pendingChange{}, err
 	}
 	cleanup = false
 	return pending, nil
+}
+
+// resetStalePendingRoot removes a pending directory that a previous
+// interrupted persist left behind without committed metadata. A pending root
+// with a change.json is authoritative and is never reset here.
+func resetStalePendingRoot(projectState string) error {
+	root := filepath.Join(projectState, "pending")
+	if filepath.Dir(root) != projectState || filepath.Base(root) != "pending" {
+		return fmt.Errorf("refusing to reset an unbound pending directory")
+	}
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+		return fmt.Errorf("refusing to reset unsafe pending directory")
+	}
+	if _, statErr := os.Lstat(filepath.Join(root, "change.json")); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+		return nil
+	}
+	if err := os.RemoveAll(root); err != nil {
+		return err
+	}
+	return securefs.SyncDir(projectState)
 }
 
 func activeWorkspacePolicy(active *session.Session) (policy.CompiledWorkspacePolicy, error) {
