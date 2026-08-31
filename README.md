@@ -72,3 +72,7 @@ exportがExternal Git状態や保存失敗で拒否された場合、sunabaは�
 secure modeでも、利用者が許可したLLMやWeb originへ送信した情報の安全性までは保証しません。特にWeb GatewayのHTTPS通信は暗号化されたtunnel内部のmethodやuploadを識別できません。
 
 dev modeはactive session中の直接Internet接続を許可するため、情報流出防止を保証しません。必要な場合だけ明示的に選択してください。詳しくは[利用ワークフローの「直接Internet接続が必要な作業」](./docs/workflows.md#直接internet接続が必要な作業)を参照してください。
+
+## ライセンス
+
+sunabaは[MIT License](./LICENSE)のもとで公開されています。
