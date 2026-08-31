@@ -431,20 +431,23 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
-	destroyed := false
-	recoveryRetained := false
+	var controlled *controlledSession
 	defer func() {
-		if !destroyed {
-			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if controlled == nil {
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
+			_ = os.RemoveAll(managed.runtimeBase)
+			return
 		}
-		if !recoveryRetained {
+		retained, destroyErr := controlled.supervisorShutdown(cleanupContext)
+		returnErr = errors.Join(returnErr, destroyErr)
+		if !retained {
 			_ = os.RemoveAll(managed.runtimeBase)
 		}
 	}()
 	idleTimeout := managed.initialActivation.idleTimeout
-	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, idleTimeout, managed.activationFactory, managed.gitBroker)
+	controlled, err = newControlledSession(managed.active, projectState, managed.initialActivation, idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -463,8 +466,6 @@ func (a *app) supervisor(ctx context.Context, dir string) (returnErr error) {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-controlled.exit:
-			recoveryRetained = controlled.recoveryRetained()
-			destroyed = true
 			return nil
 		case <-controlled.deadlineChanged:
 			if err := deadlines.reconcile(controlled.deadlineSnapshot(), time.Now()); err != nil {
@@ -507,19 +508,22 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 		return errors.Join(err, prepared.err)
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
-	destroyed := false
-	recoveryRetained := false
+	var controlled *controlledSession
 	defer func() {
-		if !destroyed {
-			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if controlled == nil {
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
+			_ = os.RemoveAll(managed.runtimeBase)
+			return
 		}
-		if !recoveryRetained {
+		retained, destroyErr := controlled.supervisorShutdown(cleanupContext)
+		returnErr = errors.Join(returnErr, destroyErr)
+		if !retained {
 			_ = os.RemoveAll(managed.runtimeBase)
 		}
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
+	controlled, err = newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -553,8 +557,7 @@ func (a *app) runForegroundDevAgent(ctx context.Context, projectPolicy policy.Pr
 	exportContext, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	exportErr := controlled.exportAndDestroy(exportContext)
 	cancel()
-	recoveryRetained = controlled.recoveryRetained()
-	destroyed = exportErr == nil || recoveryRetained
+	recoveryRetained := controlled.recoveryRetained()
 	if recoveryRetained {
 		fmt.Fprintln(a.errors, "Dev export was refused. Direct egress and all session capabilities were revoked; the stopped VM was retained. Run 'sunaba status'; retry 'sunaba changes export', export the main workspace while explicitly discarding External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'.")
 	}
@@ -575,19 +578,22 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, managed.operationLock.Close()) }()
-	destroyed := false
-	recoveryRetained := false
+	var controlled *controlledSession
 	defer func() {
-		if !destroyed {
-			cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if controlled == nil {
 			returnErr = errors.Join(returnErr, managed.active.Destroy(cleanupContext))
+			_ = os.RemoveAll(managed.runtimeBase)
+			return
 		}
-		if !recoveryRetained {
+		retained, destroyErr := controlled.supervisorShutdown(cleanupContext)
+		returnErr = errors.Join(returnErr, destroyErr)
+		if !retained {
 			_ = os.RemoveAll(managed.runtimeBase)
 		}
 	}()
-	controlled, err := newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
+	controlled, err = newControlledSession(managed.active, projectState, managed.initialActivation, managed.initialActivation.idleTimeout, managed.activationFactory, managed.gitBroker)
 	if err != nil {
 		return err
 	}
@@ -604,9 +610,7 @@ func (a *app) runForegroundDevShell(ctx context.Context, projectPolicy policy.Pr
 	exportContext, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	err = controlled.exportAndDestroy(exportContext)
 	cancel()
-	recoveryRetained = controlled.recoveryRetained()
-	destroyed = err == nil || recoveryRetained
-	if recoveryRetained {
+	if controlled.recoveryRetained() {
 		fmt.Fprintln(a.errors, "Dev export was refused. Direct egress and all session capabilities were revoked; the stopped VM was retained. Run 'sunaba status'; retry 'sunaba changes export', export the main workspace while explicitly discarding External Git state with 'sunaba changes export --discard-external-git', or discard the VM with 'sunaba recreate --discard-pending' / 'sunaba destroy --yes --discard-pending'.")
 	}
 	return err

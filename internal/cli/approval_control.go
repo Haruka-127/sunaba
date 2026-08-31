@@ -448,6 +448,30 @@ func (s *controlledSession) recoveryRetained() bool {
 	return s.state == "recovery"
 }
 
+// supervisorShutdown is the single teardown path for supervisor processes. It
+// decides under the control mutex whether the VM still has to be destroyed, so
+// cancellation during an in-flight approval operation can neither race the
+// destroy nor discard a VM that the operation retained for recovery. It
+// reports whether the runtime must be preserved.
+func (s *controlledSession) supervisorShutdown(ctx context.Context) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch s.state {
+	case "recovery":
+		return true, nil
+	case "exported", "destroyed":
+		return false, nil
+	}
+	if err := s.active.Destroy(ctx); err != nil {
+		s.state = "failed"
+		s.notifyDeadlineChangedLocked()
+		return false, err
+	}
+	s.state = "destroyed"
+	s.notifyDeadlineChangedLocked()
+	return false, nil
+}
+
 func startApprovalControl(projectState, runtimeBase string, broker pushApprovalBroker, controlled *controlledSession) (*approvalControl, error) {
 	if broker == nil && controlled == nil {
 		return nil, nil
