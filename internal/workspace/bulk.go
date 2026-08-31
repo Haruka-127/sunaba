@@ -431,7 +431,13 @@ func bulkScanSnapshotPolicy(policy SnapshotPolicy) SnapshotPolicy {
 }
 
 func BulkCaptureSnapshotPolicy(policy SnapshotPolicy) SnapshotPolicy {
-	return bulkScanSnapshotPolicy(policy)
+	policy = bulkScanSnapshotPolicy(policy)
+	// Bulk capture reads a frozen, private host materialization and flattens
+	// hardlinks into independent content-addressed blobs. Normal Project
+	// snapshots keep rejecting hardlinks so they cannot import host content
+	// through an inode shared outside the Project.
+	policy.allowHardlinks = true
+	return policy
 }
 
 func ExactAbsentBulkCapture(root string) BulkCapture {

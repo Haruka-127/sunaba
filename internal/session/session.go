@@ -586,6 +586,9 @@ func (s *Session) ExecCapture(ctx context.Context, command []string, stdoutLimit
 }
 
 func (s *Session) startGateway() error {
+	if err := s.stopStaleGateways(); err != nil {
+		return err
+	}
 	server, done, err := s.startUnixGateway("model-gateway.sock", s.cfg.ModelGateway)
 	if err != nil {
 		return err
@@ -1183,11 +1186,20 @@ func (s *Session) StopAndExport(ctx context.Context) (result ExportResult, retur
 			return ExportResult{}, err
 		}
 	}
+	if err := s.verifyHostBaseline(); err != nil {
+		return ExportResult{}, err
+	}
 	if err := s.stopChannels(ctx); err != nil {
 		return ExportResult{}, err
 	}
-	if err := s.prepareGuestExport(ctx); err != nil {
+	alreadyFrozen, err := s.guestExportFrozen(ctx)
+	if err != nil {
 		return ExportResult{}, err
+	}
+	if !alreadyFrozen {
+		if err := s.prepareGuestExport(ctx); err != nil {
+			return ExportResult{}, err
+		}
 	}
 	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
 		return ExportResult{}, fmt.Errorf("stop session VM for frozen export: %w", err)
@@ -1198,7 +1210,7 @@ func (s *Session) StopAndExport(ctx context.Context) (result ExportResult, retur
 	}
 	frozenOwnership = true
 	quarantine := filepath.Join(s.Root, "sunaba-quarantine-"+s.SessionID)
-	if err := makeNewPrivateDirectory(quarantine); err != nil {
+	if err := resetPrivateDirectory(quarantine); err != nil {
 		return ExportResult{}, err
 	}
 	archive := filepath.Join(quarantine, "rootfs.tar")
@@ -1218,9 +1230,8 @@ func (s *Session) StopAndExport(ctx context.Context) (result ExportResult, retur
 	if err != nil {
 		return ExportResult{}, err
 	}
-	current, _, err := workspace.BuildPartitionedSnapshotManifest(s.ProjectRoot, s.cfg.SnapshotPolicy, s.BulkPolicy, s.WorkspacePolicyDigest)
-	if err != nil || current.Digest != s.BaselinePartitioned.Digest {
-		return ExportResult{}, fmt.Errorf("host Project baseline changed during session")
+	if err := s.verifyHostBaseline(); err != nil {
+		return ExportResult{}, err
 	}
 	partitionedBaseline, partitionedResult, bulkRecords, err := workspace.PartitionResultManifest(s.BaselinePartitioned, s.BaselineBulk, merged.Manifest, s.cfg.SnapshotPolicy, s.BulkPolicy, s.WorkspacePolicyDigest)
 	if err != nil {
@@ -1270,6 +1281,21 @@ func (s *Session) StopAndExport(ctx context.Context) (result ExportResult, retur
 		return ExportResult{}, err
 	}
 	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: partitionedResult.Core, ChangeSet: workSet.CoreChangeSet, WorkSet: workSet}, nil
+}
+
+func (s *Session) verifyHostBaseline() error {
+	if s.BaselinePartitioned.Digest != "" {
+		current, _, err := workspace.BuildPartitionedSnapshotManifest(s.ProjectRoot, s.cfg.SnapshotPolicy, s.BulkPolicy, s.WorkspacePolicyDigest)
+		if err != nil || current.Digest != s.BaselinePartitioned.Digest {
+			return fmt.Errorf("host Project baseline changed during session")
+		}
+		return nil
+	}
+	current, err := workspace.BuildSnapshotManifest(s.ProjectRoot, s.cfg.SnapshotPolicy)
+	if err != nil || current.Digest != s.Baseline.Digest {
+		return fmt.Errorf("host Project baseline changed during session")
+	}
+	return nil
 }
 
 func (s *Session) stopDevForRecovery(ctx context.Context) error {
@@ -1363,6 +1389,9 @@ func (s *Session) RetainForRecovery(ctx context.Context) error {
 }
 
 func (s *Session) startRevokedGatewaysForExport() error {
+	if err := s.stopStaleGateways(); err != nil {
+		return err
+	}
 	rejected := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		http.Error(response, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 	})
@@ -1388,7 +1417,22 @@ func (s *Session) startRevokedGatewaysForExport() error {
 	return nil
 }
 
+func (s *Session) guestExportFrozen(ctx context.Context) (bool, error) {
+	out, err := s.cfg.Runtime.ExecOutput(ctx, s.Container, []string{"/bin/bash", "-lc", "test -f /var/lib/sunaba/export-frozen && printf frozen || true"})
+	if err != nil {
+		return false, fmt.Errorf("probe frozen guest export state: %w: %s", err, approval.SanitizeText(out))
+	}
+	return strings.TrimSpace(out) == "frozen", nil
+}
+
 func (s *Session) mountPausedWorkspaceForExport(ctx context.Context) error {
+	frozen, err := s.guestExportFrozen(ctx)
+	if err != nil {
+		return err
+	}
+	if frozen {
+		return nil
+	}
 	script := strings.Join([]string{
 		"set -eu",
 		"test -d /var/lib/sunaba/lower",
@@ -1418,6 +1462,8 @@ func (s *Session) prepareGuestExport(ctx context.Context) error {
 		"rm -rf /var/lib/sunaba/merged-export",
 		"mkdir -p /var/lib/sunaba/merged-export",
 		"cp -a --preserve=all " + s.WorkspacePath + "/. /var/lib/sunaba/merged-export/",
+		"sync",
+		"touch /var/lib/sunaba/export-frozen",
 		"if grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts; then for attempt in $(seq 1 50); do umount " + s.WorkspacePath + " 2>/dev/null && break; sleep 0.1; done; fi",
 		"! grep -Fqs ' " + s.WorkspacePath + " ' /proc/mounts",
 		"if ! grep -Fqs ' /var/lib/sunaba/overlay ' /proc/mounts; then mount -o loop,nosuid,nodev /var/lib/sunaba/overlay.img /var/lib/sunaba/overlay; fi",
@@ -1486,6 +1532,16 @@ func (s *Session) closeDevNetwork(ctx context.Context) error {
 		}
 	})
 	return closeErr
+}
+
+func (s *Session) stopStaleGateways() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var stopErr error
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.webGatewayServer, &s.webGatewayDone, "web_gateway.stopped"))
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.gitGatewayServer, &s.gitGatewayDone, "git_gateway.stopped"))
+	stopErr = errors.Join(stopErr, s.stopUnixGateway(ctx, &s.gatewayServer, &s.gatewayDone, "model_gateway.stopped"))
+	return stopErr
 }
 
 func (s *Session) stopChannels(ctx context.Context) error {
@@ -1617,6 +1673,29 @@ func makeNewPrivateDirectory(path string) error {
 		return fmt.Errorf("session transaction directory must be mode 0700")
 	}
 	return nil
+}
+
+// resetPrivateDirectory replaces a previous attempt's partial output so an
+// interrupted export can be retried. It only reclaims a sunaba-* directory
+// that this process layout owns.
+func resetPrivateDirectory(path string) error {
+	if !filepath.IsAbs(path) || !strings.HasPrefix(filepath.Base(path), "sunaba-") {
+		return fmt.Errorf("session transaction directory must be an absolute sunaba-* path")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return makeNewPrivateDirectory(path)
+		}
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to reset a non-directory transaction path")
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	return makeNewPrivateDirectory(path)
 }
 
 func (s *Session) removeFailedRoot() error {

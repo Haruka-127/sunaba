@@ -35,6 +35,7 @@ type SnapshotPolicy struct {
 	MaxSymlinkSize int
 	ProtectedPaths []string
 	ExcludedPaths  []string
+	allowHardlinks bool
 }
 
 func DefaultSnapshotPolicy() SnapshotPolicy {
@@ -340,6 +341,9 @@ func (w *snapshotWalker) matchExplicitBulkDirectory(entryPath string) (BulkDisco
 }
 
 func (w *snapshotWalker) readRegularFile(parentFD int, name, entryPath string, before unix.Stat_t) (SnapshotEntry, error) {
+	if before.Nlink != 1 && !w.policy.allowHardlinks {
+		return SnapshotEntry{}, fmt.Errorf("snapshot rejects hardlinked regular file %q", entryPath)
+	}
 	if before.Size < 0 || before.Size > w.policy.MaxFileSize {
 		return SnapshotEntry{}, fmt.Errorf("file %q exceeds maximum size %d", entryPath, w.policy.MaxFileSize)
 	}
@@ -367,7 +371,7 @@ func (w *snapshotWalker) readRegularFile(parentFD int, name, entryPath string, b
 	if err := unix.Fstat(fd, &after); err != nil {
 		return SnapshotEntry{}, err
 	}
-	if !sameIdentity(before, after) || after.Size != before.Size {
+	if !sameIdentity(before, after) || (!w.policy.allowHardlinks && after.Nlink != 1) || after.Size != before.Size {
 		return SnapshotEntry{}, fmt.Errorf("file %q changed while snapshotting", entryPath)
 	}
 	w.result.TotalSize += written

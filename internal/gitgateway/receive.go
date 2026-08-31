@@ -2,6 +2,8 @@ package gitgateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	corecapability "sunaba/internal/capability"
+	"sunaba/internal/securefs"
 	"sunaba/internal/unixsocket"
 )
 
@@ -211,24 +214,33 @@ func installPreReceiveHook(repository, helperPath, gitPath string) error {
 		return fmt.Errorf("Git pre-receive helper must be a fixed executable regular file")
 	}
 	hooks := filepath.Join(repository, "sunaba-hooks")
-	if err := os.Mkdir(hooks, 0700); err != nil {
-		return fmt.Errorf("create private Git hooks directory: %w", err)
+	if err := securefs.EnsureOwnedDir(hooks); err != nil {
+		return fmt.Errorf("prepare private Git hooks directory: %w", err)
 	}
 	source, err := os.Open(helperPath)
 	if err != nil {
 		return err
 	}
 	defer source.Close()
-	hookPath := filepath.Join(hooks, "pre-receive")
-	fd, err := unix.Open(hookPath, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0700)
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return err
+	}
+	staged := filepath.Join(hooks, ".sunaba-hook-"+hex.EncodeToString(random))
+	fd, err := unix.Open(staged, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0700)
 	if err != nil {
 		return err
 	}
-	destination := os.NewFile(uintptr(fd), hookPath)
+	destination := os.NewFile(uintptr(fd), staged)
 	_, copyErr := io.Copy(destination, source)
 	syncErr := destination.Sync()
 	closeErr := destination.Close()
 	if copyErr != nil || syncErr != nil || closeErr != nil {
+		_ = os.Remove(staged)
+		return fmt.Errorf("install Git pre-receive helper")
+	}
+	if err := os.Rename(staged, filepath.Join(hooks, "pre-receive")); err != nil {
+		_ = os.Remove(staged)
 		return fmt.Errorf("install Git pre-receive helper")
 	}
 	runner := repositoryGit{binary: gitPath, repository: repository}

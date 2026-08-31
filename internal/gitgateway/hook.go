@@ -25,6 +25,11 @@ import (
 
 const maxHookMessageBytes = 256 << 10
 
+var (
+	hookHandshakeDeadline = 30 * time.Second
+	hookExecuteDeadline   = 10 * time.Minute
+)
+
 type HookRequest struct {
 	Token           string              `json:"token"`
 	ObjectDirectory string              `json:"object_directory"`
@@ -159,13 +164,14 @@ func (b *HookBroker) serve(ctx context.Context) {
 
 func (b *HookBroker) handleConnection(ctx context.Context, connection net.Conn) {
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(hookHandshakeDeadline))
 	decoder := json.NewDecoder(io.LimitReader(connection, maxHookMessageBytes))
 	var request HookRequest
 	if decoder.Decode(&request) != nil {
 		_ = json.NewEncoder(connection).Encode(HookResponse{Message: "sunaba rejected invalid Git hook input"})
 		return
 	}
+	_ = connection.SetDeadline(time.Now().Add(hookExecuteDeadline))
 	response := b.handle(ctx, request)
 	_ = json.NewEncoder(connection).Encode(response)
 }
@@ -239,7 +245,7 @@ func RunPreReceiveHook(socketPath, token, objectDirectory string, input io.Reade
 		return fmt.Errorf("sunaba Git approval broker is unavailable")
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(hookExecuteDeadline))
 	if err := json.NewEncoder(connection).Encode(request); err != nil {
 		return fmt.Errorf("send Git approval request")
 	}

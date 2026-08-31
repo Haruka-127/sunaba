@@ -17,6 +17,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -95,12 +96,13 @@ func (r Relay) ListenAndServe(ctx context.Context) (string, <-chan error, error)
 			http.Error(response, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
-		if !allowedRequest(request.Method, request.URL.Path) {
+		requestPath, canonical := canonicalRequestPath(request)
+		if !canonical || !allowedRequest(request.Method, requestPath) {
 			http.NotFound(response, request)
 			return
 		}
 		if r.OnRequest != nil {
-			r.OnRequest(request.Method, request.URL.Path)
+			r.OnRequest(request.Method, requestPath)
 		}
 		select {
 		case semaphore <- struct{}{}:
@@ -141,6 +143,20 @@ func authorized(request *http.Request, username, password string) bool {
 	wantUser, gotUser := sha256.Sum256([]byte(username)), sha256.Sum256([]byte(presentedUser))
 	wantPassword, gotPassword := sha256.Sum256([]byte(password)), sha256.Sum256([]byte(presentedPassword))
 	return subtle.ConstantTimeCompare(wantUser[:], gotUser[:]) == 1 && subtle.ConstantTimeCompare(wantPassword[:], gotPassword[:]) == 1
+}
+
+// canonicalRequestPath reports the request path only when it is already in
+// canonical form. Dot segments, percent-encoded spellings, and other
+// non-canonical forms are rejected because the guest may normalize them
+// differently than Go does, which would let the path allowlist be bypassed.
+func canonicalRequestPath(request *http.Request) (string, bool) {
+	if request.URL.RawPath != "" {
+		return "", false
+	}
+	if path.Clean("/"+request.URL.Path) != request.URL.Path {
+		return "", false
+	}
+	return request.URL.Path, true
 }
 
 func allowedRequest(method, requestPath string) bool {

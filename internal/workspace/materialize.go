@@ -234,7 +234,7 @@ func copyFileAt(sourceRootFD, destinationRootFD int, entry SnapshotEntry, maximu
 	if err := unix.Fstat(sourceFD, &sourceStat); err != nil {
 		return err
 	}
-	if uint32(sourceStat.Mode)&uint32(unix.S_IFMT) != uint32(unix.S_IFREG) || sourceStat.Size != entry.Size || uint32(sourceStat.Mode)&0777 != entry.Mode {
+	if uint32(sourceStat.Mode)&uint32(unix.S_IFMT) != uint32(unix.S_IFREG) || sourceStat.Nlink != 1 || sourceStat.Size != entry.Size || uint32(sourceStat.Mode)&0777 != entry.Mode {
 		return fmt.Errorf("snapshot source %q changed before materialization", entry.Path)
 	}
 	parentFD, name, err := openParentAt(destinationRootFD, entry.Path)
@@ -254,6 +254,10 @@ func copyFileAt(sourceRootFD, destinationRootFD int, entry SnapshotEntry, maximu
 		return fmt.Errorf("copy snapshot file %q: %w", entry.Path, err)
 	}
 	if written != entry.Size || hex.EncodeToString(hash.Sum(nil)) != entry.SHA256 {
+		return fmt.Errorf("snapshot source %q changed during materialization", entry.Path)
+	}
+	var sourceAfter unix.Stat_t
+	if err := unix.Fstat(sourceFD, &sourceAfter); err != nil || !sameIdentity(sourceStat, sourceAfter) || sourceAfter.Nlink != 1 || sourceAfter.Size != sourceStat.Size || uint32(sourceAfter.Mode)&0777 != entry.Mode {
 		return fmt.Errorf("snapshot source %q changed during materialization", entry.Path)
 	}
 	if err := unix.Fchmod(destinationFD, entry.Mode&0777); err != nil {

@@ -89,6 +89,43 @@ func TestTUIDiffRowsDeduplicateContextAndSplitOversizePairs(t *testing.T) {
 	}
 }
 
+func TestTUIChangesDisclosesSymlinkTargets(t *testing.T) {
+	screen := workspace.ReviewScreen{
+		Layout: workspace.ReviewLayoutUnified, Selected: 0,
+		Files: []workspace.ReviewFile{
+			{Status: "A", Path: "added-link", Risks: []string{"symlink"}, Type: workspace.TypeSymlink, LinkTarget: "../../../.ssh/id_ed25519"},
+			{Status: "M", Path: "retargeted-link", Risks: []string{"symlink", "symlink-target-change"}, Type: workspace.TypeSymlink, PreviousLinkTarget: "docs", LinkTarget: "/etc/passwd"},
+		},
+		Item: workspace.ReviewItem{Change: workspace.Change{Kind: workspace.ChangeAdd, Path: "added-link", After: &workspace.SnapshotEntry{Path: "added-link", Type: workspace.TypeSymlink, LinkTarget: "../../../.ssh/id_ed25519"}}},
+	}
+	rows := reviewDiffRows(screen)
+	if len(rows) != 1 || rows[0].Before.Kind != "empty" || rows[0].After.Text != "link -> ../../../.ssh/id_ed25519" {
+		t.Fatalf("added symlink diff rows=%+v", rows)
+	}
+	model := reviewChangesView(screen, screen.Files, 1, 1, 0, rows, 0, len(rows), 1, 1, false, false)
+	if !strings.Contains(model.Files[0].Detail, `symlink target="../../../.ssh/id_ed25519"`) {
+		t.Fatalf("added symlink detail=%q", model.Files[0].Detail)
+	}
+	if !strings.Contains(model.Files[1].Detail, `symlink target="docs -> /etc/passwd"`) {
+		t.Fatalf("retargeted symlink detail=%q", model.Files[1].Detail)
+	}
+
+	screen.Item = workspace.ReviewItem{Change: workspace.Change{Kind: workspace.ChangeModify, Path: "retargeted-link",
+		Before: &workspace.SnapshotEntry{Path: "retargeted-link", Type: workspace.TypeSymlink, LinkTarget: "docs"},
+		After:  &workspace.SnapshotEntry{Path: "retargeted-link", Type: workspace.TypeSymlink, LinkTarget: "/etc/passwd"}}}
+	rows = reviewDiffRows(screen)
+	if len(rows) != 2 || rows[0].Before.Text != "link -> docs" || rows[0].After.Kind != "empty" || rows[1].Before.Kind != "empty" || rows[1].After.Text != "link -> /etc/passwd" {
+		t.Fatalf("retargeted symlink diff rows=%+v", rows)
+	}
+
+	screen.Item = workspace.ReviewItem{Change: workspace.Change{Kind: workspace.ChangeDelete, Path: "removed-link",
+		Before: &workspace.SnapshotEntry{Path: "removed-link", Type: workspace.TypeSymlink, LinkTarget: "old-target"}}}
+	rows = reviewDiffRows(screen)
+	if len(rows) != 1 || rows[0].Before.Text != "link -> old-target" || rows[0].After.Kind != "empty" {
+		t.Fatalf("deleted symlink diff rows=%+v", rows)
+	}
+}
+
 func TestUIExchangeDoesNotReportAuthorityInitiatedKillAsHelperFailure(t *testing.T) {
 	eventErr := errors.New("read UI frame header: EOF")
 	waitErr := errors.New("signal: killed")

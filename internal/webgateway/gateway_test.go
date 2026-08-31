@@ -383,7 +383,7 @@ func TestPolicyNormalizationAndPublicAddressClassification(t *testing.T) {
 	if digest1 != digest2 {
 		t.Fatal("canonical equivalent policies have different digests")
 	}
-	for _, denied := range []string{"0.1.2.3", "100.64.0.1", "198.18.0.1", "203.0.113.1", "::1", "2001:db8::1", "fd00::1"} {
+	for _, denied := range []string{"0.1.2.3", "100.64.0.1", "198.18.0.1", "203.0.113.1", "::1", "2001:db8::1", "fd00::1", "64:ff9b::a00:1", "64:ff9b:1::a00:1", "2002:0a00:0001::1"} {
 		if isPublicAddress(netip.MustParseAddr(denied)) {
 			t.Errorf("special address accepted: %s", denied)
 		}

@@ -915,6 +915,7 @@ type fakeSessionControlTarget struct {
 	commands           [][]string
 	output             string
 	exportErr          error
+	destroyErr         error
 	discardExternalGit bool
 }
 
@@ -930,6 +931,49 @@ func (f *fakeSessionControlTarget) StopAndExport(context.Context) (session.Expor
 func (f *fakeSessionControlTarget) SetDiscardExternalGitForExport(discard bool) error {
 	f.discardExternalGit = discard
 	return nil
+}
+
+func TestSupervisorShutdownHonorsFinalSessionState(t *testing.T) {
+	newControlled := func(state string) (*controlledSession, *fakeSessionControlTarget) {
+		target := &fakeSessionControlTarget{}
+		return &controlledSession{
+			active: target, projectID: "project", vmID: "vm", sessionID: "session", container: "sunaba-project-vm",
+			runtimeRoot: "/private/tmp/sunaba-runtime-test/sunaba-vm-vm", workspacePath: "/workspace/sunaba-session",
+			attachURL: "http://127.0.0.1:12345", projectState: "/private/tmp/project", serverPassword: strings.Repeat("s", 32),
+			expiresAt: time.Now().Add(time.Hour), idleTimeout: 15 * time.Minute, lastActivity: time.Now(), state: state, exit: make(chan struct{}),
+		}, target
+	}
+	retained, err := func() (bool, error) {
+		controlled, target := newControlled("recovery")
+		retained, shutdownErr := controlled.supervisorShutdown(context.Background())
+		if target.destroyed != 0 {
+			t.Fatalf("recovery VM was destroyed: %d", target.destroyed)
+		}
+		return retained, shutdownErr
+	}()
+	if !retained || err != nil {
+		t.Fatalf("recovery shutdown retained=%t error=%v", retained, err)
+	}
+	for _, state := range []string{"exported", "destroyed"} {
+		controlled, target := newControlled(state)
+		retained, err := controlled.supervisorShutdown(context.Background())
+		if retained || err != nil || target.destroyed != 0 || controlled.state != state {
+			t.Fatalf("%s shutdown retained=%t error=%v destroyed=%d state=%s", state, retained, err, target.destroyed, controlled.state)
+		}
+	}
+	for _, state := range []string{"running", "paused", "failed"} {
+		controlled, target := newControlled(state)
+		retained, err := controlled.supervisorShutdown(context.Background())
+		if retained || err != nil || target.destroyed != 1 || controlled.state != "destroyed" {
+			t.Fatalf("%s shutdown retained=%t error=%v destroyed=%d state=%s", state, retained, err, target.destroyed, controlled.state)
+		}
+	}
+	controlled, target := newControlled("running")
+	target.destroyErr = errors.New("injected destroy failure")
+	retained, destroyFailure := controlled.supervisorShutdown(context.Background())
+	if retained || destroyFailure == nil || target.destroyed != 1 || controlled.state != "failed" {
+		t.Fatalf("failed destroy shutdown retained=%t error=%v destroyed=%d state=%s", retained, destroyFailure, target.destroyed, controlled.state)
+	}
 }
 
 func TestSupervisorExpiryAllowsFreshSessionButRejectsExpiredShell(t *testing.T) {
@@ -1625,7 +1669,10 @@ func TestStaleSupervisorRecoveryRefusesExactHeldVMGuard(t *testing.T) {
 	}
 }
 
-func (f *fakeSessionControlTarget) Destroy(context.Context) error { f.destroyed++; return nil }
+func (f *fakeSessionControlTarget) Destroy(context.Context) error {
+	f.destroyed++
+	return f.destroyErr
+}
 func (f *fakeSessionControlTarget) ExecOutput(_ context.Context, command []string) (string, error) {
 	f.commands = append(f.commands, append([]string(nil), command...))
 	return f.output, nil

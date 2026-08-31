@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/cgi"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -223,4 +224,161 @@ func runGit(gitPath, directory string, args ...string) (string, error) {
 	command.Env = testGitEnvironment()
 	output, err := command.CombinedOutput()
 	return string(output), err
+}
+
+func TestInstallPreReceiveHookIsIdempotent(t *testing.T) {
+	quarantine, _, _, _ := testBareRepository(t)
+	gitPath, _ := exec.LookPath("git")
+	helperRoot := testutil.PrivateTempDir(t, "sunaba-git-hook-helper-")
+	first := filepath.Join(helperRoot, "helper-first")
+	second := filepath.Join(helperRoot, "helper-second")
+	if err := os.WriteFile(first, []byte("#!/bin/sh\nexit 0\nold\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("#!/bin/sh\nexit 0\nnew\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := installPreReceiveHook(quarantine, first, gitPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := installPreReceiveHook(quarantine, second, gitPath); err != nil {
+		t.Fatalf("second session could not reuse the quarantine repository: %v", err)
+	}
+	hookPath := filepath.Join(quarantine, "sunaba-hooks", "pre-receive")
+	content, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(content), "new\n") {
+		t.Fatalf("pre-receive helper was not refreshed: %q", content)
+	}
+	info, err := os.Lstat(hookPath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+		t.Fatalf("installed hook mode=%v error=%v", info.Mode(), err)
+	}
+}
+
+func TestApprovedPushSurvivesUpstreamLongerThanHandshakeDeadline(t *testing.T) {
+	quarantine, first, _, _ := testBareRepository(t)
+	gitPath, _ := exec.LookPath("git")
+	testGit(t, gitPath, quarantine, "symbolic-ref", "HEAD", "refs/heads/main")
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	upstream := filepath.Join(root, "upstream.git")
+	testGit(t, gitPath, "", "clone", "--mirror", quarantine, upstream)
+	testGit(t, gitPath, upstream, "symbolic-ref", "HEAD", "refs/heads/main")
+	testGit(t, gitPath, upstream, "config", "http.receivepack", "true")
+	testGit(t, gitPath, upstream, "config", "receive.denyDeleteCurrent", "ignore")
+	const upstreamAuthorization = "Bearer host-upstream-secret"
+	backend := &cgi.Handler{Path: gitPath, Args: []string{"http-backend"}, Env: []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1"}, InheritEnv: []string{"PATH"}}
+	upstreamServer := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != upstreamAuthorization {
+			response.Header().Set("WWW-Authenticate", `Basic realm="sunaba-test"`)
+			http.Error(response, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
+		}
+		if strings.HasSuffix(request.URL.Path, "/git-receive-pack") {
+			time.Sleep(600 * time.Millisecond)
+		}
+		backend.ServeHTTP(response, request)
+	}))
+	defer upstreamServer.Close()
+	caPath := writeTestCertificate(t, root, upstreamServer.Certificate())
+	recorder, err := audit.NewRecorder(filepath.Join(root, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewPushApprovalManager(nil, recorder, "vm", "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := RepositoryResolver{
+		GitPath: gitPath, RepositoryPath: quarantine, ProjectID: "project", Repository: "repository",
+		RemoteName: "origin", RemoteURL: upstreamServer.URL + "/upstream.git",
+	}
+	executor := PushExecutor{
+		Resolver: resolver, Approvals: manager, AuthorizationHeader: upstreamAuthorization,
+		TLSCAInfoPath: caPath, Audit: recorder, VMID: "vm", SessionID: "session",
+	}
+	hookToken := "host-hook-channel-token-0123456789abcdef"
+	hookRoot := testutil.PrivateTempDir(t, "sunaba-git-hook-")
+	hookSocket := filepath.Join(hookRoot, "hook.sock")
+	brokerContext, cancelBroker := context.WithCancel(context.Background())
+	defer cancelBroker()
+	broker, err := StartHookBroker(brokerContext, hookSocket, hookToken, manager, executor, time.Minute, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Close()
+	originalHandshake := hookHandshakeDeadline
+	hookHandshakeDeadline = 150 * time.Millisecond
+	defer func() { hookHandshakeDeadline = originalHandshake }()
+	capabilityToken := "guest-git-capability-0123456789abcdef"
+	capability, _ := NewReadCapability(capabilityToken, "project", "vm", "session", time.Now().Add(5*time.Minute))
+	readGateway, err := NewReadGateway(ReadConfig{
+		UpstreamURL: upstreamServer.URL + "/upstream.git", GuestRepositoryPath: "/repository.git",
+		AuthorizationHeader: upstreamAuthorization, Capability: capability, HTTPClient: upstreamServer.Client(), Audit: func(ReadAuditEvent) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testExecutable, err = filepath.EvalSymlinks(testExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiveGateway, err := NewReceiveGateway(ReceiveConfig{
+		GitPath: gitPath, RepositoryPath: quarantine, GuestRepositoryPath: "/repository.git",
+		HookHelperPath: testExecutable, HookSocketPath: hookSocket, HookToken: hookToken,
+		Capability: capability, MaxRequestBytes: 64 << 20, MaxResponseBytes: 4 << 20, MaxConcurrent: 1,
+		BeforeAdvertise: executor.Sync,
+		Audit:           func(ReadAuditEvent) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.Contains(request.URL.RawQuery, "git-receive-pack") || strings.HasSuffix(request.URL.Path, "/git-receive-pack") {
+			receiveGateway.ServeHTTP(response, request)
+			return
+		}
+		readGateway.ServeHTTP(response, request)
+	}))
+	defer gatewayServer.Close()
+	guestRoot := t.TempDir()
+	extraHeader := "http.extraHeader=Authorization: Bearer " + capabilityToken
+	testGit(t, gitPath, guestRoot, "-c", extraHeader, "clone", gatewayServer.URL+"/repository.git", "work")
+	work := filepath.Join(guestRoot, "work")
+	testGit(t, gitPath, work, "config", "user.name", "Sunaba Agent")
+	testGit(t, gitPath, work, "config", "user.email", "agent@example.invalid")
+	if err := os.WriteFile(filepath.Join(work, "slow-change"), []byte("approved\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, gitPath, work, "add", "slow-change")
+	testGit(t, gitPath, work, "commit", "-m", "slow change")
+	newObject := strings.TrimSpace(testGit(t, gitPath, work, "rev-parse", "HEAD"))
+	if output, err := runGit(gitPath, work, "-c", extraHeader, "push", "origin", "HEAD:refs/heads/main"); err == nil || !strings.Contains(output, "approval pending") {
+		t.Fatalf("first push output=%q error=%v", output, err)
+	}
+	pending := broker.Pending()
+	if len(pending) != 1 {
+		t.Fatalf("pending approval=%+v", pending)
+	}
+	if err := broker.Confirm(pending[0].Nonce, pending[0].Binding); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runGit(gitPath, work, "-c", extraHeader, "push", "origin", "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("approved push defeated by handshake deadline: output=%q error=%v", output, err)
+	}
+	for name, repository := range map[string]string{"upstream": upstream, "quarantine": quarantine} {
+		if actual := strings.TrimSpace(testGit(t, gitPath, repository, "rev-parse", "refs/heads/main")); actual != newObject {
+			t.Fatalf("%s object=%s, want %s", name, actual, newObject)
+		}
+	}
+	_ = first
 }

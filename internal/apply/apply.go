@@ -48,6 +48,7 @@ type journal struct {
 	ChangeSetDigest  string         `json:"change_set_digest"`
 	WorkSetDigest    string         `json:"work_set_digest,omitempty"`
 	ApplyPlanDigest  string         `json:"apply_plan_digest,omitempty"`
+	Committed        bool           `json:"committed,omitempty"`
 	ProjectCommitted bool           `json:"project_committed,omitempty"`
 	Entries          []journalEntry `json:"entries"`
 }
@@ -169,8 +170,9 @@ func applyLocked(cfg Config, hook func(string) error, rollbackOnError bool) (res
 		return workspace.SnapshotManifest{}, err
 	}
 	journalReady = true
+	committed := false
 	defer func() {
-		if err != nil && rollbackOnError {
+		if err != nil && rollbackOnError && !committed {
 			if rollbackErr := rollback(rootFD, backupFD, j); rollbackErr != nil {
 				err = fmt.Errorf("apply failed: %v; rollback failed: %w", err, rollbackErr)
 				return
@@ -204,9 +206,12 @@ func applyLocked(cfg Config, hook func(string) error, rollbackOnError bool) (res
 	if err != nil || result.Digest != cfg.Merged.Digest {
 		return workspace.SnapshotManifest{}, fmt.Errorf("post-apply manifest mismatch")
 	}
-	if err := removeTransactionRoot(transactionRoot, cfg.ProjectRoot); err != nil {
-		return workspace.SnapshotManifest{}, err
+	j.Committed = true
+	if err := writeJournal(journalPath, j); err != nil {
+		return workspace.SnapshotManifest{}, fmt.Errorf("mark apply committed: %w", err)
 	}
+	committed = true
+	_ = removeTransactionRoot(transactionRoot, cfg.ProjectRoot)
 	return result, nil
 }
 
@@ -230,6 +235,12 @@ func RecoverLocked(projectRoot, projectID string, snapshotPolicy workspace.Snaps
 		}
 		transactionRoot := filepath.Join(transactions, entry.Name())
 		encoded, err := securefs.ReadOwnedRegular(filepath.Join(transactionRoot, "journal.json"), 64<<20)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := removeTransactionRoot(transactionRoot, projectRoot); err != nil {
+				return err
+			}
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("read recovery journal: %w", err)
 		}
@@ -237,10 +248,17 @@ func RecoverLocked(projectRoot, projectID string, snapshotPolicy workspace.Snaps
 		if securefs.DecodeStrictJSON(encoded, &j) != nil || (j.Version != 1 && j.Version != 2) || j.ProjectID != projectID || len(j.Entries) > snapshotPolicy.MaxEntries || (j.Version == 2 && (len(j.WorkSetDigest) != 64 || len(j.ApplyPlanDigest) != 64)) {
 			return fmt.Errorf("invalid recovery journal")
 		}
-		if j.ProjectCommitted {
-			if j.Version != 2 {
+		committed := j.Committed
+		if j.Version == 1 && j.ProjectCommitted {
+			return fmt.Errorf("invalid committed recovery journal")
+		}
+		if j.Version == 2 {
+			if j.Committed {
 				return fmt.Errorf("invalid committed recovery journal")
 			}
+			committed = j.ProjectCommitted
+		}
+		if committed {
 			if err := removeTransactionRoot(transactionRoot, projectRoot); err != nil {
 				return err
 			}

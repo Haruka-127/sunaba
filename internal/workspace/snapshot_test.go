@@ -72,6 +72,18 @@ func TestSnapshotRejectsSpecialFiles(t *testing.T) {
 	}
 }
 
+func TestSnapshotRejectsHardlinkedRegularFiles(t *testing.T) {
+	root := t.TempDir()
+	external := filepath.Join(t.TempDir(), "secret")
+	writeFile(t, external, "host secret")
+	if err := os.Link(external, filepath.Join(root, "disguised.go")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildSnapshotManifest(root, DefaultSnapshotPolicy()); err == nil {
+		t.Fatal("hardlinked regular file was accepted")
+	}
+}
+
 func TestSnapshotEnforcesLimits(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "large"), "12345")

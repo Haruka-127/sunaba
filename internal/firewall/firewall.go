@@ -54,27 +54,51 @@ type fileSnapshot struct {
 func GenerateRules(n Network) string {
 	private4 := []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4"}
 	private6 := []string{"::/128", "::1/128", "64:ff9b:1::/48", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8"}
+	on := ""
+	if n.Interface != "" {
+		on = "on " + n.Interface + " "
+	}
 	var rules strings.Builder
 	rules.WriteString("# Managed by sunaba. Do not edit.\n")
-	fmt.Fprintf(&rules, "pass in quick inet proto udp from %s port 68 to any port 67 keep state\n", n.Subnet)
-	fmt.Fprintf(&rules, "pass in quick inet proto { tcp udp } from %s to %s port 53 keep state\n", n.Subnet, n.Gateway)
-	fmt.Fprintf(&rules, "block drop in quick inet from %s to self\n", n.Subnet)
+	if n.Interface != "" {
+		rules.WriteString("pass in quick " + on + "inet proto udp from 0.0.0.0 port 68 to any port 67 keep state\n")
+		rules.WriteString("pass in quick " + on + "inet6 proto ipv6-icmp from fe80::/10 to any\n")
+		rules.WriteString("block drop in quick " + on + "inet from ! " + n.Subnet + " to any\n")
+		rules.WriteString("block drop in quick " + on + "inet6 from ! " + n.IPv6Subnet + " to any\n")
+	}
+	fmt.Fprintf(&rules, "pass in quick %sinet proto udp from %s port 68 to any port 67 keep state\n", on, n.Subnet)
+	fmt.Fprintf(&rules, "pass in quick %sinet proto { tcp udp } from %s to %s port 53 keep state\n", on, n.Subnet, n.Gateway)
+	fmt.Fprintf(&rules, "block drop in quick %sinet from %s to self\n", on, n.Subnet)
 	for _, destination := range private4 {
-		fmt.Fprintf(&rules, "block drop in quick inet from %s to %s\n", n.Subnet, destination)
+		fmt.Fprintf(&rules, "block drop in quick %sinet from %s to %s\n", on, n.Subnet, destination)
 	}
-	fmt.Fprintf(&rules, "pass in quick inet from %s to any keep state\n", n.Subnet)
-	fmt.Fprintf(&rules, "block drop out quick inet from any to %s\n", n.Subnet)
-	fmt.Fprintf(&rules, "block drop in quick inet6 from %s to self\n", n.IPv6Subnet)
+	fmt.Fprintf(&rules, "pass in quick %sinet from %s to any keep state\n", on, n.Subnet)
+	fmt.Fprintf(&rules, "block drop out quick %sinet from any to %s\n", on, n.Subnet)
+	fmt.Fprintf(&rules, "block drop in quick %sinet6 from %s to self\n", on, n.IPv6Subnet)
 	for _, destination := range private6 {
-		fmt.Fprintf(&rules, "block drop in quick inet6 from %s to %s\n", n.IPv6Subnet, destination)
+		fmt.Fprintf(&rules, "block drop in quick %sinet6 from %s to %s\n", on, n.IPv6Subnet, destination)
 	}
-	fmt.Fprintf(&rules, "pass in quick inet6 from %s to any keep state\n", n.IPv6Subnet)
-	fmt.Fprintf(&rules, "block drop out quick inet6 from any to %s\n", n.IPv6Subnet)
+	fmt.Fprintf(&rules, "pass in quick %sinet6 from %s to any keep state\n", on, n.IPv6Subnet)
+	fmt.Fprintf(&rules, "block drop out quick %sinet6 from any to %s\n", on, n.IPv6Subnet)
 	return rules.String()
 }
 
 func GenerateQuiescedRules(n Network) string {
-	return fmt.Sprintf("# Managed by sunaba. Dev export is quiesced. Do not edit.\nblock drop in quick inet from %s to any\nblock drop out quick inet from any to %s\nblock drop in quick inet6 from %s to any\nblock drop out quick inet6 from any to %s\n", n.Subnet, n.Subnet, n.IPv6Subnet, n.IPv6Subnet)
+	on := ""
+	if n.Interface != "" {
+		on = "on " + n.Interface + " "
+	}
+	var rules strings.Builder
+	rules.WriteString("# Managed by sunaba. Dev export is quiesced. Do not edit.\n")
+	if n.Interface != "" {
+		rules.WriteString("block drop in quick " + on + "inet from ! " + n.Subnet + " to any\n")
+		rules.WriteString("block drop in quick " + on + "inet6 from ! " + n.IPv6Subnet + " to any\n")
+	}
+	rules.WriteString("block drop in quick " + on + "inet from " + n.Subnet + " to any\n")
+	rules.WriteString("block drop out quick " + on + "inet from any to " + n.Subnet + "\n")
+	rules.WriteString("block drop in quick " + on + "inet6 from " + n.IPv6Subnet + " to any\n")
+	rules.WriteString("block drop out quick " + on + "inet6 from any to " + n.IPv6Subnet + "\n")
+	return rules.String()
 }
 
 func ValidateNetwork(n Network) error {
@@ -135,6 +159,9 @@ func HasAnchorBlock(conf string) bool {
 
 func Enable(ctx context.Context, n Network) error {
 	if err := ValidateNetwork(n); err != nil {
+		return err
+	}
+	if err := resolveInterface(ctx, &n); err != nil {
 		return err
 	}
 	if os.Geteuid() != 0 {
@@ -249,6 +276,9 @@ func Disable(ctx context.Context) error {
 // verified that boundary first.
 func Quiesce(ctx context.Context, n Network) error {
 	if err := ValidateNetwork(n); err != nil {
+		return err
+	}
+	if err := resolveInterface(ctx, &n); err != nil {
 		return err
 	}
 	if os.Geteuid() != 0 {
@@ -410,6 +440,21 @@ func containsFieldSequence(fields []string, sequence ...string) bool {
 	return false
 }
 
+// resolveInterface pins the bridge interface that carries the gateway so
+// every generated rule, including the source-spoofing denial, is scoped to
+// the VM-facing interface and cannot affect unrelated host traffic.
+func resolveInterface(ctx context.Context, n *Network) error {
+	if n.Interface != "" {
+		return nil
+	}
+	iface := interfaceForGateway(ctx, n.Gateway)
+	if iface == "" {
+		return fmt.Errorf("cannot resolve the host interface for gateway %s; pass --interface explicitly", n.Gateway)
+	}
+	n.Interface = iface
+	return nil
+}
+
 func rerunWithSudo(action string) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -445,6 +490,9 @@ func rerunQuiesceWithSudo(n Network) error {
 		return err
 	}
 	args := []string{exe, "firewall", "quiesce", "--subnet", n.Subnet, "--gateway", n.Gateway, "--ipv6-subnet", n.IPv6Subnet}
+	if n.Interface != "" {
+		args = append(args, "--interface", n.Interface)
+	}
 	cmd := exec.Command("sudo", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -577,7 +625,7 @@ func networkInspect(ctx context.Context) (Network, bool) {
 	}
 	iface := interfaceForGateway(ctx, gw)
 	if iface == "" {
-		iface = "bridge100"
+		return Network{}, false
 	}
 	return Network{Interface: iface, Subnet: subnet, Gateway: gw, IPv6Subnet: ipv6Subnet}, true
 }

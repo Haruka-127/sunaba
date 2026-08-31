@@ -1245,7 +1245,7 @@ func (a *app) discardUnrecordedStoppedVMs(ctx context.Context, projectID string)
 	return nil
 }
 
-func (a *app) firewall(ctx context.Context, action, subnet, gateway, ipv6 string) error {
+func (a *app) firewall(ctx context.Context, action, subnet, gateway, ipv6, iface string) error {
 	switch action {
 	case "disable":
 		return firewall.Disable(ctx)
@@ -1253,12 +1253,12 @@ func (a *app) firewall(ctx context.Context, action, subnet, gateway, ipv6 string
 		if subnet == "" || gateway == "" || ipv6 == "" {
 			return fmt.Errorf("firewall enable requires --subnet, --gateway, and --ipv6-subnet")
 		}
-		return firewall.Enable(ctx, firewall.Network{Subnet: subnet, Gateway: gateway, IPv6Subnet: ipv6})
+		return firewall.Enable(ctx, firewall.Network{Interface: iface, Subnet: subnet, Gateway: gateway, IPv6Subnet: ipv6})
 	case "quiesce":
 		if subnet == "" || gateway == "" || ipv6 == "" {
 			return fmt.Errorf("firewall quiesce requires --subnet, --gateway, and --ipv6-subnet")
 		}
-		return firewall.Quiesce(ctx, firewall.Network{Subnet: subnet, Gateway: gateway, IPv6Subnet: ipv6})
+		return firewall.Quiesce(ctx, firewall.Network{Interface: iface, Subnet: subnet, Gateway: gateway, IPv6Subnet: ipv6})
 	case "status":
 		status, err := firewall.Status(ctx)
 		fmt.Fprintln(a.output, status)

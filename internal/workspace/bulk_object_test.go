@@ -29,7 +29,8 @@ func TestCaptureBulkObjectCommitsOpaquePrivateObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy := DefaultSnapshotPolicy()
-	manifest, err := BuildSnapshotManifest(source, policy)
+	capturePolicy := BulkCaptureSnapshotPolicy(policy)
+	manifest, err := BuildSnapshotManifest(source, capturePolicy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +41,7 @@ func TestCaptureBulkObjectCommitsOpaquePrivateObject(t *testing.T) {
 	store := filepath.Join(canonicalParent, "retained")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	object, err := CaptureBulkObject(ctx, store, source, manifest, "node_modules", policy)
+	object, err := CaptureBulkObject(ctx, store, source, manifest, "node_modules", capturePolicy)
 	if err != nil {
 		t.Fatal(err)
 	}

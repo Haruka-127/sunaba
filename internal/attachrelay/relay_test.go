@@ -105,6 +105,28 @@ func TestRelayAuthenticatesFiltersAndSanitizes(t *testing.T) {
 	if forbiddenResponse.StatusCode != http.StatusNotFound || forbiddenReached.Load() {
 		t.Fatalf("unsafe TUI endpoint status=%d reached=%t", forbiddenResponse.StatusCode, forbiddenReached.Load())
 	}
+	traversal, _ := http.NewRequest(http.MethodPost, endpoint+"/project/../tui/execute-command", strings.NewReader(`{}`))
+	traversal.SetBasicAuth("opencode", relayTestPassword)
+	traversal.URL.RawPath = "/project/%2e%2e/tui/execute-command"
+	traversalResponse, err := http.DefaultClient.Do(traversal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = traversalResponse.Body.Close()
+	if traversalResponse.StatusCode != http.StatusNotFound || forbiddenReached.Load() {
+		t.Fatalf("dot-segment traversal reached guest: status=%d reached=%t", traversalResponse.StatusCode, forbiddenReached.Load())
+	}
+	encoded, _ := http.NewRequest(http.MethodGet, endpoint+"/global/%68ealth", nil)
+	encoded.SetBasicAuth("opencode", relayTestPassword)
+	encoded.URL.RawPath = "/global/%68ealth"
+	encodedResponse, err := http.DefaultClient.Do(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = encodedResponse.Body.Close()
+	if encodedResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("percent-encoded allowlist bypass status=%d", encodedResponse.StatusCode)
+	}
 	eventRequest, _ := http.NewRequest(http.MethodGet, endpoint+"/global/event", nil)
 	eventRequest.SetBasicAuth("opencode", relayTestPassword)
 	events, err := http.DefaultClient.Do(eventRequest)

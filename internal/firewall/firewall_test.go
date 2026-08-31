@@ -47,8 +47,39 @@ func TestGenerateRules(t *testing.T) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
 	}
+	if strings.Contains(got, "from ! ") {
+		t.Fatalf("unscoped rules must not contain a spoofing denial: %s", got)
+	}
 	if strings.Index(got, "port 53") > strings.Index(got, "to self") {
 		t.Fatalf("DNS pass rule must precede private/host block rules:\n%s", got)
+	}
+}
+
+func TestGenerateRulesScopedToInterfaceRejectsSpoofedSources(t *testing.T) {
+	n := Network{Interface: "bridge100", Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
+	got := GenerateRules(n)
+	for _, want := range []string{
+		"pass in quick on bridge100 inet proto udp from 0.0.0.0 port 68 to any port 67 keep state",
+		"pass in quick on bridge100 inet6 proto ipv6-icmp from fe80::/10 to any",
+		"block drop in quick on bridge100 inet from ! 192.168.65.0/24 to any",
+		"block drop in quick on bridge100 inet6 from ! fd00:65::/64 to any",
+		"block drop in quick on bridge100 inet from 192.168.65.0/24 to self",
+		"pass in quick on bridge100 inet from 192.168.65.0/24 to any keep state",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.Contains(line, "on bridge100") {
+			t.Fatalf("unscoped rule line %q in %s", line, got)
+		}
+	}
+	if !hasConfiguredBlockRule(got, n.Interface, "inet", n.Subnet) || !hasConfiguredBlockRule(got, n.Interface, "inet6", n.IPv6Subnet) {
+		t.Fatalf("interface-scoped rules no longer satisfy status verification: %s", got)
 	}
 }
 
@@ -66,14 +97,24 @@ func TestGenerateQuiescedRulesDeniesAllDevSourceTraffic(t *testing.T) {
 	if hasBlockToAny(rules, "inet", "192.168.66.0/24") {
 		t.Fatal("quiesced parser accepted a different source subnet")
 	}
+	scoped := GenerateQuiescedRules(Network{Interface: "bridge100", Subnet: n.Subnet, Gateway: n.Gateway, IPv6Subnet: n.IPv6Subnet})
+	if !strings.Contains(scoped, "block drop in quick on bridge100 inet from ! 192.168.65.0/24 to any") {
+		t.Fatalf("quiesced rules lack the interface-scoped spoofing denial: %s", scoped)
+	}
+	for _, item := range []struct{ family, source string }{{"inet", n.Subnet}, {"inet6", n.IPv6Subnet}} {
+		if !hasBlockToAny(scoped, item.family, item.source) {
+			t.Fatalf("missing interface-scoped deny-all %s rule: %s", item.family, scoped)
+		}
+	}
 }
 
 func TestGeneratedRulesAcceptedByPF(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("pfctl is only available on macOS")
 	}
-	n := Network{Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
-	for name, rules := range map[string]string{"active": GenerateRules(n), "quiesced": GenerateQuiescedRules(n)} {
+	n := Network{Interface: "bridge100", Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
+	legacy := Network{Subnet: n.Subnet, Gateway: n.Gateway, IPv6Subnet: n.IPv6Subnet}
+	for name, rules := range map[string]string{"active": GenerateRules(n), "quiesced": GenerateQuiescedRules(n), "legacy": GenerateRules(legacy)} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "sunaba.rules")
 			if err := os.WriteFile(path, []byte(rules), 0600); err != nil {
@@ -138,6 +179,22 @@ func TestParseLivePFStateRequiresAllLayers(t *testing.T) {
 	stale := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, liveRules, rules, wrongNetwork)
 	if stale.loaded() || stale.IPv4Block || stale.IPv6Block {
 		t.Fatalf("stale rules reported as loaded: %#v", stale)
+	}
+}
+
+func TestParseLivePFStateVerifiesInterfaceScopedRules(t *testing.T) {
+	n := Network{Interface: "bridge100", Subnet: "192.168.65.0/24", Gateway: "192.168.65.1", IPv6Subnet: "fd00:65::/64"}
+	rules := GenerateRules(n)
+	liveRules := strings.ReplaceAll(rules, "to self", "to 192.168.98.150")
+	loaded := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, liveRules, rules, n)
+	if !loaded.loaded() {
+		t.Fatalf("interface-scoped rules reported as not loaded: %#v", loaded)
+	}
+	otherInterface := n
+	otherInterface.Interface = "bridge101"
+	detached := parseLivePFState("Status: Enabled", `anchor "sunaba" all`, liveRules, rules, otherInterface)
+	if detached.loaded() || detached.IPv4Block || detached.IPv6Block {
+		t.Fatalf("rules on another interface reported as loaded: %#v", detached)
 	}
 }
 
