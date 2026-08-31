@@ -274,9 +274,15 @@ func TestPhase0SecureNetworkAndGatewayTransport(t *testing.T) {
 	}()
 	repository := repositoryRoot(t)
 	managedToolDir := filepath.Join(repository, "bin", "tools", "opencode", "v"+dependency.OpenCodeVersion)
+	// The Host TUI session root lives beside the VM gateway sockets under the
+	// runtime root, mirroring the production createHostTUISessionRoot layout.
+	hostTUISessionRoot := filepath.Join(tempDir, "sunaba-session-"+runID)
+	if err := os.Mkdir(hostTUISessionRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
 	tuiCommand, err := opencode.BuildHostTUICommand(ctx, opencode.HostTUIConfig{
 		Binary: filepath.Join(managedToolDir, "opencode"), ManagedToolDir: managedToolDir,
-		SessionRoot: tempDir, ServerURL: relayURL,
+		SessionRoot: hostTUISessionRoot, ServerURL: relayURL,
 		GuestWorkspace: "/workspace/sunaba-" + runID, Password: password,
 		ExpectedExecutableSHA256: manifest.OpenCode.Host.ExecutableSHA256,
 	}, os.Environ())
