@@ -296,18 +296,19 @@ func (a *app) firewallCommand() *urfavecli.Command {
 			&urfavecli.StringFlag{Name: "subnet", Usage: "Owned dev IPv4 subnet", Required: true, OnlyOnce: true},
 			&urfavecli.StringFlag{Name: "gateway", Usage: "Owned dev IPv4 gateway", Required: true, OnlyOnce: true},
 			&urfavecli.StringFlag{Name: "ipv6-subnet", Usage: "Owned dev IPv6 subnet", Required: true, OnlyOnce: true},
+			&urfavecli.StringFlag{Name: "interface", Usage: "Host interface that carries the gateway", OnlyOnce: true},
 		}
 	}
 	commands := make([]*urfavecli.Command, 0, 4)
 	for _, action := range []string{"enable", "quiesce"} {
 		action := action
 		commands = append(commands, &urfavecli.Command{Name: action, Usage: map[string]string{"enable": "Enable the firewall for a dev session", "quiesce": "Stop egress for a dev session"}[action], Flags: networkFlags(), Action: rejectArguments(func(ctx context.Context, cmd *urfavecli.Command) error {
-			return a.firewall(ctx, action, cmd.String("subnet"), cmd.String("gateway"), cmd.String("ipv6-subnet"))
+			return a.firewall(ctx, action, cmd.String("subnet"), cmd.String("gateway"), cmd.String("ipv6-subnet"), cmd.String("interface"))
 		})})
 	}
 	commands = append(commands,
-		&urfavecli.Command{Name: "disable", Usage: "Disable sunaba's firewall anchor", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error { return a.firewall(ctx, "disable", "", "", "") })},
-		&urfavecli.Command{Name: "status", Usage: "Show firewall status", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error { return a.firewall(ctx, "status", "", "", "") })},
+		&urfavecli.Command{Name: "disable", Usage: "Disable sunaba's firewall anchor", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error { return a.firewall(ctx, "disable", "", "", "", "") })},
+		&urfavecli.Command{Name: "status", Usage: "Show firewall status", Action: rejectArguments(func(ctx context.Context, _ *urfavecli.Command) error { return a.firewall(ctx, "status", "", "", "", "") })},
 	)
 	return &urfavecli.Command{Name: "firewall", Usage: "Manage sunaba's host firewall", Commands: commands}
 }
