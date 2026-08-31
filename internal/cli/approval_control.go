@@ -342,6 +342,11 @@ func (s *controlledSession) exportAndDestroyWithOptions(ctx context.Context, dis
 		if s.persistent == nil {
 			return fmt.Errorf("supervisor cannot persist an unbound Change Set")
 		}
+		// Persist the frozen export record before the long host-side copy: a
+		// crash mid-persistPending must leave a durable record that can
+		// re-commit the frozen Work Set without restarting the VM.
+		frozenRecord := s.persistent.RecoveryStateWithPendingExport("pending Work Set host persistence incomplete", result)
+		recordSaved := recovery.Save(s.projectState, frozenRecord) == nil
 		if _, err := persistPending(s.projectState, s.persistent, result); err != nil {
 			if !s.persistent.SupportsFrozenRecovery() {
 				s.state = "failed"
@@ -351,19 +356,40 @@ func (s *controlledSession) exportAndDestroyWithOptions(ctx context.Context, dis
 			s.state = "recovery"
 			s.notifyDeadlineChangedLocked()
 			s.signalExit()
-			record := s.persistent.RecoveryStateWithPendingExport(err.Error(), result)
-			saveErr := recovery.Save(s.projectState, record)
-			// StopAndExport has already stopped the VM, but a successful export
-			// only quiesces (rather than closes) the dev network. Always transfer
-			// the stopped VM out of process ownership, even if the recovery record
-			// itself could not be written. Cleanup treats an unrecorded stopped dev
-			// VM as fail-closed, so a metadata failure cannot authorize deletion.
+			// StopAndExport has already stopped the VM. Always transfer the
+			// stopped VM out of process ownership, even if the recovery record
+			// itself could not be written. Cleanup treats an unrecorded stopped
+			// VM as fail-closed, so a metadata failure cannot authorize
+			// deletion.
 			retainErr := s.persistent.RetainForRecovery(ctx)
-			if saveErr != nil {
-				return errors.Join(err, fmt.Errorf("persist frozen export recovery ownership: %w", saveErr), retainErr)
+			if !recordSaved {
+				saveErr := recovery.Save(s.projectState, frozenRecord)
+				if saveErr != nil {
+					return errors.Join(err, fmt.Errorf("persist frozen export recovery ownership: %w", saveErr), retainErr)
+				}
 			}
 			return errors.Join(err, retainErr)
 		}
+		if err := s.active.Destroy(ctx); err != nil {
+			s.state = "failed"
+			s.notifyDeadlineChangedLocked()
+			return err
+		}
+		// The committed pending owns the outcome now; drop the frozen record
+		// when it was saved. A removal failure self-heals through the
+		// committed-pending export path.
+		if recordSaved {
+			if removeErr := recovery.Remove(s.projectState, frozenRecord); removeErr != nil {
+				s.state = "exported"
+				s.notifyDeadlineChangedLocked()
+				s.signalExit()
+				return removeErr
+			}
+		}
+		s.state = "exported"
+		s.notifyDeadlineChangedLocked()
+		s.signalExit()
+		return nil
 	}
 	if err := s.active.Destroy(ctx); err != nil {
 		s.state = "failed"

@@ -458,6 +458,48 @@ func TestDevExternalGitRefusalStopsVMRevokesCapabilitiesAndClosesNetwork(t *test
 	}
 }
 
+func TestPreFreezeExportFailureRetainsStoppedVMForRecovery(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.ProjectRoot, "hello.txt"), []byte("changed during session\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.StopAndExport(context.Background())
+	var recoveryErr *RecoveryRequiredError
+	if !errors.As(err, &recoveryErr) || !strings.Contains(err.Error(), "baseline changed") {
+		t.Fatalf("error=%v", err)
+	}
+	if fake.state != runtime.StateStopped || fake.removed || s.gatewayActive.Load() || s.leaseCreated {
+		t.Fatalf("state=%s removed=%t gateway=%t lease=%t", fake.state, fake.removed, s.gatewayActive.Load(), s.leaseCreated)
+	}
+	if err := s.DetachForRecovery(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fake.removed {
+		t.Fatal("detaching recovery removed the stopped VM")
+	}
+}
+
+func TestSecureExternalGitRefusalRetainsStoppedVM(t *testing.T) {
+	cfg, fake := sessionFixture(t)
+	fake.externalGitUnsafe = true
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.StopAndExport(context.Background())
+	var recoveryErr *RecoveryRequiredError
+	if !errors.As(err, &recoveryErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if fake.state != runtime.StateStopped || fake.removed || s.gatewayActive.Load() || s.leaseCreated {
+		t.Fatalf("state=%s removed=%t gateway=%t lease=%t", fake.state, fake.removed, s.gatewayActive.Load(), s.leaseCreated)
+	}
+}
+
 func TestPausedExportRevokesCapabilityBeforeRestartAndKeepsMountSocket(t *testing.T) {
 	cfg, fake := sessionFixture(t)
 	s, err := Start(context.Background(), cfg)
@@ -506,21 +548,12 @@ func TestFailedPausedExportStopsReplacedGatewayServers(t *testing.T) {
 	if _, err := s.StopAndExport(context.Background()); err == nil || !strings.Contains(err.Error(), "start paused session VM for export") {
 		t.Fatalf("restart error=%v", err)
 	}
-	if s.gatewayServer == nil || s.gatewayDone == nil {
-		t.Fatal("failed export did not leave the revoked gateway assigned")
+	if s.gatewayServer != nil || s.gatewayDone != nil {
+		t.Fatal("failed export left a revoked gateway server assigned")
 	}
-	previousDone := s.gatewayDone
 	fake.startError = nil
 	if _, err := s.StopAndExport(context.Background()); err == nil {
 		t.Fatal("retry unexpectedly succeeded")
-	}
-	select {
-	case _, open := <-previousDone:
-		if open {
-			t.Fatal("replaced gateway server channel was left open")
-		}
-	default:
-		t.Fatal("previous gateway server was not stopped before replacement")
 	}
 	if err := s.Destroy(context.Background()); err != nil {
 		t.Fatal(err)

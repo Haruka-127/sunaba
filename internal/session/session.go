@@ -1148,65 +1148,65 @@ func (s *Session) StopAndExport(ctx context.Context) (result ExportResult, retur
 			return ExportResult{}, err
 		}
 	}
+	// From here on the session's capabilities are irrevocably revoked. Any
+	// later failure must retain the VM for explicit recovery instead of
+	// letting an automatic destroy discard its unexported work.
 	s.gatewayActive.Store(false)
 	if err := s.stopAttach(ctx); err != nil {
-		return ExportResult{}, err
+		return ExportResult{}, s.retainForExportFailure(ctx, err)
 	}
 	if s.leaseCreated {
 		if _, err := s.leaseRegistry.Revoke(s.SessionID); err != nil {
-			return ExportResult{}, err
+			return ExportResult{}, s.retainForExportFailure(ctx, err)
 		}
 		s.leaseCreated = false
 		if err := s.emit("capability.revoked", "export"); err != nil {
-			return ExportResult{}, err
+			return ExportResult{}, s.retainForExportFailure(ctx, err)
 		}
 	}
 	containerState, err := s.cfg.Runtime.ContainerState(ctx, s.Container)
 	if err != nil {
-		return ExportResult{}, err
+		return ExportResult{}, s.retainForExportFailure(ctx, err)
 	}
 	if containerState == runtime.StateStopped {
 		if err := s.startRevokedGatewaysForExport(); err != nil {
-			return ExportResult{}, err
+			return ExportResult{}, s.retainForExportFailure(ctx, err)
 		}
 		if err := s.cfg.Runtime.Start(ctx, s.Container); err != nil {
-			return ExportResult{}, fmt.Errorf("start paused session VM for export: %w", err)
+			return ExportResult{}, s.retainForExportFailure(ctx, fmt.Errorf("start paused session VM for export: %w", err))
 		}
 		if err := s.mountPausedWorkspaceForExport(ctx); err != nil {
-			return ExportResult{}, err
+			return ExportResult{}, s.retainForExportFailure(ctx, err)
 		}
 	} else if containerState != runtime.StateRunning {
-		return ExportResult{}, fmt.Errorf("session VM cannot be frozen from state %s", containerState)
+		return ExportResult{}, s.retainForExportFailure(ctx, fmt.Errorf("session VM cannot be frozen from state %s", containerState))
 	}
 	if !s.discardExternalGit {
 		if err := externalgit.CheckBeforeExport(ctx, s.cfg.Runtime, s.Container, s.WorkspacePath); err != nil {
-			if s.cfg.Mode == "dev" {
-				return ExportResult{}, &RecoveryRequiredError{Cause: errors.Join(err, s.stopDevForRecovery(ctx))}
-			}
-			return ExportResult{}, err
+			return ExportResult{}, s.retainForExportFailure(ctx, err)
 		}
 	}
 	if err := s.verifyHostBaseline(); err != nil {
-		return ExportResult{}, err
+		return ExportResult{}, s.retainForExportFailure(ctx, err)
 	}
 	if err := s.stopChannels(ctx); err != nil {
-		return ExportResult{}, err
+		return ExportResult{}, s.retainForExportFailure(ctx, err)
 	}
 	alreadyFrozen, err := s.guestExportFrozen(ctx)
 	if err != nil {
-		return ExportResult{}, err
+		return ExportResult{}, s.retainForExportFailure(ctx, err)
 	}
 	if !alreadyFrozen {
 		if err := s.prepareGuestExport(ctx); err != nil {
-			return ExportResult{}, err
+			return ExportResult{}, s.retainForExportFailure(ctx, err)
 		}
 	}
 	if err := s.cfg.Runtime.Stop(ctx, s.Container); err != nil {
-		return ExportResult{}, fmt.Errorf("stop session VM for frozen export: %w", err)
+		return ExportResult{}, s.retainForExportFailure(ctx, fmt.Errorf("stop session VM for frozen export: %w", err))
 	}
 	s.paused = true
 	if stopped, err := s.cfg.Runtime.ContainerState(ctx, s.Container); err != nil || stopped != runtime.StateStopped {
-		return ExportResult{}, fmt.Errorf("VM is not frozen: state=%s error=%v", stopped, err)
+		return ExportResult{}, s.retainForExportFailure(ctx, fmt.Errorf("VM is not frozen: state=%s error=%v", stopped, err))
 	}
 	frozenOwnership = true
 	quarantine := filepath.Join(s.Root, "sunaba-quarantine-"+s.SessionID)
@@ -1281,6 +1281,17 @@ func (s *Session) StopAndExport(ctx context.Context) (result ExportResult, retur
 		return ExportResult{}, err
 	}
 	return ExportResult{Archive: archive, MergedRoot: merged.Root, Merged: partitionedResult.Core, ChangeSet: workSet.CoreChangeSet, WorkSet: workSet}, nil
+}
+
+// retainForExportFailure converts a pre-freeze export failure into a
+// recovery-required outcome. By the time it runs, the session's capabilities
+// are already irrevocably revoked, so the VM is stopped and retained for
+// explicit recovery instead of being destroyed with its unexported work.
+func (s *Session) retainForExportFailure(ctx context.Context, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &RecoveryRequiredError{Cause: errors.Join(cause, s.stopDevForRecovery(ctx))}
 }
 
 func (s *Session) verifyHostBaseline() error {

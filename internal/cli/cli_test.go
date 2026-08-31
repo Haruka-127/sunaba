@@ -917,6 +917,7 @@ type fakeSessionControlTarget struct {
 	exportErr          error
 	destroyErr         error
 	discardExternalGit bool
+	exportResult       session.ExportResult
 }
 
 func (f *fakeSessionControlTarget) Pause(context.Context) error { f.paused++; return nil }
@@ -926,7 +927,7 @@ func (f *fakeSessionControlTarget) ResumeWith(context.Context, session.Activatio
 }
 func (f *fakeSessionControlTarget) StopAndExport(context.Context) (session.ExportResult, error) {
 	f.exported++
-	return session.ExportResult{}, f.exportErr
+	return f.exportResult, f.exportErr
 }
 func (f *fakeSessionControlTarget) SetDiscardExternalGitForExport(discard bool) error {
 	f.discardExternalGit = discard
@@ -2106,6 +2107,90 @@ func TestExportDevRecoverySkipsReexportWhenPendingCommitted(t *testing.T) {
 	}
 	if fake2.removed {
 		t.Fatal("foreign pending authorized VM destruction")
+	}
+}
+
+func TestSupervisorExportRemovesFrozenRecordAfterPendingCommits(t *testing.T) {
+	storeRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(storeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: storeRoot}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "session1"
+	vmID := uniqueTestVMID(t)
+	projectID := state.ProjectID(projectRoot)
+	projectState := filepath.Join(storeRoot, "projects", projectID)
+	if err := os.MkdirAll(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeBase, err := recovery.NewSecureRuntimeBase(projectID, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestRuntime(t, runtimeBase)
+	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
+	snapshotRoot := filepath.Join(runtimeRoot, "snapshot")
+	mergedRoot := filepath.Join(runtimeRoot, "sunaba-quarantine-"+sessionID, "sunaba-merged-"+sessionID)
+	for _, directory := range []string{snapshotRoot, mergedRoot} {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(mergedRoot, "result.txt"), []byte("retained\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	projectPolicy := policy.ProjectPolicy{
+		ProjectID: projectID, ProjectRoot: projectRoot,
+		Export:         policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 64 << 20, MaxTotalBytes: 1 << 30},
+		ProtectedPaths: []string{".git", ".sunaba"},
+		Bulk:           workspace.DefaultBulkPolicyV1(),
+	}
+	compiled, err := policy.CompileWorkspacePolicy(projectPolicy.Export, projectPolicy.ProtectedPaths, nil, projectPolicy.Bulk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partitioned, baselineBulk, err := workspace.BuildPartitionedSnapshotManifest(projectRoot, compiled.Core.Snapshot, compiled.Bulk, compiled.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := partitioned.Core
+	baseline.Root = snapshotRoot
+	merged, err := workspace.BuildSnapshotManifest(mergedRoot, compiled.Core.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workSet, err := workspace.BuildPendingWorkSet(projectID, projectRoot, vmID, sessionID, compiled.Digest, partitioned.Core, merged, compiled.Core.Snapshot, compiled.Bulk, time.Now().UTC())
+	if err != nil || len(workSet.CoreChangeSet.Changes) == 0 {
+		t.Fatalf("workSet=%+v error=%v", workSet, err)
+	}
+	persistent := &session.Session{
+		ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: "sunaba-" + projectID + "-" + vmID,
+		Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: baselineBulk, SnapshotRoot: snapshotRoot, SnapshotPolicy: compiled.Core.Snapshot,
+		ExportPolicy: compiled.Core.Export, ExportPolicyDigest: compiled.Core.Digest, BulkPolicy: compiled.Bulk, WorkspacePolicyDigest: compiled.Digest,
+	}
+	target := &fakeSessionControlTarget{exportResult: session.ExportResult{MergedRoot: mergedRoot, Merged: merged, ChangeSet: workSet.CoreChangeSet, WorkSet: workSet}}
+	controlled := &controlledSession{active: target, persistent: persistent, projectState: projectState, state: "running", exit: make(chan struct{})}
+	if err := controlled.exportAndDestroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if controlled.state != "exported" || target.destroyed != 1 {
+		t.Fatalf("state=%s destroyed=%d", controlled.state, target.destroyed)
+	}
+	if _, err := loadPending(projectState, projectPolicy); err != nil {
+		t.Fatalf("pending was not committed: %v", err)
+	}
+	if _, err := os.Lstat(recovery.Path(projectState)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("frozen recovery record remained after a committed export: %v", err)
 	}
 }
 
