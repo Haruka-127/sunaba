@@ -227,3 +227,53 @@ func TestRecoveryRecordRoundTripsFrozenPendingExport(t *testing.T) {
 		t.Fatalf("loaded=%+v error=%v", loaded, err)
 	}
 }
+
+func TestRecoveryRecordSurvivesVanishedRuntimeBase(t *testing.T) {
+	projectState, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const projectID, sessionID = "0123456789ab", "session1"
+	vmID := uniqueTestVMID(t)
+	runtimeBase, err := NewRuntimeBase(projectState, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "snapshot"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, partitioned, bulk, compiled := recoveryFixture(t, projectRoot, runtimeRoot)
+	record := State{
+		Version: Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID,
+		Container: "sunaba-" + projectID + "-" + vmID, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot,
+		WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: bulk,
+		ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled,
+		Reason: "guard refused", CreatedAt: time.Now().UTC(),
+	}
+	if err := Save(projectState, record); err != nil {
+		t.Fatal(err)
+	}
+	// macOS periodically reclaims unused /private/tmp content; a vanished
+	// runtime must not turn the record into an undeletable lock.
+	if err := os.RemoveAll(runtimeBase); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(projectState)
+	if err != nil || loaded.Container != record.Container {
+		t.Fatalf("load after runtime cleanup error=%v", err)
+	}
+	if err := Remove(projectState, loaded); err != nil {
+		t.Fatalf("remove after runtime cleanup: %v", err)
+	}
+	if _, err := os.Lstat(Path(projectState)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record remained after removal: %v", err)
+	}
+}

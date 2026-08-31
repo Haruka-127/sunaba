@@ -41,6 +41,14 @@ func (a *app) exportDevRecovery(ctx context.Context, projectPolicy policy.Projec
 	if record.PendingExport != nil {
 		return a.persistFrozenRecovery(ctx, projectState, record, compiled, recorder)
 	}
+	// A destroy that removed the VM but crashed before removing the record
+	// leaves nothing to export; finish removing the record instead of failing
+	// every later command on a missing container.
+	if containerState, err := a.runtime.ContainerState(ctx, record.Container); err != nil {
+		return err
+	} else if containerState == runtime.StateNotFound {
+		return recovery.Remove(projectState, record)
+	}
 	boundary, err := devnetwork.ActivateQuiesced(ctx, a.store.Root, record.ProjectID, record.VMID)
 	if err != nil {
 		return fmt.Errorf("create deny-all network for stopped dev recovery export: %w", err)
@@ -158,6 +166,15 @@ func (a *app) discardDevRecovery(ctx context.Context, projectID, projectState st
 	}
 	if record.ProjectID != projectID {
 		return fmt.Errorf("dev recovery record does not match Project policy")
+	}
+	containerState, err := a.runtime.ContainerState(ctx, record.Container)
+	if err != nil {
+		return err
+	}
+	if containerState == runtime.StateNotFound {
+		// A previous discard removed the VM but did not finish removing its
+		// record. Finishing that removal must not require the VM to exist.
+		return recovery.Remove(projectState, record)
 	}
 	info, err := a.runtime.Inspect(ctx, record.Container)
 	if err != nil {

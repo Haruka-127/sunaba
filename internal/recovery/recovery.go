@@ -182,6 +182,9 @@ func Remove(projectState string, state State) error {
 	if err := os.Remove(Path(projectState)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := securefs.SyncDir(projectState); err != nil {
+		return err
+	}
 	info, err := os.Lstat(state.RuntimeBase)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -222,17 +225,31 @@ func validate(projectState string, state State) error {
 			return fmt.Errorf("dev recovery Bulk baseline is invalid")
 		}
 	}
-	if securefs.CheckCanonicalOwnedDir(state.RuntimeBase) != nil || securefs.CheckCanonicalOwnedDir(state.RuntimeRoot) != nil || securefs.CheckCanonicalOwnedDir(filepath.Join(state.RuntimeRoot, "snapshot")) != nil {
+	if checkOwnedDirIfExists(state.RuntimeBase) != nil || checkOwnedDirIfExists(state.RuntimeRoot) != nil || checkOwnedDirIfExists(filepath.Join(state.RuntimeRoot, "snapshot")) != nil {
 		return fmt.Errorf("dev recovery runtime is not a private current-user directory")
 	}
 	if state.PendingExport != nil {
 		expectedMergedRoot := filepath.Join(state.RuntimeRoot, "sunaba-quarantine-"+state.SessionID, "sunaba-merged-"+state.SessionID)
 		pending := state.PendingExport
-		if pending.MergedRoot != expectedMergedRoot || pending.WorkSet.ProjectID != state.ProjectID || pending.WorkSet.ProjectRoot != state.ProjectRoot || pending.WorkSet.VMID != state.VMID || pending.WorkSet.SessionID != state.SessionID || pending.WorkSet.WorkspacePolicyDigest != state.WorkspacePolicy.Digest || pending.WorkSet.Result.Core.Root != pending.MergedRoot || workspace.ValidatePendingWorkSet(pending.WorkSet, state.WorkspacePolicy.Core.Snapshot) != nil || securefs.CheckCanonicalOwnedDir(expectedMergedRoot) != nil {
+		if pending.MergedRoot != expectedMergedRoot || pending.WorkSet.ProjectID != state.ProjectID || pending.WorkSet.ProjectRoot != state.ProjectRoot || pending.WorkSet.VMID != state.VMID || pending.WorkSet.SessionID != state.SessionID || pending.WorkSet.WorkspacePolicyDigest != state.WorkspacePolicy.Digest || pending.WorkSet.Result.Core.Root != pending.MergedRoot || workspace.ValidatePendingWorkSet(pending.WorkSet, state.WorkspacePolicy.Core.Snapshot) != nil || checkOwnedDirIfExists(expectedMergedRoot) != nil {
 			return fmt.Errorf("dev recovery pending export is invalid")
 		}
 	}
 	return nil
+}
+
+// checkOwnedDirIfExists enforces the private-directory contract only while the
+// path still exists. macOS periodically reclaims unused /private/tmp content,
+// and a runtime directory removed that way must not turn its recovery record
+// into an undeletable lock that fails every Project command.
+func checkOwnedDirIfExists(path string) error {
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return securefs.CheckCanonicalOwnedDir(path)
 }
 
 func validateProjectState(projectState string) error {

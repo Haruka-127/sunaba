@@ -1282,6 +1282,60 @@ func TestExplicitDevRecoveryDiscardRequiresExactStoppedVMOwnership(t *testing.T)
 	}
 }
 
+func TestDiscardDevRecoveryFinishesWhenVMAlreadyRemoved(t *testing.T) {
+	storeRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	if err := os.Chmod(storeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.Store{Root: storeRoot}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, _ := filepath.EvalSymlinks(t.TempDir())
+	const projectID, sessionID = "0123456789ab", "session1"
+	vmID := uniqueTestVMID(t)
+	projectState := filepath.Join(storeRoot, "projects", projectID)
+	if err := os.MkdirAll(projectState, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectState, _ = filepath.EvalSymlinks(projectState)
+	runtimeBase, err := recovery.NewRuntimeBase(projectState, vmID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupTestRuntime(t, runtimeBase)
+	runtimeRoot := filepath.Join(runtimeBase, "sunaba-vm-"+vmID)
+	if err := os.MkdirAll(filepath.Join(runtimeRoot, "snapshot"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	export := policy.ExportPolicy{MaxEntries: 100_000, MaxFileBytes: 128 << 20, MaxTotalBytes: 2 << 30}
+	compiled, err := policy.CompileWorkspacePolicy(export, []string{".git", ".sunaba"}, nil, workspace.DefaultBulkPolicyV1())
+	if err != nil {
+		t.Fatal(err)
+	}
+	partitioned, baselineBulk, err := workspace.BuildPartitionedSnapshotManifest(projectRoot, compiled.Core.Snapshot, compiled.Bulk, compiled.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := partitioned.Core
+	baseline.Root = filepath.Join(runtimeRoot, "snapshot")
+	container := "sunaba-" + projectID + "-" + vmID
+	record := recovery.State{Version: recovery.Version, ProjectID: projectID, ProjectRoot: projectRoot, VMID: vmID, SessionID: sessionID, Container: container, RuntimeBase: runtimeBase, RuntimeRoot: runtimeRoot, WorkspacePath: "/workspace/sunaba-" + vmID, Baseline: baseline, BaselinePartitioned: partitioned, BaselineBulk: baselineBulk, ExportPolicyDigest: compiled.Core.Digest, WorkspacePolicy: compiled, Reason: "guard refused", CreatedAt: time.Now().UTC()}
+	if err := recovery.Save(projectState, record); err != nil {
+		t.Fatal(err)
+	}
+	// A previous discard removed the container but crashed before deleting the
+	// record; every later command must not wedge on the missing container.
+	fake := &discardRecoveryRuntime{info: runtime.Info{Name: container, State: runtime.StateStopped, Labels: map[string]string{"dev.sunaba.owner": "sunaba-supervisor", "dev.sunaba.project": projectID, "dev.sunaba.vm": vmID, "dev.sunaba.mode": "dev"}}, removed: true}
+	a := &app{store: store, runtime: fake, output: io.Discard, errors: io.Discard}
+	if err := a.discardDevRecovery(context.Background(), projectID, projectState); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(recovery.Path(projectState)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale recovery record remained: %v", err)
+	}
+}
+
 func TestExplicitDiscardRemovesUnrecordedStoppedSecureVM(t *testing.T) {
 	storeRoot, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
