@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1033,6 +1034,23 @@ func reviewDiffRows(screen workspace.ReviewScreen) []hosttui.DiffRow {
 		empty := hosttui.DiffCell{Kind: "empty"}
 		rows = append(rows, hosttui.DiffRow{Kind: "hunk", Header: "Content not rendered: " + screen.Item.OpaqueReason, Before: empty, After: empty})
 	}
+	if len(rows) == 0 && screen.Item.Change.After != nil && screen.Item.Change.After.Type == workspace.TypeSymlink {
+		empty := hosttui.DiffCell{Kind: "empty"}
+		target := screen.Item.Change.After.LinkTarget
+		if screen.Item.Change.Before != nil && screen.Item.Change.Before.Type == workspace.TypeSymlink {
+			previous := screen.Item.Change.Before.LinkTarget
+			rows = append(rows,
+				hosttui.DiffRow{Kind: "content", Before: hosttui.DiffCell{Kind: "delete", Text: "link -> " + terminal.SingleLine(previous)}, After: empty},
+				hosttui.DiffRow{Kind: "content", Before: empty, After: hosttui.DiffCell{Kind: "add", Text: "link -> " + terminal.SingleLine(target)}},
+			)
+		} else {
+			rows = append(rows, hosttui.DiffRow{Kind: "content", Before: empty, After: hosttui.DiffCell{Kind: "add", Text: "link -> " + terminal.SingleLine(target)}})
+		}
+	}
+	if len(rows) == 0 && screen.Item.Change.After == nil && screen.Item.Change.Before != nil && screen.Item.Change.Before.Type == workspace.TypeSymlink {
+		empty := hosttui.DiffCell{Kind: "empty"}
+		rows = append(rows, hosttui.DiffRow{Kind: "content", Before: hosttui.DiffCell{Kind: "delete", Text: "link -> " + terminal.SingleLine(screen.Item.Change.Before.LinkTarget)}, After: empty})
+	}
 	return rows
 }
 
@@ -1068,6 +1086,15 @@ func reviewChangesView(screen workspace.ReviewScreen, visible []workspace.Review
 		}
 		if len(file.Risks) > 0 {
 			detail = strings.TrimSpace(detail + " RISK: " + strings.Join(file.Risks, ", "))
+		}
+		if file.Type == workspace.TypeSymlink {
+			target := file.LinkTarget
+			if file.PreviousLinkTarget != "" && file.PreviousLinkTarget != file.LinkTarget {
+				target = file.PreviousLinkTarget + " -> " + file.LinkTarget
+			}
+			if target != "" {
+				detail = strings.TrimSpace(detail + " symlink target=" + strconv.Quote(terminal.SingleLine(target)))
+			}
 		}
 		if file.OpaqueReason != "" {
 			detail = strings.TrimSpace(detail + fmt.Sprintf(" type=%s size=%d sha256=%s reason=%s", file.Type, file.Size, file.SHA256, file.OpaqueReason))

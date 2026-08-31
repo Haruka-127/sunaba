@@ -38,3 +38,36 @@ func TestBuildReviewScreenRejectsUnknownSelectionAndInvalidWidth(t *testing.T) {
 		t.Fatal("unknown selected path was accepted")
 	}
 }
+
+func TestBuildReviewScreenDisclosesSymlinkTargets(t *testing.T) {
+	review := Review{ChangeSetDigest: strings.Repeat("a", 64), Items: []ReviewItem{
+		{Change: Change{Kind: ChangeAdd, Path: "added-link", After: &SnapshotEntry{Path: "added-link", Type: TypeSymlink, LinkTarget: "../../../.ssh/id_ed25519"}}, Symlink: true},
+		{Change: Change{Kind: ChangeModify, Path: "retargeted-link", Before: &SnapshotEntry{Path: "retargeted-link", Type: TypeSymlink, LinkTarget: "docs"}, After: &SnapshotEntry{Path: "retargeted-link", Type: TypeSymlink, LinkTarget: "/etc/passwd"}}, Symlink: true},
+		{Change: Change{Kind: ChangeDelete, Path: "removed-link", Before: &SnapshotEntry{Path: "removed-link", Type: TypeSymlink, LinkTarget: "old-target"}}, Symlink: true},
+	}}
+	screen, err := BuildReviewScreen(review, 80, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if screen.Files[0].LinkTarget != "../../../.ssh/id_ed25519" || screen.Files[0].PreviousLinkTarget != "" {
+		t.Fatalf("added symlink target=%+v", screen.Files[0])
+	}
+	if screen.Files[1].LinkTarget != "/etc/passwd" || screen.Files[1].PreviousLinkTarget != "docs" {
+		t.Fatalf("retargeted symlink=%+v", screen.Files[1])
+	}
+	if !contains(screen.Files[1].Risks, "symlink-target-change") || contains(screen.Files[0].Risks, "symlink-target-change") {
+		t.Fatalf("target-change classification=%+v %+v", screen.Files[0].Risks, screen.Files[1].Risks)
+	}
+	if screen.Files[2].LinkTarget != "" || screen.Files[2].PreviousLinkTarget != "old-target" {
+		t.Fatalf("deleted symlink=%+v", screen.Files[2])
+	}
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

@@ -15,14 +15,16 @@ const (
 )
 
 type ReviewFile struct {
-	Status       string
-	Path         string
-	From         string
-	Risks        []string
-	Type         EntryType
-	Size         int64
-	SHA256       string
-	OpaqueReason string
+	Status             string
+	Path               string
+	From               string
+	Risks              []string
+	Type               EntryType
+	Size               int64
+	SHA256             string
+	LinkTarget         string
+	PreviousLinkTarget string
+	OpaqueReason       string
 }
 
 type UnifiedReviewRow struct {
@@ -91,6 +93,12 @@ func reviewFile(item ReviewItem) ReviewFile {
 	if entry != nil {
 		file.Type, file.Size, file.SHA256 = entry.Type, entry.Size, entry.SHA256
 	}
+	if item.Change.After != nil && item.Change.After.Type == TypeSymlink {
+		file.LinkTarget = item.Change.After.LinkTarget
+	}
+	if item.Change.Before != nil && item.Change.Before.Type == TypeSymlink {
+		file.PreviousLinkTarget = item.Change.Before.LinkTarget
+	}
 	if item.Executable {
 		file.Risks = append(file.Risks, "executable")
 	}
@@ -105,6 +113,11 @@ func reviewFile(item ReviewItem) ReviewFile {
 	}
 	if item.Change.Before != nil && item.Change.After != nil && item.Change.Before.Mode != item.Change.After.Mode {
 		file.Risks = append(file.Risks, "mode-change")
+	}
+	if item.Change.Before != nil && item.Change.After != nil &&
+		item.Change.Before.Type == TypeSymlink && item.Change.After.Type == TypeSymlink &&
+		item.Change.Before.LinkTarget != item.Change.After.LinkTarget {
+		file.Risks = append(file.Risks, "symlink-target-change")
 	}
 	return file
 }
