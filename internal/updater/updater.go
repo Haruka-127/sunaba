@@ -34,7 +34,10 @@ const (
 	maxCandidateBytes      = 2 << 20
 )
 
-var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var (
+	digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	idPattern     = regexp.MustCompile(`^[0-9a-f]{32}$`)
+)
 
 type CandidateArtifact struct {
 	RelativePath string `json:"relative_path"`
@@ -97,7 +100,7 @@ func (c Candidate) Validate() error {
 	return nil
 }
 
-func (s Service) Check(ctx context.Context, config versionconfig.Config, current versionconfig.Lock, store *Store) (Candidate, error) {
+func (s Service) Check(ctx context.Context, config versionconfig.Config, current versionconfig.Lock, store *Store) (candidate Candidate, returnErr error) {
 	if err := config.Validate(); err != nil {
 		return Candidate{}, err
 	}
@@ -133,6 +136,14 @@ func (s Service) Check(ctx context.Context, config versionconfig.Config, current
 	if err := ensurePrivateDirectory(artifactDirectory); err != nil {
 		return Candidate{}, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			if removeErr := os.RemoveAll(artifactDirectory); removeErr != nil {
+				returnErr = errors.Join(returnErr, fmt.Errorf("remove failed update artifacts at %s: %w", artifactDirectory, removeErr))
+			}
+		}
+	}()
 	hostPath := filepath.Join(artifactDirectory, hostName)
 	guestPath := filepath.Join(artifactDirectory, guestName)
 	hostURL := artifactURL(version, hostName)
@@ -166,7 +177,7 @@ func (s Service) Check(ctx context.Context, config versionconfig.Config, current
 		now = s.Now().UTC()
 	}
 	root, _ := store.root()
-	candidate := Candidate{
+	candidate = Candidate{
 		SchemaVersion: CandidateSchemaVersion, ID: id, CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour),
 		ConfigSHA256: configDigest, CurrentLockSHA256: lockDigest, Target: target,
 		HostArtifact:  CandidateArtifact{RelativePath: relativeTo(root, hostPath), SHA256: hostDigest},
@@ -175,6 +186,7 @@ func (s Service) Check(ctx context.Context, config versionconfig.Config, current
 	if err := store.Save(candidate); err != nil {
 		return Candidate{}, err
 	}
+	committed = true
 	return candidate, nil
 }
 
@@ -337,7 +349,7 @@ func (s *Store) root() (string, error) {
 }
 
 func (s *Store) ArtifactDirectory(id string) (string, error) {
-	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(id) {
+	if !idPattern.MatchString(id) {
 		return "", fmt.Errorf("candidate ID is invalid")
 	}
 	root, err := s.root()
@@ -359,7 +371,50 @@ func (s *Store) Save(candidate Candidate) error {
 	if err != nil {
 		return err
 	}
-	return savePrivateJSON(filepath.Join(root, "candidate.json"), candidate)
+	if err := savePrivateJSON(filepath.Join(root, "candidate.json"), candidate); err != nil {
+		return err
+	}
+	return s.pruneArtifacts(root, candidate.ID)
+}
+
+// ClearApplied removes the applied candidate and every quarantined artifact so
+// that finished update transactions do not leave download artifacts behind.
+func (s *Store) ClearApplied() error {
+	root, err := s.root()
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(root, "artifacts")); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(root, "candidate.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) pruneArtifacts(root, keepID string) error {
+	if !idPattern.MatchString(keepID) {
+		return fmt.Errorf("candidate ID is invalid")
+	}
+	artifacts := filepath.Join(root, "artifacts")
+	entries, err := os.ReadDir(artifacts)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == keepID || !entry.IsDir() || !idPattern.MatchString(name) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(artifacts, name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Load() (Candidate, error) {

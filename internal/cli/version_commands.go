@@ -257,6 +257,10 @@ func (a *app) updateApply(ctx context.Context) error {
 	if err := a.commitDependencyUpdate(current, newLock, sourceActive, projects); err != nil {
 		return err
 	}
+	if err := candidateStore.ClearApplied(); err != nil {
+		fmt.Fprintf(a.output, "Applied OpenCode %s, but removing the used quarantine artifacts failed: %v\n", candidate.Target.OpenCode.Version, err)
+		return nil
+	}
 	fmt.Fprintf(a.output, "Applied OpenCode %s. %d Project policy file(s) now use generation %d.\n", candidate.Target.OpenCode.Version, len(projects), newLock.Generation)
 	return nil
 }
